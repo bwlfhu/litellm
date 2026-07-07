@@ -3,11 +3,14 @@ Tests for AnthropicResponsesStreamWrapper
 (litellm/llms/anthropic/experimental_pass_through/responses_adapters/streaming_iterator.py)
 """
 
-import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../..")))
+import pytest
+
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../.."))
+)
 
 from litellm.llms.anthropic.experimental_pass_through.responses_adapters.streaming_iterator import (
     AnthropicResponsesStreamWrapper,
@@ -21,58 +24,25 @@ def _process_all(events: list) -> list:
     return list(wrapper._chunk_queue)
 
 
-def _drain_async(events: list) -> list:
-    async def _gen():
-        for event in events:
-            yield event
+class _FakeResponsesStream:
+    def __init__(self, events: list) -> None:
+        self._it = iter(events)
 
-    async def _run() -> list:
-        wrapper = AnthropicResponsesStreamWrapper(responses_stream=_gen(), model="m")
-        return [chunk async for chunk in wrapper]
+    def __aiter__(self):
+        return self
 
-    return asyncio.run(_run())
-
-
-class TestMessageStartEmittedExactlyOnce:
-    """The ``__anext__`` fallback emits ``message_start`` before consuming the
-    stream, so ``_process_event`` must not emit a second one when
-    ``response.created`` later arrives. Two ``message_start`` events (byte
-    identical, same id) break strict Anthropic SDK clients (e.g. Claude Code)
-    with 'Content block is not a thinking block' once thinking blocks follow."""
-
-    def test_response_created_does_not_duplicate_message_start(self):
-        chunks = _drain_async(
-            [
-                {"type": "response.created"},
-                {"type": "response.output_text.delta", "item_id": "m1", "delta": "hi"},
-            ]
-        )
-        message_starts = [c for c in chunks if c["type"] == "message_start"]
-        assert len(message_starts) == 1
-
-    def test_message_start_is_first_event(self):
-        chunks = _drain_async([{"type": "response.created"}])
-        assert chunks[0]["type"] == "message_start"
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
 
 
-class TestProcessEventResponseCreatedGuard:
-    """``_process_event`` must emit ``message_start`` exactly once even if
-    ``response.created`` arrives more than once. The guard mirrors the
-    ``__anext__`` fallback's ``_sent_message_start`` flag, so a direct caller
-    and the async fallback can never double-emit. This also exercises the
-    guard's emit-branch, which the async path never reaches because the
-    fallback sets the flag before the upstream stream is consumed."""
-
-    def test_first_response_created_emits_message_start(self):
-        chunks = _process_all([{"type": "response.created"}])
-        assert len(chunks) == 1
-        assert chunks[0]["type"] == "message_start"
-        assert chunks[0]["message"]["model"] == "m"
-
-    def test_second_response_created_is_skipped(self):
-        chunks = _process_all([{"type": "response.created"}, {"type": "response.created"}])
-        message_starts = [c for c in chunks if c["type"] == "message_start"]
-        assert len(message_starts) == 1
+async def _drain(events: list) -> list:
+    wrapper = AnthropicResponsesStreamWrapper(
+        responses_stream=_FakeResponsesStream(events), model="m"
+    )
+    return [chunk async for chunk in wrapper]
 
 
 class TestProcessEventTextDeltaWithoutOutputItemAdded:
@@ -112,9 +82,15 @@ class TestProcessEventTextDeltaWithoutOutputItemAdded:
                 {"type": "response.output_text.delta", "item_id": "m1", "delta": "Hi"},
             ]
         )
-        assert chunks[1]["type"] == "content_block_start"
-        assert chunks[1]["content_block"] == {"type": "text", "text": ""}
-        assert [c["index"] for c in chunks[1:]] == [1, 1]
+        assert [c["type"] for c in chunks] == [
+            "content_block_start",
+            "content_block_stop",
+            "content_block_start",
+            "content_block_delta",
+        ]
+        assert chunks[0]["content_block"] == {"type": "thinking", "thinking": ""}
+        assert chunks[2]["content_block"] == {"type": "text", "text": ""}
+        assert [c["index"] for c in chunks] == [0, 0, 1, 1]
 
     def test_process_event_registered_item_id_does_not_synthesize_start(self):
         chunks = _process_all(
@@ -130,3 +106,86 @@ class TestProcessEventTextDeltaWithoutOutputItemAdded:
             ("content_block_start", 0),
             ("content_block_delta", 0),
         ]
+
+
+def _reasoning_first_bridge_events() -> list:
+    """The event sequence a chat-completions -> Responses API bridge emits for
+    an OpenAI-compatible reasoning backend: a message output item is announced
+    first (from the role-only chunk), reasoning arrives as
+    reasoning_summary_text.delta events with unrelated item_ids, then the text
+    answer arrives on the message item."""
+    return [
+        {"type": "response.created"},
+        {"type": "response.in_progress"},
+        {"type": "response.output_item.added", "item": {"type": "message", "id": "msg_1"}},
+        {"type": "response.content_part.added", "item_id": "msg_1"},
+        {"type": "response.reasoning_summary_text.delta", "item_id": "rs_a", "delta": "I"},
+        {"type": "response.reasoning_summary_text.delta", "item_id": "rs_b", "delta": " am"},
+        {"type": "response.reasoning_summary_text.delta", "item_id": "rs_c", "delta": " thinking"},
+        {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "OK"},
+        {"type": "response.output_text.done", "item_id": "msg_1"},
+        {"type": "response.content_part.done", "item_id": "msg_1"},
+        {"type": "response.output_item.done", "item": {"type": "message", "id": "msg_1"}},
+        {"type": "response.completed"},
+    ]
+
+
+class TestReasoningContentIsNotStreamedIntoTextBlock:
+    """Regression tests for https://github.com/BerriAI/litellm/issues/32357"""
+
+    @pytest.mark.asyncio
+    async def test_message_start_emitted_exactly_once(self):
+        events = _reasoning_first_bridge_events()
+        events.insert(1, {"type": "response.created"})
+        chunks = await _drain(events)
+        assert [c["type"] for c in chunks].count("message_start") == 1
+
+    @pytest.mark.asyncio
+    async def test_reasoning_streams_into_its_own_thinking_block(self):
+        chunks = await _drain(_reasoning_first_bridge_events())
+
+        assert [c["type"] for c in chunks] == [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_stop",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+
+        thinking_block = chunks[1]
+        assert thinking_block["content_block"] == {"type": "thinking", "thinking": ""}
+        assert thinking_block["index"] == 0
+        assert [c["delta"]["type"] for c in chunks[2:5]] == [
+            "thinking_delta",
+            "thinking_delta",
+            "thinking_delta",
+        ]
+        assert all(c["index"] == 0 for c in chunks[2:5])
+
+        text_block = chunks[6]
+        assert text_block["content_block"] == {"type": "text", "text": ""}
+        assert text_block["index"] == 1
+        assert chunks[7]["delta"] == {"type": "text_delta", "text": "OK"}
+        assert chunks[7]["index"] == 1
+
+    @pytest.mark.asyncio
+    async def test_no_thinking_delta_is_ever_emitted_into_a_text_block(self):
+        chunks = await _drain(_reasoning_first_bridge_events())
+
+        text_block_indexes = {
+            c["index"]
+            for c in chunks
+            if c["type"] == "content_block_start" and c["content_block"]["type"] == "text"
+        }
+        thinking_delta_indexes = {
+            c["index"]
+            for c in chunks
+            if c["type"] == "content_block_delta" and c["delta"]["type"] == "thinking_delta"
+        }
+        assert text_block_indexes.isdisjoint(thinking_delta_indexes)
