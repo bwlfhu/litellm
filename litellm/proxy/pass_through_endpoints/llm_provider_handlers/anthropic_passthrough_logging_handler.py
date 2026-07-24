@@ -833,15 +833,19 @@ class AnthropicPassthroughLoggingHandler:
                 )
                 unified_object_id = base64.urlsafe_b64encode(unified_id_string.encode()).decode().rstrip("=")
 
-                # Store the managed object for cost tracking
-                # This will be picked up by check_batch_cost polling mechanism
-                AnthropicPassthroughLoggingHandler._store_batch_managed_object(
-                    unified_object_id=unified_object_id,
-                    batch_object=litellm_batch_response,
-                    model_object_id=batch_id,
-                    logging_obj=logging_obj,
-                    **kwargs,
-                )
+                # Register the managed object for cost tracking only on batch creation.
+                # Create POSTs to .../messages/batches; a poll or retrieve targets
+                # .../messages/batches/{id}. Registering on a poll would stamp the row with
+                # the polling caller's identity and could win the create race, permanently
+                # attributing the batch spend to the poller instead of the creator.
+                if url_route.split("?")[0].rstrip("/").endswith("batches"):
+                    AnthropicPassthroughLoggingHandler._store_batch_managed_object(
+                        unified_object_id=unified_object_id,
+                        batch_object=litellm_batch_response,
+                        model_object_id=batch_id,
+                        logging_obj=logging_obj,
+                        **kwargs,
+                    )
 
                 # Create a batch job response for logging
                 litellm_model_response = ModelResponse()

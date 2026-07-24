@@ -112,6 +112,52 @@ class TestVertexAIBatchPassthroughHandler:
                         mock_get_model_id.assert_called_once()
                         mock_store.assert_called_once()
 
+    def test_batch_prediction_jobs_handler_retrieve_does_not_register(
+        self, mock_httpx_response, mock_logging_obj
+    ):
+        """A GET poll/retrieve of a batch job returns 200 with a name too, but only the create
+        POST may register the managed object; registering on a poll would stamp the row with the
+        polling caller's identity and could win the create race, attributing spend to the poller."""
+        with (
+            patch(
+                "litellm.proxy.pass_through_endpoints.llm_provider_handlers.vertex_passthrough_logging_handler.verbose_proxy_logger"
+            ),
+            patch(
+                "litellm.proxy.pass_through_endpoints.llm_provider_handlers.vertex_passthrough_logging_handler.VertexPassthroughLoggingHandler.get_actual_model_id_from_router",
+                return_value="vertex_ai/gemini-1.5-flash",
+            ),
+            patch(
+                "litellm.proxy.pass_through_endpoints.llm_provider_handlers.vertex_passthrough_logging_handler.VertexPassthroughLoggingHandler._store_batch_managed_object"
+            ) as mock_store,
+            patch(
+                "litellm.llms.vertex_ai.batches.transformation.VertexAIBatchTransformation"
+            ) as mock_transformation,
+        ):
+            mock_transformation.transform_vertex_ai_batch_response_to_openai_batch_response.return_value = {
+                "id": "123456789",
+                "object": "batch",
+                "status": "in_progress",
+                "created_at": 1704067200,
+                "input_file_id": "file-123",
+                "completion_window": "24h",
+            }
+            mock_transformation._get_batch_id_from_vertex_ai_batch_response.return_value = (
+                "123456789"
+            )
+
+            VertexPassthroughLoggingHandler.batch_prediction_jobs_handler(
+                httpx_response=mock_httpx_response,
+                logging_obj=mock_logging_obj,
+                url_route="/v1/projects/test-project/locations/us-central1/batchPredictionJobs/123456789",
+                result="success",
+                start_time=datetime.now(),
+                end_time=datetime.now(),
+                cache_hit=False,
+                user_api_key_dict={"user_id": "poller"},
+            )
+
+            mock_store.assert_not_called()
+
     def test_batch_prediction_jobs_handler_failure(self, mock_logging_obj):
         """Test batch job creation failure handling"""
         # Mock failed response
