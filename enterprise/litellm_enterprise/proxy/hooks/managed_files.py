@@ -185,21 +185,24 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
             litellm_parent_otel_span=litellm_parent_otel_span,
         )
 
+        # user_api_key and request_tags are optional columns; omit them when unset rather
+        # than passing None, which prisma rejects for the Json request_tags field
+        create_data = {
+            "unified_object_id": unified_object_id,
+            "file_object": file_object.model_dump_json(),
+            "model_object_id": model_object_id,
+            "file_purpose": file_purpose,
+            "created_by": user_api_key_dict.user_id,
+            "team_id": user_api_key_dict.team_id,
+            "updated_by": user_api_key_dict.user_id,
+            "status": file_object.status,
+            **({"user_api_key": user_api_key} if user_api_key is not None else {}),
+            **({"request_tags": Json(request_tags)} if request_tags else {}),
+        }
         await self.prisma_client.db.litellm_managedobjecttable.upsert(
             where={"unified_object_id": unified_object_id},
             data={
-                "create": {
-                    "unified_object_id": unified_object_id,
-                    "file_object": file_object.model_dump_json(),
-                    "model_object_id": model_object_id,
-                    "file_purpose": file_purpose,
-                    "created_by": user_api_key_dict.user_id,
-                    "team_id": user_api_key_dict.team_id,
-                    "user_api_key": user_api_key,
-                    "request_tags": Json(request_tags) if request_tags else None,
-                    "updated_by": user_api_key_dict.user_id,
-                    "status": file_object.status,
-                },
+                "create": create_data,
                 "update": {
                     "file_object": file_object.model_dump_json(),
                     "status": file_object.status,

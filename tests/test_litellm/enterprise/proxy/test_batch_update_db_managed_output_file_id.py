@@ -357,3 +357,30 @@ async def test_store_unified_object_id_update_branch_never_carries_attribution()
     assert "request_tags" not in upsert_data["update"]
     assert "created_by" not in upsert_data["update"]
     assert "team_id" not in upsert_data["update"]
+
+
+@pytest.mark.asyncio
+async def test_store_unified_object_id_omits_unset_attribution_columns():
+    """A batch created with no tags (the common case) must still register; the optional
+    request_tags/user_api_key columns are omitted rather than passed as None, which prisma
+    rejects for the Json request_tags field
+    """
+    instance, store = _in_memory_managed_files()
+    creator = UserAPIKeyAuth(user_id="alice", team_id="team-alice", api_key=None)
+
+    await instance.store_unified_object_id(
+        unified_object_id="unified-b",
+        file_object=_build_batch_response(batch_id="b", status="validating"),
+        litellm_parent_otel_span=None,
+        model_object_id="b",
+        file_purpose="batch",
+        user_api_key_dict=creator,
+        request_tags=None,
+    )
+
+    create_data = instance.prisma_client.db.litellm_managedobjecttable.upsert.call_args.kwargs[
+        "data"
+    ]["create"]
+    assert "request_tags" not in create_data
+    assert "user_api_key" not in create_data
+    assert "unified-b" in store
