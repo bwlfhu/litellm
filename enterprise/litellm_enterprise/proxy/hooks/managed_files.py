@@ -166,6 +166,7 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
         file_purpose: Literal["batch", "fine-tune", "response"],
         user_api_key_dict: UserAPIKeyAuth,
         request_tags: Optional[List[str]] = None,
+        claim_attribution: bool = False,
     ) -> None:
         verbose_logger.info(
             f"Storing LiteLLM Managed {file_purpose} object with id={unified_object_id} in cache"
@@ -209,7 +210,7 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
             },
         )
 
-        if file_purpose == "batch" and api_key is not None:
+        if claim_attribution and file_purpose == "batch" and api_key is not None:
             await self.prisma_client.db.litellm_managedobjecttable.update_many(
                 where={"unified_object_id": unified_object_id, "api_key": None},
                 data={

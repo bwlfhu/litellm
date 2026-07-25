@@ -427,11 +427,44 @@ async def test_store_unified_object_id_create_fills_a_blank_poll_first_row():
         file_purpose="batch",
         user_api_key_dict=creator,
         request_tags=["prod"],
+        claim_attribution=True,
     )
 
     assert store["unified-b"]["api_key"] == "hash-alice"
     assert store["unified-b"]["created_by"] == "alice"
     assert store["unified-b"]["team_id"] == "team-alice"
+
+
+@pytest.mark.asyncio
+async def test_store_unified_object_id_non_authoritative_caller_cannot_claim_blank_row():
+    """Only the passthrough create (claim_attribution=True) may fill a blank row. A caller that
+    carries a real key but is not the authoritative create (e.g. the managed-files retrieve hook,
+    claim_attribution defaults False) must not claim a blank batch's attribution."""
+    instance, store = _in_memory_managed_files()
+    poller = UserAPIKeyAuth(user_id=None, team_id=None, api_key=None)
+    retriever = UserAPIKeyAuth(user_id="bob", team_id="team-bob", api_key="hash-bob")
+
+    await instance.store_unified_object_id(
+        unified_object_id="unified-b",
+        file_object=_build_batch_response(batch_id="b", status="validating"),
+        litellm_parent_otel_span=None,
+        model_object_id="b",
+        file_purpose="batch",
+        user_api_key_dict=poller,
+        request_tags=None,
+    )
+    await instance.store_unified_object_id(
+        unified_object_id="unified-b",
+        file_object=_build_batch_response(batch_id="b", status="in_progress"),
+        litellm_parent_otel_span=None,
+        model_object_id="b",
+        file_purpose="batch",
+        user_api_key_dict=retriever,
+        request_tags=["retriever-tag"],
+    )
+
+    assert store["unified-b"].get("api_key") is None
+    assert store["unified-b"].get("created_by") is None
 
 
 @pytest.mark.asyncio
@@ -451,6 +484,7 @@ async def test_store_unified_object_id_create_does_not_overwrite_existing_creato
             file_purpose="batch",
             user_api_key_dict=auth,
             request_tags=["prod"],
+            claim_attribution=True,
         )
 
     assert store["unified-b"]["api_key"] == "hash-alice"

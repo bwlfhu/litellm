@@ -28,6 +28,7 @@ class _StoreUnifiedObjectHook(Protocol):
         file_purpose: str,
         user_api_key_dict: "UserAPIKeyAuth",
         request_tags: list[str] | None,
+        claim_attribution: bool,
     ) -> None: ...
 
 
@@ -38,8 +39,6 @@ def _optional_str(value: object) -> str | None:
 def _optional_str_list(value: object) -> list[str] | None:
     if isinstance(value, list):
         items = cast(list[object], value)  # cast-ok: isinstance-narrowed; element type unknown
-        # String-only, matching the auth-time tag semantics; a non-string tag is not
-        # budget-checked at auth, so coercing it here would attribute spend to an ungated tag
         return [tag for tag in items if isinstance(tag, str)]
     return None
 
@@ -119,6 +118,7 @@ def store_batch_managed_object(
                 file_purpose="batch",
                 user_api_key_dict=user_api_key_dict,
                 request_tags=request_tags,
+                claim_attribution=persist_attribution,
             )
         )
 
