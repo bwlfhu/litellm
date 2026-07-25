@@ -278,9 +278,20 @@ def _in_memory_managed_files():
         row = store.get(where["unified_object_id"])
         return SimpleNamespace(**row) if row is not None else None
 
+    async def _update_many(where, data):
+        row = store.get(where["unified_object_id"])
+        if row is None:
+            return 0
+        for k, v in where.items():
+            if k != "unified_object_id" and row.get(k) != v:
+                return 0
+        row.update(data)
+        return 1
+
     table = MagicMock()
     table.upsert = AsyncMock(side_effect=_upsert)
     table.find_first = AsyncMock(side_effect=_find_first)
+    table.update_many = AsyncMock(side_effect=_update_many)
     prisma = MagicMock()
     prisma.db.litellm_managedobjecttable = table
 
@@ -384,3 +395,63 @@ async def test_store_unified_object_id_omits_unset_attribution_columns():
     assert "request_tags" not in create_data
     assert "api_key" not in create_data
     assert "unified-b" in store
+
+
+@pytest.mark.asyncio
+async def test_store_unified_object_id_create_fills_a_blank_poll_first_row():
+    """If a poll self-heals a blank row before the fire-and-forget create store runs, the create
+    store must still claim it: the creator's identity fills the row when api_key is NULL, so a
+    poll-first insert does not permanently block creator attribution."""
+    instance, store = _in_memory_managed_files()
+    poller = UserAPIKeyAuth(user_id=None, team_id=None, api_key=None)
+    creator = UserAPIKeyAuth(user_id="alice", team_id="team-alice", api_key="hash-alice")
+
+    # poll registers a blank row first
+    await instance.store_unified_object_id(
+        unified_object_id="unified-b",
+        file_object=_build_batch_response(batch_id="b", status="validating"),
+        litellm_parent_otel_span=None,
+        model_object_id="b",
+        file_purpose="batch",
+        user_api_key_dict=poller,
+        request_tags=None,
+    )
+    assert store["unified-b"].get("api_key") is None
+
+    # the delayed create store fills the blank row with the creator's identity
+    await instance.store_unified_object_id(
+        unified_object_id="unified-b",
+        file_object=_build_batch_response(batch_id="b", status="in_progress"),
+        litellm_parent_otel_span=None,
+        model_object_id="b",
+        file_purpose="batch",
+        user_api_key_dict=creator,
+        request_tags=["prod"],
+    )
+
+    assert store["unified-b"]["api_key"] == "hash-alice"
+    assert store["unified-b"]["created_by"] == "alice"
+    assert store["unified-b"]["team_id"] == "team-alice"
+
+
+@pytest.mark.asyncio
+async def test_store_unified_object_id_create_does_not_overwrite_existing_creator():
+    """The fill-if-empty update must not touch a row that already has a creator: a second create
+    for the same batch with a different key leaves the original api_key/created_by untouched."""
+    instance, store = _in_memory_managed_files()
+    first = UserAPIKeyAuth(user_id="alice", team_id="team-alice", api_key="hash-alice")
+    second = UserAPIKeyAuth(user_id="bob", team_id="team-bob", api_key="hash-bob")
+
+    for auth in (first, second):
+        await instance.store_unified_object_id(
+            unified_object_id="unified-b",
+            file_object=_build_batch_response(batch_id="b", status="validating"),
+            litellm_parent_otel_span=None,
+            model_object_id="b",
+            file_purpose="batch",
+            user_api_key_dict=auth,
+            request_tags=["prod"],
+        )
+
+    assert store["unified-b"]["api_key"] == "hash-alice"
+    assert store["unified-b"]["created_by"] == "alice"

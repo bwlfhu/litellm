@@ -833,11 +833,6 @@ class AnthropicPassthroughLoggingHandler:
                 )
                 unified_object_id = base64.urlsafe_b64encode(unified_id_string.encode()).decode().rstrip("=")
 
-                # Register the managed object for cost tracking. Only the create request
-                # writes the creator's identity: create POSTs to .../messages/batches, a poll
-                # or retrieve targets .../messages/batches/{id}. A poll still registers the
-                # batch if it was never recorded (self-heal), but with persist_attribution False
-                # it never writes the identity columns, so it cannot stamp its own key.
                 is_batch_create = url_route.split("?")[0].rstrip("/").endswith("batches")
                 AnthropicPassthroughLoggingHandler._store_batch_managed_object(
                     unified_object_id=unified_object_id,

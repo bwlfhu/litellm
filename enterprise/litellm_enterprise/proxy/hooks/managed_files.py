@@ -185,8 +185,6 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
             litellm_parent_otel_span=litellm_parent_otel_span,
         )
 
-        # api_key and request_tags are optional columns; omit them when unset rather
-        # than passing None, which prisma rejects for the Json request_tags field
         create_data = {
             "unified_object_id": unified_object_id,
             "file_object": file_object.model_dump_json(),
@@ -210,6 +208,17 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
                 },
             },
         )
+
+        if file_purpose == "batch" and api_key is not None:
+            await self.prisma_client.db.litellm_managedobjecttable.update_many(
+                where={"unified_object_id": unified_object_id, "api_key": None},
+                data={
+                    "created_by": user_api_key_dict.user_id,
+                    "team_id": user_api_key_dict.team_id,
+                    "api_key": api_key,
+                    **({"request_tags": Json(request_tags)} if request_tags else {}),
+                },
+            )
 
     async def get_unified_file_id(
         self, file_id: str, litellm_parent_otel_span: Optional[Span] = None
