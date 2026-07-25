@@ -555,13 +555,11 @@ class HttpPassThroughEndpointHelpers(BasePassthroughUtils):
         # real parent span.
         _metadata["user_api_key"] = user_api_key_dict.api_key
         _metadata["litellm_parent_otel_span"] = user_api_key_dict.parent_otel_span
-        _request_url = str(request.url)
-        if "batchPredictionJobs" in _request_url or "/batches" in _request_url:
-            _metadata["user_api_key_user_id"] = user_api_key_dict.user_id
-            _metadata["user_api_key_team_id"] = user_api_key_dict.team_id
-            _metadata["user_api_key_team_alias"] = user_api_key_dict.team_alias
-            _metadata["user_api_key_alias"] = user_api_key_dict.key_alias
-            _metadata["user_api_key_user_email"] = user_api_key_dict.user_email
+        _metadata["user_api_key_user_id"] = user_api_key_dict.user_id
+        _metadata["user_api_key_team_id"] = user_api_key_dict.team_id
+        _metadata["user_api_key_team_alias"] = user_api_key_dict.team_alias
+        _metadata["user_api_key_alias"] = user_api_key_dict.key_alias
+        _metadata["user_api_key_user_email"] = user_api_key_dict.user_email
 
         kwargs = {
             "litellm_params": {

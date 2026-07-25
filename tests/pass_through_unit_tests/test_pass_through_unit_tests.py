@@ -243,13 +243,12 @@ def test_init_kwargs_client_metadata_cannot_spoof_authenticated_identity(
     mock_request, mock_user_api_key_dict
 ):
     """
-    Regression (#33319): on a batch route, a request body must not override the authenticated
-    identity fields used for batch-cost spend attribution. Downstream consumers snapshot these
-    from metadata, so they are re-asserted from user_api_key_dict after the client-metadata merge.
-    Scoped to batch routes; the non-batch behavior is covered by its own test below.
+    Regression (#33319): a request body must not override the authenticated identity fields used
+    for spend attribution and budget enforcement. The passthrough cost callback reads
+    user_api_key_user_id/team_id straight from this metadata, so they are re-asserted from
+    user_api_key_dict after the client-metadata merge on every passthrough route.
     """
     request = mock_request()
-    request.url = "http://localhost:8000/vertex_ai/v1/projects/p/locations/us/batchPredictionJobs"
     parsed_body = {
         "litellm_metadata": {
             "user_api_key_user_id": "victim-user",
@@ -284,44 +283,6 @@ def test_init_kwargs_client_metadata_cannot_spoof_authenticated_identity(
     assert metadata["user_api_key_team_alias"] is None
     assert metadata["user_api_key_alias"] is None
     assert metadata["user_api_key_user_email"] is None
-
-
-def test_init_kwargs_non_batch_route_keeps_client_metadata_identity(
-    mock_request, mock_user_api_key_dict
-):
-    """On a non-batch passthrough route, caller-supplied litellm_metadata identity survives, as
-    it did before the batch-cost work. The identity re-assertion is scoped to batch routes so it
-    does not silently move attribution for ordinary passthrough requests."""
-    request = mock_request()
-    request.url = "http://localhost:8000/anthropic/v1/messages"
-    parsed_body = {
-        "litellm_metadata": {
-            "user_api_key_user_id": "caller-user",
-            "user_api_key_team_id": "caller-team",
-        }
-    }
-    passthrough_payload = PassthroughStandardLoggingPayload(url="https://test.com", request_body={})
-
-    result = HttpPassThroughEndpointHelpers._init_kwargs_for_pass_through_endpoint(
-        request=request,
-        user_api_key_dict=mock_user_api_key_dict,
-        passthrough_logging_payload=passthrough_payload,
-        _parsed_body=parsed_body,
-        litellm_call_id="test-call-id",
-        logging_obj=LiteLLMLoggingObj(
-            model="test-model",
-            messages=[],
-            stream=False,
-            call_type="test-call-type",
-            start_time=datetime.now(),
-            litellm_call_id="test-call-id",
-            function_id="test-function-id",
-        ),
-    )
-
-    metadata = result["litellm_params"]["metadata"]
-    assert metadata["user_api_key_user_id"] == "caller-user"
-    assert metadata["user_api_key_team_id"] == "caller-team"
 
 
 def test_init_kwargs_with_tags_in_header(mock_request, mock_user_api_key_dict):
