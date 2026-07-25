@@ -32,7 +32,7 @@ class LiteLLM_ManagedObjectTable(LiteLLMPydanticObjectBase):
     file_object: Union[LiteLLMBatch, LiteLLMFineTuningJob, ResponsesAPIResponse]
     created_by: Optional[str] = None
     team_id: Optional[str] = None
-    user_api_key: str | None = None
+    api_key: str | None = None
     request_tags: list[str] | None = None
 
 

@@ -64,13 +64,13 @@ class CheckBatchCost:
             verbose_proxy_logger.error(f"CheckBatchCost: could not look up user {user_id} for batch {batch_id}: {e}")
             return {}
 
-    async def _get_key_alias(self, user_api_key: Optional[str]) -> Optional[str]:
+    async def _get_key_alias(self, api_key: Optional[str]) -> Optional[str]:
         """Resolve the creating virtual key's alias from its hashed token."""
-        if not user_api_key:
+        if not api_key:
             return None
         try:
             key_row = await self.prisma_client.db.litellm_verificationtoken.find_unique(
-                where={"token": user_api_key}
+                where={"token": api_key}
             )
             return getattr(key_row, "key_alias", None) if key_row is not None else None
         except Exception as e:
@@ -97,21 +97,21 @@ class CheckBatchCost:
         Rebuild the spend-tracking metadata for the key/team/tags that created the
         batch so the batch-cost spend log is attributed the same way a non-batch
         request is. Falls back gracefully to whatever identity the managed object
-        row carries (older rows created before user_api_key/request_tags were
+        row carries (older rows created before api_key/request_tags were
         persisted only have created_by/team_id).
         """
-        user_api_key = getattr(job, "user_api_key", None)
+        api_key = getattr(job, "api_key", None)
         team_id = getattr(job, "team_id", None)
         request_tags = getattr(job, "request_tags", None)
 
         metadata: dict[str, object] = {
             "user_api_key_user_id": job.created_by,
-            "user_api_key": user_api_key,
+            "user_api_key": api_key,
             "user_api_key_team_id": team_id,
             **(await self._get_user_info(batch_id, job.created_by)),
         }
 
-        key_alias = await self._get_key_alias(user_api_key)
+        key_alias = await self._get_key_alias(api_key)
         if key_alias is not None:
             metadata["user_api_key_alias"] = key_alias
         team_alias = await self._get_team_alias(team_id)

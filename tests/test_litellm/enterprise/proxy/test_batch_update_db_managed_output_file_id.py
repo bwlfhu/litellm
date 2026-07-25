@@ -324,7 +324,7 @@ async def test_store_unified_object_id_attribution_columns_are_write_once():
     )
 
     row = store["unified-b"]
-    assert row["user_api_key"] == "hash-alice"
+    assert row["api_key"] == "hash-alice"
     assert row["team_id"] == "team-alice"
     assert row["created_by"] == "alice"
     assert row["status"] == "completed"
@@ -332,7 +332,7 @@ async def test_store_unified_object_id_attribution_columns_are_write_once():
 
 @pytest.mark.asyncio
 async def test_store_unified_object_id_update_branch_never_carries_attribution():
-    """The upsert update branch must not list user_api_key/request_tags at all; identity
+    """The upsert update branch must not list api_key/request_tags at all; identity
     immutability rests on the DB never being asked to change those columns, not on any
     read-then-write check
     """
@@ -351,9 +351,9 @@ async def test_store_unified_object_id_update_branch_never_carries_attribution()
 
     table = instance.prisma_client.db.litellm_managedobjecttable
     upsert_data = table.upsert.call_args.kwargs["data"]
-    assert "user_api_key" in upsert_data["create"]
+    assert "api_key" in upsert_data["create"]
     assert "request_tags" in upsert_data["create"]
-    assert "user_api_key" not in upsert_data["update"]
+    assert "api_key" not in upsert_data["update"]
     assert "request_tags" not in upsert_data["update"]
     assert "created_by" not in upsert_data["update"]
     assert "team_id" not in upsert_data["update"]
@@ -362,7 +362,7 @@ async def test_store_unified_object_id_update_branch_never_carries_attribution()
 @pytest.mark.asyncio
 async def test_store_unified_object_id_omits_unset_attribution_columns():
     """A batch created with no tags (the common case) must still register; the optional
-    request_tags/user_api_key columns are omitted rather than passed as None, which prisma
+    request_tags/api_key columns are omitted rather than passed as None, which prisma
     rejects for the Json request_tags field
     """
     instance, store = _in_memory_managed_files()
@@ -382,5 +382,5 @@ async def test_store_unified_object_id_omits_unset_attribution_columns():
         "data"
     ]["create"]
     assert "request_tags" not in create_data
-    assert "user_api_key" not in create_data
+    assert "api_key" not in create_data
     assert "unified-b" in store

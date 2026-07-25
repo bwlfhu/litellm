@@ -172,7 +172,7 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
         )
         from prisma import Json
 
-        user_api_key = user_api_key_dict.api_key or None
+        api_key = user_api_key_dict.api_key or None
         litellm_managed_object = LiteLLM_ManagedObjectTable(
             unified_object_id=unified_object_id,
             model_object_id=model_object_id,
@@ -185,7 +185,7 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
             litellm_parent_otel_span=litellm_parent_otel_span,
         )
 
-        # user_api_key and request_tags are optional columns; omit them when unset rather
+        # api_key and request_tags are optional columns; omit them when unset rather
         # than passing None, which prisma rejects for the Json request_tags field
         create_data = {
             "unified_object_id": unified_object_id,
@@ -196,7 +196,7 @@ class _PROXY_LiteLLMManagedFiles(CustomLogger, BaseFileEndpoints):
             "team_id": user_api_key_dict.team_id,
             "updated_by": user_api_key_dict.user_id,
             "status": file_object.status,
-            **({"user_api_key": user_api_key} if user_api_key is not None else {}),
+            **({"api_key": api_key} if api_key is not None else {}),
             **({"request_tags": Json(request_tags)} if request_tags else {}),
         }
         await self.prisma_client.db.litellm_managedobjecttable.upsert(

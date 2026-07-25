@@ -1272,7 +1272,7 @@ class TestBatchCostAttribution:
         job = SimpleNamespace(
             created_by="user-1",
             team_id="team-1",
-            user_api_key="hashed-key-abc",
+            api_key="hashed-key-abc",
             request_tags=["env:prod", "team:growth"],
         )
 
@@ -1306,7 +1306,7 @@ class TestBatchCostAttribution:
         job = SimpleNamespace(
             created_by=None,
             team_id="team-1",
-            user_api_key="hashed-key-abc",
+            api_key="hashed-key-abc",
             request_tags=None,
         )
 
@@ -1327,7 +1327,7 @@ class TestBatchCostAttribution:
 
     @pytest.mark.asyncio
     async def test_attribution_metadata_tolerates_legacy_rows(self):
-        """Older managed-object rows predate user_api_key/request_tags. Attribution must
+        """Older managed-object rows predate api_key/request_tags. Attribution must
         still fall back to created_by/team_id without raising."""
         from types import SimpleNamespace
 
