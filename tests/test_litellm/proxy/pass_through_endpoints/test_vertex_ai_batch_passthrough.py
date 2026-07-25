@@ -399,10 +399,10 @@ class TestVertexAIBatchPassthroughHandler:
     def test_store_batch_managed_object_poll_self_heal_writes_no_identity(
         self, mock_logging_obj, mock_managed_files_hook
     ):
-        """A poll (persist_attribution=False) still registers the batch so it is cost-tracked,
-        but the write-once identity columns are never written: api_key is None and request_tags
-        is None even though the polling caller's metadata carries them, so a poll cannot stamp
-        its own key onto the batch."""
+        """A poll (persist_attribution=False) still registers the batch so it is discovered, but
+        contributes no identity at all: user, team, key, and tags are None even though the polling
+        caller's metadata carries them. created_by/team_id drive both spend attribution and access
+        control, so a poll must never stamp the batch with its own identity."""
         with (
             patch("litellm.proxy.proxy_server.proxy_logging_obj") as mock_pl,
             patch(
@@ -420,6 +420,8 @@ class TestVertexAIBatchPassthroughHandler:
                 litellm_params={
                     "metadata": {
                         "user_api_key": "b" * 64,
+                        "user_api_key_user_id": "poller-user",
+                        "user_api_key_team_id": "poller-team",
                         "user_api_key_alias": "poller-key",
                         "tags": ["poller-tag"],
                     }
@@ -428,7 +430,10 @@ class TestVertexAIBatchPassthroughHandler:
 
             mock_managed_files_hook.store_unified_object_id.assert_called_once()
             call_kwargs = mock_managed_files_hook.store_unified_object_id.call_args[1]
-            assert call_kwargs["user_api_key_dict"].api_key is None
+            auth = call_kwargs["user_api_key_dict"]
+            assert auth.api_key is None
+            assert auth.user_id is None
+            assert auth.team_id is None
             assert call_kwargs["request_tags"] is None
 
     def test_store_batch_managed_object_falls_back_to_key_tags(

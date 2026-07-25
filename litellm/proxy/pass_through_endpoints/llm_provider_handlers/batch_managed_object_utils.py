@@ -75,12 +75,14 @@ def store_batch_managed_object(
     carries the authenticated key's ``user_api_key`` hash, user/team ids and
     request tags.
 
-    persist_attribution is True only on the create request. On a poll or retrieve
-    it is False: the row is still registered if missing (self-heal for a batch that
-    missed create-time registration) but the write-once identity columns (api_key,
-    request_tags) are not written, so a non-create caller can never stamp its own key
-    onto the batch. store_unified_object_id only writes those columns in the upsert
-    create branch, so an existing row's attribution is untouched either way.
+    persist_attribution is True only on the create request. On a poll or retrieve it is
+    False: the row is still registered if missing (self-heal for a batch that missed
+    create-time registration) but the caller contributes no identity at all. The upsert
+    writes created_by/team_id/api_key/request_tags only in its create branch, so if a poll
+    is the first writer it must not stamp its own user, team, or key onto the batch. Those
+    fields drive both spend attribution and managed-object access control, so a self-healed
+    row is left with NULL identity (no worse than the pre-fix blank-identity dropped row)
+    rather than charging or granting the polling caller.
     """
     try:
         from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
@@ -93,14 +95,19 @@ def store_batch_managed_object(
             )
             return
 
-        user_api_key_dict = UserAPIKeyAuth(
-            user_id=_optional_str(request_metadata.get("user_api_key_user_id")),
-            api_key=_optional_str(request_metadata.get("user_api_key")) if persist_attribution else None,
-            team_id=_optional_str(request_metadata.get("user_api_key_team_id")),
-            team_alias=_optional_str(request_metadata.get("user_api_key_team_alias")),
-            key_alias=_optional_str(request_metadata.get("user_api_key_alias")),
-            user_role=LitellmUserRoles.CUSTOMER,
-        )
+        if persist_attribution:
+            user_api_key_dict = UserAPIKeyAuth(
+                user_id=_optional_str(request_metadata.get("user_api_key_user_id")),
+                api_key=_optional_str(request_metadata.get("user_api_key")),
+                team_id=_optional_str(request_metadata.get("user_api_key_team_id")),
+                team_alias=_optional_str(request_metadata.get("user_api_key_team_alias")),
+                key_alias=_optional_str(request_metadata.get("user_api_key_alias")),
+                user_role=LitellmUserRoles.CUSTOMER,
+            )
+            request_tags = _request_tags(request_metadata)
+        else:
+            user_api_key_dict = UserAPIKeyAuth(user_role=LitellmUserRoles.CUSTOMER)
+            request_tags = None
 
         hook = cast(_StoreUnifiedObjectHook, managed_files_hook)  # cast-ok: presence checked via hasattr above
         asyncio.create_task(
@@ -111,7 +118,7 @@ def store_batch_managed_object(
                 model_object_id=model_object_id,
                 file_purpose="batch",
                 user_api_key_dict=user_api_key_dict,
-                request_tags=_request_tags(request_metadata) if persist_attribution else None,
+                request_tags=request_tags,
             )
         )
 
