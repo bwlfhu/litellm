@@ -115,9 +115,9 @@ class TestVertexAIBatchPassthroughHandler:
     def test_batch_prediction_jobs_handler_retrieve_does_not_register(
         self, mock_httpx_response, mock_logging_obj
     ):
-        """A GET poll/retrieve of a batch job returns 200 with a name too, but only the create
-        POST may register the managed object; registering on a poll would stamp the row with the
-        polling caller's identity and could win the create race, attributing spend to the poller."""
+        """A GET poll/retrieve still registers the batch (self-heal for a batch that missed
+        create-time registration), but with persist_attribution=False so the polling caller's
+        identity is never written to the write-once columns."""
         with (
             patch(
                 "litellm.proxy.pass_through_endpoints.llm_provider_handlers.vertex_passthrough_logging_handler.verbose_proxy_logger"
@@ -156,7 +156,8 @@ class TestVertexAIBatchPassthroughHandler:
                 user_api_key_dict={"user_id": "poller"},
             )
 
-            mock_store.assert_not_called()
+            mock_store.assert_called_once()
+            assert mock_store.call_args.kwargs["persist_attribution"] is False
 
     def test_batch_prediction_jobs_handler_failure(self, mock_logging_obj):
         """Test batch job creation failure handling"""
@@ -322,7 +323,7 @@ class TestVertexAIBatchPassthroughHandler:
                 "real-user-123",
                 "team-456",
             ),
-            ({}, "default-user", None),
+            ({}, None, None),
         ],
     )
     def test_store_batch_managed_object_propagates_user_identity_from_metadata(
@@ -335,8 +336,8 @@ class TestVertexAIBatchPassthroughHandler:
     ):
         """The fabricated UserAPIKeyAuth must inherit user_id/team_id from the
         request's litellm_params.metadata, not the (always-empty) top-level
-        kwargs lookup. Falls back to "default-user" only when metadata is
-        absent."""
+        kwargs lookup. When metadata is absent, user_id stays None so created_by
+        is NULL, matching a team/service-account key with no user."""
         with (
             patch("litellm.proxy.proxy_server.proxy_logging_obj") as mock_pl,
             patch(
@@ -394,6 +395,41 @@ class TestVertexAIBatchPassthroughHandler:
             assert call_kwargs["user_api_key_dict"].api_key == hashed_key
             assert call_kwargs["user_api_key_dict"].key_alias == "prod-batch-key"
             assert call_kwargs["request_tags"] == ["env:prod", "team:growth"]
+
+    def test_store_batch_managed_object_poll_self_heal_writes_no_identity(
+        self, mock_logging_obj, mock_managed_files_hook
+    ):
+        """A poll (persist_attribution=False) still registers the batch so it is cost-tracked,
+        but the write-once identity columns are never written: api_key is None and request_tags
+        is None even though the polling caller's metadata carries them, so a poll cannot stamp
+        its own key onto the batch."""
+        with (
+            patch("litellm.proxy.proxy_server.proxy_logging_obj") as mock_pl,
+            patch(
+                "litellm.proxy.pass_through_endpoints.llm_provider_handlers.vertex_passthrough_logging_handler.verbose_proxy_logger"
+            ),
+        ):
+            mock_pl.get_proxy_hook.return_value = mock_managed_files_hook
+
+            VertexPassthroughLoggingHandler._store_batch_managed_object(
+                unified_object_id="uoi",
+                batch_object={"id": "b1", "object": "batch", "status": "in_progress"},
+                model_object_id="b1",
+                logging_obj=mock_logging_obj,
+                persist_attribution=False,
+                litellm_params={
+                    "metadata": {
+                        "user_api_key": "b" * 64,
+                        "user_api_key_alias": "poller-key",
+                        "tags": ["poller-tag"],
+                    }
+                },
+            )
+
+            mock_managed_files_hook.store_unified_object_id.assert_called_once()
+            call_kwargs = mock_managed_files_hook.store_unified_object_id.call_args[1]
+            assert call_kwargs["user_api_key_dict"].api_key is None
+            assert call_kwargs["request_tags"] is None
 
     def test_store_batch_managed_object_falls_back_to_key_tags(
         self, mock_logging_obj, mock_managed_files_hook

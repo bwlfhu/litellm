@@ -44,10 +44,11 @@ class CheckBatchCost:
 
     async def _get_user_info(self, batch_id: str, user_id: Optional[str]) -> dict[str, object]:
         """
-        Look up user email by user_id for enriching the S3 callback metadata.
-        Returns a dict with user_api_key_user_email (may be None). Returns an
-        empty dict when user_id is None (batches created by team/service-account
-        keys carry no user_id, and find_unique(where={"user_id": None}) raises).
+        Look up user email and alias by user_id for enriching the S3 callback metadata.
+        Returns user_api_key_user_email and, as a fallback for user_api_key_alias when the
+        key itself has no key alias, the user's user_alias. Returns an empty dict when
+        user_id is None (batches created by team/service-account keys carry no user_id,
+        and find_unique(where={"user_id": None}) raises).
         """
         if not user_id:
             return {}
@@ -57,9 +58,13 @@ class CheckBatchCost:
             )
             if user_row is None:
                 return {}
-            return {
+            info: dict[str, object] = {
                 "user_api_key_user_email": getattr(user_row, "user_email", None),
             }
+            user_alias = getattr(user_row, "user_alias", None)
+            if user_alias is not None:
+                info["user_api_key_alias"] = user_alias
+            return info
         except Exception as e:
             verbose_proxy_logger.error(f"CheckBatchCost: could not look up user {user_id} for batch {batch_id}: {e}")
             return {}

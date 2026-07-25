@@ -65,6 +65,7 @@ def store_batch_managed_object(
     batch_object: LiteLLMBatch,
     model_object_id: str,
     request_metadata: dict[str, object],
+    persist_attribution: bool = True,
 ) -> None:
     """
     Register a provider batch job as a managed object so CheckBatchCost can
@@ -73,6 +74,13 @@ def store_batch_managed_object(
     request_metadata is the request's ``litellm_params["metadata"]``, which
     carries the authenticated key's ``user_api_key`` hash, user/team ids and
     request tags.
+
+    persist_attribution is True only on the create request. On a poll or retrieve
+    it is False: the row is still registered if missing (self-heal for a batch that
+    missed create-time registration) but the write-once identity columns (api_key,
+    request_tags) are not written, so a non-create caller can never stamp its own key
+    onto the batch. store_unified_object_id only writes those columns in the upsert
+    create branch, so an existing row's attribution is untouched either way.
     """
     try:
         from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
@@ -86,8 +94,8 @@ def store_batch_managed_object(
             return
 
         user_api_key_dict = UserAPIKeyAuth(
-            user_id=_optional_str(request_metadata.get("user_api_key_user_id")) or "default-user",
-            api_key=_optional_str(request_metadata.get("user_api_key")),
+            user_id=_optional_str(request_metadata.get("user_api_key_user_id")),
+            api_key=_optional_str(request_metadata.get("user_api_key")) if persist_attribution else None,
             team_id=_optional_str(request_metadata.get("user_api_key_team_id")),
             team_alias=_optional_str(request_metadata.get("user_api_key_team_alias")),
             key_alias=_optional_str(request_metadata.get("user_api_key_alias")),
@@ -103,7 +111,7 @@ def store_batch_managed_object(
                 model_object_id=model_object_id,
                 file_purpose="batch",
                 user_api_key_dict=user_api_key_dict,
-                request_tags=_request_tags(request_metadata),
+                request_tags=_request_tags(request_metadata) if persist_attribution else None,
             )
         )
 

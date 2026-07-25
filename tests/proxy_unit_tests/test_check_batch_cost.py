@@ -1287,6 +1287,29 @@ class TestBatchCostAttribution:
         assert metadata["tags"] == ["env:prod", "team:growth"]
 
     @pytest.mark.asyncio
+    async def test_attribution_metadata_falls_back_to_user_alias_when_no_key_alias(self):
+        """When the key itself has no key_alias, user_api_key_alias falls back to the creating
+        user's user_alias, as it did before the write-once-column rewrite; otherwise legacy rows
+        and keys with no alias would drop the field the Admin UI and /spend/logs filter read."""
+        from types import SimpleNamespace
+
+        instance = self._instance()
+        instance.prisma_client.db.litellm_usertable.find_unique = AsyncMock(
+            return_value=SimpleNamespace(user_email="creator@example.test", user_alias="creator-alias")
+        )
+        instance.prisma_client.db.litellm_verificationtoken.find_unique = AsyncMock(
+            return_value=SimpleNamespace(key_alias=None)
+        )
+        instance.prisma_client.db.litellm_teamtable.find_unique = AsyncMock(return_value=None)
+        job = SimpleNamespace(
+            created_by="user-1", team_id="team-1", api_key="hashed-key-abc", request_tags=None
+        )
+
+        metadata = await instance._build_creator_attribution_metadata(job, "batch-1")
+
+        assert metadata["user_api_key_alias"] == "creator-alias"
+
+    @pytest.mark.asyncio
     async def test_attribution_metadata_keeps_key_when_no_user_id(self):
         """A team/service-account key has no created_by. The persisted key hash and
         team_id must still flow through so _should_track_cost_callback writes the row."""

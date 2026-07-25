@@ -833,19 +833,20 @@ class AnthropicPassthroughLoggingHandler:
                 )
                 unified_object_id = base64.urlsafe_b64encode(unified_id_string.encode()).decode().rstrip("=")
 
-                # Register the managed object for cost tracking only on batch creation.
-                # Create POSTs to .../messages/batches; a poll or retrieve targets
-                # .../messages/batches/{id}. Registering on a poll would stamp the row with
-                # the polling caller's identity and could win the create race, permanently
-                # attributing the batch spend to the poller instead of the creator.
-                if url_route.split("?")[0].rstrip("/").endswith("batches"):
-                    AnthropicPassthroughLoggingHandler._store_batch_managed_object(
-                        unified_object_id=unified_object_id,
-                        batch_object=litellm_batch_response,
-                        model_object_id=batch_id,
-                        logging_obj=logging_obj,
-                        **kwargs,
-                    )
+                # Register the managed object for cost tracking. Only the create request
+                # writes the creator's identity: create POSTs to .../messages/batches, a poll
+                # or retrieve targets .../messages/batches/{id}. A poll still registers the
+                # batch if it was never recorded (self-heal), but with persist_attribution False
+                # it never writes the identity columns, so it cannot stamp its own key.
+                is_batch_create = url_route.split("?")[0].rstrip("/").endswith("batches")
+                AnthropicPassthroughLoggingHandler._store_batch_managed_object(
+                    unified_object_id=unified_object_id,
+                    batch_object=litellm_batch_response,
+                    model_object_id=batch_id,
+                    logging_obj=logging_obj,
+                    persist_attribution=is_batch_create,
+                    **kwargs,
+                )
 
                 # Create a batch job response for logging
                 litellm_model_response = ModelResponse()
@@ -967,6 +968,7 @@ class AnthropicPassthroughLoggingHandler:
         batch_object: LiteLLMBatch,
         model_object_id: str,
         logging_obj: LiteLLMLoggingObj,
+        persist_attribution: bool = True,
         **kwargs,
     ) -> None:
         """
@@ -979,6 +981,7 @@ class AnthropicPassthroughLoggingHandler:
             batch_object=batch_object,
             model_object_id=model_object_id,
             request_metadata=request_metadata,
+            persist_attribution=persist_attribution,
         )
 
     @staticmethod
