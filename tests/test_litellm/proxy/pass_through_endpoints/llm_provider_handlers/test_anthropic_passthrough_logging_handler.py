@@ -889,7 +889,7 @@ class TestAnthropicBatchPassthroughCostTracking:
                 "real-user-123",
                 "team-456",
             ),
-            ({}, None, None),
+            ({}, "default-user", None),
         ],
     )
     def test_store_batch_managed_object_propagates_user_identity_from_metadata(
@@ -901,8 +901,8 @@ class TestAnthropicBatchPassthroughCostTracking:
     ):
         """The fabricated UserAPIKeyAuth must inherit user_id/team_id from the
         request's litellm_params.metadata, not the (always-empty) top-level
-        kwargs lookup. When metadata is absent, user_id stays None so created_by
-        is NULL, matching a team/service-account key with no user."""
+        kwargs lookup. Falls back to "default-user" only when metadata is
+        absent."""
         mock_managed_files_hook = MagicMock()
         with (
             patch("litellm.proxy.proxy_server.proxy_logging_obj") as mock_pl,

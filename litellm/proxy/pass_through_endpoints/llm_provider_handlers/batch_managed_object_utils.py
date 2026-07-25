@@ -1,11 +1,11 @@
 """
 Shared helper for persisting a passthrough-created batch as a managed object.
 
-Vertex AI and Anthropic passthrough both create a provider batch job and then
-need to register it for asynchronous cost tracking by CheckBatchCost. The
-creating key's identity (hashed key, team, tags) is captured here so the
-eventual batch-cost spend log can be attributed back to it, mirroring the
-attribution a non-batch request receives.
+The Vertex AI passthrough creates a provider batch job and then needs to
+register it for asynchronous cost tracking by CheckBatchCost. The creating
+key's identity (hashed key, team, tags) is captured here so the eventual
+batch-cost spend log can be attributed back to it, mirroring the attribution
+a non-batch request receives.
 """
 
 import asyncio
