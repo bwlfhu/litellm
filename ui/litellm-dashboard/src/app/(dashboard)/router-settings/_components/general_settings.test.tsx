@@ -13,6 +13,11 @@ vi.mock("@/components/networking", () => ({
 vi.mock("@/components/router_settings", () => ({ default: () => null }));
 vi.mock("@/components/Settings/RouterSettings/Fallbacks/Fallbacks", () => ({ default: () => null }));
 vi.mock("@/components/routing_groups", () => ({ default: () => null }));
+vi.mock("./AutoRouters/AutoRoutersPanel", () => ({
+  AutoRoutersPanel: ({ canModify }: { canModify: boolean }) => (
+    <div data-testid="auto-routers-panel">canModify:{String(canModify)}</div>
+  ),
+}));
 
 // Mirrors the /config/list ordering: the two prompt-caching rows sit between the
 // General-tab rows in the unfiltered response but are filtered out of the General
@@ -97,5 +102,34 @@ describe("GeneralSettings General tab", () => {
 
     expect(deleteConfigFieldSetting).toHaveBeenCalledWith("token", "max_ui_session_budget");
     expect(within(row).getByRole("spinbutton")).toHaveValue("1.00");
+  });
+});
+
+// Router Settings is admin-only. Team admins are deliberately excluded: the auto-router
+// create form has no team selector, so their submit would 403 on an unscoped model.
+describe("GeneralSettings auto-router permissions", () => {
+  beforeEach(() => {
+    vi.mocked(getGeneralSettingsCall).mockResolvedValue([]);
+  });
+
+  it.each(["proxy_admin", "Admin"])("lets %s modify auto routers", async (role) => {
+    renderWithProviders(<GeneralSettings accessToken="token" userRole={role} userID="u" />);
+    expect(await screen.findByTestId("auto-routers-panel")).toHaveTextContent("canModify:true");
+  });
+
+  it.each(["Admin Viewer", "proxy_admin_viewer", "org_admin", "Internal User"])(
+    "gives %s read-only auto routers",
+    async (role) => {
+      renderWithProviders(<GeneralSettings accessToken="token" userRole={role} userID="u" />);
+      expect(await screen.findByTestId("auto-routers-panel")).toHaveTextContent("canModify:false");
+    },
+  );
+
+  it("keeps every proxy-wide tab on the page", async () => {
+    renderWithProviders(<GeneralSettings accessToken="token" userRole="proxy_admin" userID="u" />);
+
+    for (const name of ["Auto Router", "Loadbalancing", "Routing Groups", "Fallbacks", "Prompt Caching", "General"]) {
+      expect(await screen.findByRole("tab", { name })).toBeInTheDocument();
+    }
   });
 });
