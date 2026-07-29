@@ -486,6 +486,96 @@ class TestCheckBatchCost:
             mock_prisma_client.db.litellm_managedobjecttable.update.call_count == 0
         ), "a failed cost tracking attempt must not mark the job processed"
 
+    def test_has_no_attribution_predicate(self):
+        """A row has no usable creator identity only when api_key, created_by, and team_id
+        are all absent; any one present means it can be attributed."""
+        from litellm_enterprise.proxy.common_utils.check_batch_cost import (
+            CheckBatchCost,
+        )
+        from types import SimpleNamespace
+
+        assert (
+            CheckBatchCost._has_no_attribution(
+                SimpleNamespace(created_by=None, api_key=None, team_id=None)
+            )
+            is True
+        )
+        assert (
+            CheckBatchCost._has_no_attribution(
+                SimpleNamespace(created_by="u", api_key=None, team_id=None)
+            )
+            is False
+        )
+        assert (
+            CheckBatchCost._has_no_attribution(
+                SimpleNamespace(created_by=None, api_key="hashed-team-key", team_id=None)
+            )
+            is False
+        )
+        assert (
+            CheckBatchCost._has_no_attribution(
+                SimpleNamespace(created_by=None, api_key=None, team_id="team-1")
+            )
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_blank_identity_batch_left_unprocessed(
+        self, check_batch_cost_instance, mock_prisma_client, mock_llm_router
+    ):
+        """Regression (spend-loss race): a terminal batch whose attribution columns are all
+        blank (no api_key, created_by, or team_id) must be left unprocessed, not retrieved,
+        costed, and marked processed. Pre-fix, when a poll self-healed a blank row before the
+        detached creator store filled identity, the poller wrote a $0 blank-identity spend row
+        that the DB dropped and set batch_processed=True, so the later fill could never be
+        billed. Routing is made resolvable here so that removing the guard would reach
+        aretrieve_batch, keeping this a mutation-kill.
+        """
+        from unittest.mock import patch
+
+        mock_prisma_client.db.litellm_managedobjecttable.update_many = AsyncMock(
+            return_value=0
+        )
+        mock_prisma_client.db.litellm_managedobjecttable.update = AsyncMock()
+
+        blank_job = MagicMock()
+        blank_job.id = "job-blank-1"
+        blank_job.unified_object_id = "dW5pZmllZF9iYXRjaF9pZA=="
+        blank_job.created_by = None
+        blank_job.api_key = None
+        blank_job.team_id = None
+
+        mock_prisma_client.db.litellm_managedobjecttable.find_many = AsyncMock(
+            return_value=[blank_job]
+        )
+
+        mock_response = MagicMock()
+        mock_response.status = "completed"
+        mock_response.output_file_id = "file-output-123"
+        mock_llm_router.aretrieve_batch = AsyncMock(return_value=mock_response)
+
+        decoded_id = "llm_model_id,model-123;llm_batch_id,batch-456;"
+        with (
+            patch(
+                "litellm.proxy.openai_files_endpoints.common_utils._is_base64_encoded_unified_file_id",
+                side_effect=[decoded_id, None],
+            ),
+            patch(
+                "litellm.proxy.openai_files_endpoints.common_utils.get_model_id_from_unified_batch_id",
+                return_value="model-123",
+            ),
+            patch(
+                "litellm.proxy.openai_files_endpoints.common_utils.get_batch_id_from_unified_batch_id",
+                return_value="batch-456",
+            ),
+        ):
+            await check_batch_cost_instance.check_batch_cost()
+
+        mock_llm_router.aretrieve_batch.assert_not_called()
+        assert (
+            mock_prisma_client.db.litellm_managedobjecttable.update.call_count == 0
+        ), "a blank-identity batch must not be marked processed"
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("terminal_status", ["failed", "expired", "cancelled"])
     async def test_terminal_status_marks_job_processed(

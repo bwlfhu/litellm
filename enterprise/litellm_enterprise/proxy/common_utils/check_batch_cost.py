@@ -127,6 +127,15 @@ class CheckBatchCost:
 
         return metadata
 
+    @staticmethod
+    def _has_no_attribution(job: "LiteLLM_ManagedObjectTable") -> bool:
+        """Whether the managed-object row carries no creator identity: no api_key, created_by, or team_id."""
+        return (
+            job.created_by is None
+            and getattr(job, "api_key", None) is None
+            and getattr(job, "team_id", None) is None
+        )
+
     async def _cleanup_stale_managed_objects(self) -> None:
         """
         Mark managed objects older than MANAGED_OBJECT_STALENESS_CUTOFF_DAYS days
@@ -620,6 +629,12 @@ class CheckBatchCost:
         else:
             jobs = await self._fallback_find_jobs()
         for job in jobs:
+            if self._has_no_attribution(job):
+                verbose_proxy_logger.info(
+                    f"CheckBatchCost: managed object {job.unified_object_id} has no creator attribution yet; "
+                    "leaving it unprocessed for a later poll"
+                )
+                continue
             routing = self._resolve_job_routing(job, prom_logger)
             if routing is None:
                 continue
