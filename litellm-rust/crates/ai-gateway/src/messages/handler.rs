@@ -23,6 +23,7 @@ pub(super) async fn execute_messages_provider_call(
     let debug = request.debug_hook.clone();
     let call_id = request.call_id.clone();
     let provider = request.provider.clone();
+    let upstream_headers = final_upstream_headers(&request.upstream_headers);
     let body_bytes = serde_json::to_vec(&request.body)
         .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
     if let Some(hook) = &debug {
@@ -32,20 +33,13 @@ pub(super) async fn execute_messages_provider_call(
             model: request.model.clone(),
             stream: false,
             url: request.url.clone(),
-            headers: request.upstream_headers.clone(),
+            headers: upstream_headers.clone(),
             body: request.body,
         }));
     }
     let mut request_builder = http_client().post(&request.url).body(body_bytes);
-    for (key, value) in &request.upstream_headers {
+    for (key, value) in &upstream_headers {
         request_builder = request_builder.header(key, value);
-    }
-    if !request
-        .upstream_headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        request_builder = request_builder.header(reqwest::header::CONTENT_TYPE, "application/json");
     }
     if let Some(duration) = request.timeout {
         request_builder = request_builder.timeout(duration);
@@ -149,6 +143,7 @@ pub(super) async fn execute_messages_provider_stream(
     }
 
     let started = Instant::now();
+    let upstream_headers = final_upstream_headers(&request.upstream_headers);
     let body_bytes = serde_json::to_vec(&request.body)
         .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
     if let Some(hook) = &request.debug_hook {
@@ -158,20 +153,13 @@ pub(super) async fn execute_messages_provider_stream(
             model: request.model.clone(),
             stream: true,
             url: request.url.clone(),
-            headers: request.upstream_headers.clone(),
+            headers: upstream_headers.clone(),
             body: request.body,
         }));
     }
     let mut request_builder = http_client().post(&request.url).body(body_bytes);
-    for (key, value) in &request.upstream_headers {
+    for (key, value) in &upstream_headers {
         request_builder = request_builder.header(key, value);
-    }
-    if !request
-        .upstream_headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        request_builder = request_builder.header(reqwest::header::CONTENT_TYPE, "application/json");
     }
     if let Some(duration) = request.timeout {
         request_builder = request_builder.timeout(duration);
@@ -273,4 +261,17 @@ fn response_body(text: &str, headers: &[(String, String)]) -> ResponseBody {
             .map(|(_, value)| value.clone()),
         bytes: text.len(),
     }
+}
+
+fn final_upstream_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .cloned()
+        .chain(
+            (!headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-type")))
+            .then(|| ("content-type".to_string(), "application/json".to_string())),
+        )
+        .collect()
 }

@@ -14,6 +14,7 @@ enum RenderMode {
 
 pub struct ConsoleDebugHook {
     mode: RenderMode,
+    color_mode: ColorMode,
     output: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -33,6 +34,7 @@ impl ConsoleDebugHook {
             } else {
                 RenderMode::Compact
             },
+            color_mode: ColorMode::Auto(Output::StdErr).eval(),
             output: Mutex::new(writer),
         }
     }
@@ -93,6 +95,14 @@ fn header(event: &ProviderDebugEvent) -> String {
     }
 }
 
+fn decorate(value: &str, color_mode: ColorMode, code: &str) -> String {
+    if color_mode == ColorMode::On {
+        format!("\x1b[{code}m{value}\x1b[0m")
+    } else {
+        value.to_string()
+    }
+}
+
 impl ProviderDebugHook for ConsoleDebugHook {
     fn emit(&self, event: &ProviderDebugEvent) {
         let Ok(mut output) = self.output.lock() else {
@@ -107,12 +117,26 @@ impl ProviderDebugHook for ConsoleDebugHook {
             }
             RenderMode::Pretty => {
                 let pretty = serde_json::to_string_pretty(event).unwrap_or(json);
-                let _ = writeln!(output, "{}", header(event));
-                let rendered = pretty
-                    .to_colored_json(ColorMode::Auto(Output::StdErr))
-                    .unwrap_or(pretty);
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    decorate(&header(event), self.color_mode, "36")
+                );
+                let rendered = if self.color_mode == ColorMode::Off {
+                    pretty
+                } else {
+                    pretty.to_colored_json(self.color_mode).unwrap_or(pretty)
+                };
                 let _ = writeln!(output, "{rendered}");
-                let _ = writeln!(output, "────────────────────────────────────────");
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    decorate(
+                        "────────────────────────────────────────",
+                        self.color_mode,
+                        "2"
+                    )
+                );
             }
         }
     }
@@ -179,6 +203,11 @@ mod tests {
         hook.emit(&event);
         let output =
             String::from_utf8(buffer.lock().expect("buffer lock").clone()).expect("output is utf8");
+        assert!(!output.contains('\x1b'));
+        let payload = &output
+            [output.find('{').expect("payload starts")..=output.rfind('}').expect("payload ends")];
+        let expected = serde_json::to_string_pretty(&event).expect("event pretty serializes");
+        assert_eq!(payload, expected);
         assert!(output.contains("provider.request call_01 anthropic"));
         assert!(output.contains("────────────────"));
         assert!(output.contains("\n  \"event\""));

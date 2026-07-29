@@ -452,8 +452,7 @@ async fn debug_hook_records_transformed_request_and_response_without_credentials
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("accepts request");
         let request = read_http_request(&mut socket).await;
-        let body =
-            r#"{"id":"msg_debug","type":"message","role":"assistant","content":[],"model":"m"}"#;
+        let body = r#"{"id":"msg_debug","type":"message","role":"assistant","content":[],"model":"m","token":"response-secret"}"#;
         socket
             .write_all(write_response(body).as_bytes())
             .await
@@ -496,7 +495,7 @@ async fn debug_hook_records_transformed_request_and_response_without_credentials
     })
     .await
     .expect("messages request succeeds");
-    let _ = server.await.expect("server task completes");
+    let wire_request = server.await.expect("server task completes");
     let events = hook.events();
     assert_eq!(events.len(), 2);
     let request = match &events[0] {
@@ -513,12 +512,24 @@ async fn debug_hook_records_transformed_request_and_response_without_credentials
         request.body["messages"][0]["content"][0]["cache_control"],
         json!({"type": "ephemeral"})
     );
+    assert_eq!(
+        request.headers.get("content-type").map(String::as_str),
+        Some("application/json")
+    );
+    let wire_headers = wire_request
+        .split_once("\r\n\r\n")
+        .expect("has body")
+        .0
+        .to_ascii_lowercase();
+    assert!(wire_headers.contains("content-type: application/json"));
     let serialized = serde_json::to_string(&events).expect("events serialize");
     assert!(!serialized.contains("credential-secret"));
     assert!(!serialized.contains("api-secret"));
+    assert!(!serialized.contains("response-secret"));
     assert!(matches!(
         events[1],
-        ProviderDebugEvent::Response(ref event) if event.status == 200
+        ProviderDebugEvent::Response(ref event)
+            if event.status == 200 && event.duration_ms <= 5_000
     ));
 }
 

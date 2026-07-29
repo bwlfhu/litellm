@@ -123,7 +123,7 @@ pub struct ProviderErrorEvent {
     pub provider: String,
     pub duration_ms: u128,
     pub status: Option<u16>,
-    pub kind: String,
+    pub kind: &'static str,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<Value>,
@@ -178,7 +178,7 @@ pub fn error_event(input: ErrorEventInput) -> ProviderDebugEvent {
         provider: input.provider,
         duration_ms: input.duration_ms,
         status: input.status,
-        kind: input.kind.to_string(),
+        kind: input.kind,
         message: input.message,
         body: input.body.map(|body| body.snapshot().body),
     })
