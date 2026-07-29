@@ -29,14 +29,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 from opentelemetry.trace import Span, SpanKind, Tracer
+from opentelemetry.util.re import parse_env_headers
 
 from litellm._version import version as litellm_version
 from litellm.integrations.otel.model.config import ExporterSpec, OpenTelemetryV2Config
 from litellm.integrations.otel.model.semconv import LiteLLM
 from litellm.integrations.otel.model.spans import LiteLLMSpanKind
-
-# Re-exported so ``providers.parse_headers`` remains a stable entry point.
-from litellm.integrations.otel.model.utils import parse_headers as parse_headers
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import Meter
@@ -117,6 +115,23 @@ def _otlp_traces_endpoint(endpoint: str | None) -> str | None:
         if endpoint.endswith(other_signal):
             return endpoint[: -len(other_signal)] + "/v1/traces"
     return endpoint + "/v1/traces"
+
+
+def parse_headers(raw: str | None) -> dict[str, str]:
+    """Parse an OTLP ``"k=v,k=v"`` header string into a dict.
+
+    ``OTEL_EXPORTER_OTLP_HEADERS`` is W3C Baggage encoded per the OTLP spec, so
+    values are percent-decoded: a vendor that documents
+    ``Authorization=Basic%20<token>`` (Grafana Cloud does, because a bare space
+    is not representable there) has to reach the exporter as ``Basic <token>``,
+    not with a literal ``%20`` that the backend rejects as malformed. The SDK's
+    own parser is used so litellm decodes exactly what the OTLP exporters do
+    when they read the env var themselves; ``liberal`` keeps values that are not
+    percent-encoded (``Authorization=Bearer <token>``) working unchanged.
+    """
+    if not raw:
+        return {}
+    return dict(parse_env_headers(raw, liberal=True))
 
 
 def _exporter_from_spec(spec: ExporterSpec) -> SpanExporter:

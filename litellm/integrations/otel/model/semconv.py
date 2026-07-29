@@ -257,12 +257,22 @@ class LiteLLM:
 
 
 class Metric:
-    """GenAI metric instrument names."""
+    """GenAI metric instrument names.
+
+    ``TOKEN_USAGE`` and ``OPERATION_DURATION`` are the semconv names.
+    ``TIME_TO_FIRST_TOKEN`` is the semconv ``gen_ai.server.*`` name: a proxy
+    generating tokens for a caller is the server in that vocabulary, and the
+    ``gen_ai.client.response.*`` spelling litellm used before is not a semconv
+    name at all. Cost has no semconv metric, so it uses ``gen_ai.usage.cost``,
+    the name the ecosystem settled on (OpenLIT, and the dashboards vendors ship
+    against it). ``TIME_PER_OUTPUT_TOKEN`` and ``RESPONSE_DURATION`` keep the
+    older spelling for now; nothing downstream reads them yet.
+    """
 
     TOKEN_USAGE: Final = "gen_ai.client.token.usage"
     OPERATION_DURATION: Final = "gen_ai.client.operation.duration"
-    TOKEN_COST: Final = "gen_ai.client.token.cost"
-    TIME_TO_FIRST_TOKEN: Final = "gen_ai.client.response.time_to_first_token"
+    TOKEN_COST: Final = "gen_ai.usage.cost"
+    TIME_TO_FIRST_TOKEN: Final = "gen_ai.server.time_to_first_token"
     TIME_PER_OUTPUT_TOKEN: Final = "gen_ai.client.response.time_per_output_token"
     RESPONSE_DURATION: Final = "gen_ai.client.response.duration"
 
