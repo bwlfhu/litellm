@@ -1152,6 +1152,8 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
     def __init__(self, streaming_response, sync_stream: bool, json_mode: Optional[bool] = False):
         super().__init__(streaming_response, sync_stream, json_mode)
         self._chat_completion_id: str | None = None
+        self._function_call_argument_delta_indexes: set[int] = set()
+        self._saw_function_call = False
 
     def _handle_string_chunk(
         self, str_line: Union[str, "BaseModel"]
@@ -1173,6 +1175,9 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
     @staticmethod
     def translate_responses_chunk_to_openai_stream(
         parsed_chunk: Union[dict, BaseModel],
+        *,
+        emit_function_call_arguments_done: bool = True,
+        saw_function_call: bool = False,
     ) -> "ModelResponseStream":
         """
         Translate a Responses API streaming chunk to OpenAI chat completion streaming format.
@@ -1296,6 +1301,40 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
                 )
             else:
                 raise ValueError(f"Chat provider: Invalid function argument delta {parsed_chunk}")
+        elif event_type == ResponsesAPIStreamEvents.FUNCTION_CALL_ARGUMENTS_DONE:
+            arguments = parsed_chunk.get("arguments")
+            if emit_function_call_arguments_done and arguments:
+                tool_call_index = parsed_chunk.get("output_index", 0)
+                return ModelResponseStream(
+                    choices=[
+                        StreamingChoices(
+                            index=0,
+                            delta=Delta(
+                                tool_calls=[
+                                    ChatCompletionToolCallChunk(
+                                        id=None,
+                                        index=tool_call_index,
+                                        type="function",
+                                        function=ChatCompletionToolCallFunctionChunk(
+                                            name=None,
+                                            arguments=arguments,
+                                        ),
+                                    )
+                                ]
+                            ),
+                            finish_reason=None,
+                        )
+                    ]
+                )
+            return ModelResponseStream(
+                choices=[
+                    StreamingChoices(
+                        index=0,
+                        delta=Delta(),
+                        finish_reason=None,
+                    )
+                ]
+            )
         elif event_type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
             # New output item added
             output_item = parsed_chunk.get("item", {})
@@ -1393,7 +1432,7 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
                 item.get("type") == "function_call" for item in output_items if isinstance(item, dict)
             )
 
-            finish_reason = "tool_calls" if has_function_calls else "stop"
+            finish_reason = "tool_calls" if has_function_calls or saw_function_call else "stop"
 
             # Extract reasoning items with encrypted_content for round-tripping
             completed_reasoning_items: Optional[List[Dict[str, Any]]] = None
@@ -1459,8 +1498,33 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
             ModelResponseStream: OpenAI-formatted streaming chunk
         """
         verbose_logger.debug(f"Chat provider: transform_streaming_response called with chunk: {chunk}")
+        event_type = chunk.get("type")
+        if isinstance(event_type, ResponsesAPIStreamEvents):
+            event_type = event_type.value
+
+        output_index = chunk.get("output_index", 0)
+        if not isinstance(output_index, int):
+            output_index = 0
+
+        emit_function_call_arguments_done = True
+        if event_type == ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED.value:
+            output_item = chunk.get("item") or {}
+            if isinstance(output_item, dict) and output_item.get("type") == "function_call":
+                self._saw_function_call = True
+        elif event_type == ResponsesAPIStreamEvents.FUNCTION_CALL_ARGUMENTS_DELTA.value:
+            if chunk.get("delta"):
+                self._function_call_argument_delta_indexes.add(output_index)
+                self._saw_function_call = True
+        elif event_type == ResponsesAPIStreamEvents.FUNCTION_CALL_ARGUMENTS_DONE.value:
+            self._saw_function_call = True
+            emit_function_call_arguments_done = output_index not in self._function_call_argument_delta_indexes
+
         return self._with_stream_scoped_id(
-            OpenAiResponsesToChatCompletionStreamIterator.translate_responses_chunk_to_openai_stream(chunk)
+            OpenAiResponsesToChatCompletionStreamIterator.translate_responses_chunk_to_openai_stream(
+                chunk,
+                emit_function_call_arguments_done=emit_function_call_arguments_done,
+                saw_function_call=self._saw_function_call,
+            )
         )
 
     def _with_stream_scoped_id(self, chunk: "ModelResponseStream") -> "ModelResponseStream":

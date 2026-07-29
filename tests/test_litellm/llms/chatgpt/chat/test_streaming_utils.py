@@ -150,6 +150,18 @@ class TestChatGPTToolCallNormalizer:
         assert results[4].choices[0].delta.tool_calls[0].index == 2
         assert results[5].choices[0].delta.tool_calls[0].index == 2
 
+    def test_distinct_upstream_indices_route_interleaved_continuations(self):
+        chunks = [
+            _make_chunk(tool_calls=[_make_tc(index=1, id="call_1", name="first")]),
+            _make_chunk(tool_calls=[_make_tc(index=3, id="call_2", name="second")]),
+            _make_chunk(tool_calls=[_make_tc(index=1, arguments='{"first":true}')]),
+            _make_chunk(tool_calls=[_make_tc(index=3, arguments='{"second":true}')]),
+        ]
+
+        results = list(ChatGPTToolCallNormalizer(iter(chunks)))
+
+        assert [result.choices[0].delta.tool_calls[0].index for result in results] == [0, 1, 0, 1]
+
     def test_all_duplicates_skipped(self):
         """If a chunk contains only duplicate tool_calls, the entire chunk is skipped."""
         chunks = [

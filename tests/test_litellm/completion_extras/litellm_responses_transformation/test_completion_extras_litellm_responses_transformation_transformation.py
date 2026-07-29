@@ -1278,13 +1278,13 @@ def test_text_plus_tool_calls_sequence():
         function_done_result.choices[0].finish_reason is None
     ), "output_item.done for function_call must not emit finish_reason"
 
-    # Check response.completed (index 6) has finish_reason='stop'
-    # (the mock chunk has no nested 'response' data, so has_function_calls is False → 'stop')
+    # Check response.completed (index 6) preserves the observed tool-call finish reason
+    # even though this compatibility fixture omits nested response output data.
     completed_result = results[6]
     assert len(completed_result.choices) > 0, "response.completed should have choices"
     assert (
-        completed_result.choices[0].finish_reason == "stop"
-    ), "response.completed should have finish_reason='stop'"
+        completed_result.choices[0].finish_reason == "tool_calls"
+    ), "response.completed should have finish_reason='tool_calls'"
 
 
 # =============================================================================
@@ -2910,6 +2910,260 @@ def test_streaming_chunk_ids_are_isolated_between_iterators():
     second_id = second.chunk_parser(event).id
 
     assert first_id != second_id
+
+
+def _function_call_stream_event(event_type, output_index=0, **fields):
+    return {
+        "type": event_type,
+        "output_index": output_index,
+        **fields,
+    }
+
+
+def test_function_call_arguments_done_only_is_preserved():
+    from litellm import stream_chunk_builder
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    chunks = [
+        iterator.chunk_parser(
+            _function_call_stream_event(
+                "response.output_item.added",
+                item={
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                },
+            )
+        ),
+        iterator.chunk_parser(
+            _function_call_stream_event(
+                "response.function_call_arguments.done",
+                arguments='{"city":"Paris"}',
+            )
+        ),
+        iterator.chunk_parser(
+            {
+                "type": "response.completed",
+                "response": {"status": "completed", "output": None},
+            }
+        ),
+    ]
+
+    rebuilt = stream_chunk_builder(chunks)
+    assert rebuilt is not None
+    tool_call = rebuilt.choices[0].message.tool_calls[0]
+    assert tool_call.function.arguments == '{"city":"Paris"}'
+    assert rebuilt.choices[0].finish_reason == "tool_calls"
+
+
+def test_function_call_arguments_done_does_not_repeat_received_deltas():
+    from litellm import stream_chunk_builder
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    chunks = [
+        iterator.chunk_parser(
+            _function_call_stream_event(
+                "response.output_item.added",
+                item={
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                },
+            )
+        ),
+        iterator.chunk_parser(
+            _function_call_stream_event(
+                "response.function_call_arguments.delta",
+                delta='{"city":',
+            )
+        ),
+        iterator.chunk_parser(
+            _function_call_stream_event(
+                "response.function_call_arguments.delta",
+                delta='"Paris"}',
+            )
+        ),
+        iterator.chunk_parser(
+            _function_call_stream_event(
+                "response.function_call_arguments.done",
+                arguments='{"city":"Paris"}',
+            )
+        ),
+    ]
+
+    assert chunks[-1].choices[0].delta.tool_calls is None
+    rebuilt = stream_chunk_builder(chunks)
+    assert rebuilt is not None
+    assert rebuilt.choices[0].message.tool_calls[0].function.arguments == '{"city":"Paris"}'
+
+
+def test_function_call_arguments_done_is_tracked_per_parallel_output_index():
+    from litellm import stream_chunk_builder
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    events = [
+        _function_call_stream_event(
+            "response.output_item.added",
+            output_index=1,
+            item={"type": "function_call", "call_id": "call_1", "name": "first"},
+        ),
+        _function_call_stream_event(
+            "response.function_call_arguments.delta",
+            output_index=1,
+            delta='{"first":true}',
+        ),
+        _function_call_stream_event(
+            "response.output_item.added",
+            output_index=3,
+            item={"type": "function_call", "call_id": "call_2", "name": "second"},
+        ),
+        _function_call_stream_event(
+            "response.function_call_arguments.done",
+            output_index=1,
+            arguments='{"first":true}',
+        ),
+        _function_call_stream_event(
+            "response.function_call_arguments.done",
+            output_index=3,
+            arguments='{"second":true}',
+        ),
+    ]
+    chunks = [iterator.chunk_parser(event) for event in events]
+
+    assert chunks[3].choices[0].delta.tool_calls is None
+    assert chunks[4].choices[0].delta.tool_calls[0].index == 3
+    rebuilt = stream_chunk_builder(chunks)
+    assert rebuilt is not None
+    tool_calls = rebuilt.choices[0].message.tool_calls
+    assert [tool_call.function.arguments for tool_call in tool_calls] == [
+        '{"first":true}',
+        '{"second":true}',
+    ]
+
+
+def test_done_only_arguments_survive_chatgpt_normalizer_and_iterator_state_is_isolated():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.llms.chatgpt.chat.streaming_utils import ChatGPTToolCallNormalizer
+
+    first = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    second = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    first.chunk_parser(
+        _function_call_stream_event(
+            "response.function_call_arguments.delta",
+            delta='{"source":"delta"}',
+        )
+    )
+    second_chunks = [
+        second.chunk_parser(
+            _function_call_stream_event(
+                "response.output_item.added",
+                item={"type": "function_call", "call_id": "call_2", "name": "second"},
+            )
+        ),
+        second.chunk_parser(
+            _function_call_stream_event(
+                "response.function_call_arguments.done",
+                arguments='{"source":"done"}',
+            )
+        ),
+        second.chunk_parser(
+            {"type": "response.completed", "response": {"status": "completed"}}
+        ),
+    ]
+
+    normalized = list(ChatGPTToolCallNormalizer(iter(second_chunks)))
+    assert normalized[1].choices[0].delta.tool_calls[0].function.arguments == '{"source":"done"}'
+    assert normalized[-1].choices[0].finish_reason == "tool_calls"
+
+
+def test_interleaved_done_only_arguments_survive_chatgpt_normalizer():
+    from litellm import stream_chunk_builder
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.llms.chatgpt.chat.streaming_utils import ChatGPTToolCallNormalizer
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    events = [
+        _function_call_stream_event(
+            "response.output_item.added",
+            output_index=1,
+            item={"type": "function_call", "call_id": "call_1", "name": "first"},
+        ),
+        _function_call_stream_event(
+            "response.output_item.added",
+            output_index=3,
+            item={"type": "function_call", "call_id": "call_2", "name": "second"},
+        ),
+        _function_call_stream_event(
+            "response.function_call_arguments.done",
+            output_index=1,
+            arguments='{"first":true}',
+        ),
+        _function_call_stream_event(
+            "response.function_call_arguments.done",
+            output_index=3,
+            arguments='{"second":true}',
+        ),
+        {"type": "response.completed", "response": {"status": "completed"}},
+    ]
+    chunks = [iterator.chunk_parser(event) for event in events]
+
+    rebuilt = stream_chunk_builder(list(ChatGPTToolCallNormalizer(iter(chunks))))
+    assert rebuilt is not None
+    assert [tool_call.function.arguments for tool_call in rebuilt.choices[0].message.tool_calls] == [
+        '{"first":true}',
+        '{"second":true}',
+    ]
+    assert rebuilt.choices[0].finish_reason == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_function_call_arguments_done_only_async_iterator():
+    from litellm import stream_chunk_builder
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    events = [
+        _function_call_stream_event(
+            "response.output_item.added",
+            item={"type": "function_call", "call_id": "call_1", "name": "async_tool"},
+        ),
+        _function_call_stream_event(
+            "response.function_call_arguments.done",
+            arguments='{"async":true}',
+        ),
+        {"type": "response.completed", "response": {"status": "completed"}},
+    ]
+
+    async def event_stream():
+        for event in events:
+            yield f"data: {json.dumps(event)}"
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=event_stream(),
+        sync_stream=False,
+    )
+    chunks = [chunk async for chunk in iterator]
+
+    rebuilt = stream_chunk_builder(chunks)
+    assert rebuilt is not None
+    assert rebuilt.choices[0].message.tool_calls[0].function.arguments == '{"async":true}'
+    assert rebuilt.choices[0].finish_reason == "tool_calls"
 
 
 def _batch_d_message(text, item_id="msg_1"):
