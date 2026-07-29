@@ -2,7 +2,7 @@ use std::io::{IsTerminal, Write};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
-use colored_json::{ColorMode, Output, ToColoredJson};
+use colored_json::{ColorMode, ColoredFormatter, Output, PrettyFormatter};
 
 use super::{ProviderDebugEvent, ProviderDebugHook};
 
@@ -125,7 +125,9 @@ impl ProviderDebugHook for ConsoleDebugHook {
                 let rendered = if self.color_mode == ColorMode::Off {
                     pretty
                 } else {
-                    pretty.to_colored_json(self.color_mode).unwrap_or(pretty)
+                    ColoredFormatter::new(PrettyFormatter::new())
+                        .to_colored_json(event, self.color_mode)
+                        .unwrap_or(pretty)
                 };
                 let _ = writeln!(output, "{rendered}");
                 let _ = writeln!(
@@ -208,6 +210,10 @@ mod tests {
             [output.find('{').expect("payload starts")..=output.rfind('}').expect("payload ends")];
         let expected = serde_json::to_string_pretty(&event).expect("event pretty serializes");
         assert_eq!(payload, expected);
+        assert!(
+            payload.find("\"event\"").expect("event key")
+                < payload.find("\"body\"").expect("body key")
+        );
         assert!(output.contains("provider.request call_01 anthropic"));
         assert!(output.contains("────────────────"));
         assert!(output.contains("\n  \"event\""));
