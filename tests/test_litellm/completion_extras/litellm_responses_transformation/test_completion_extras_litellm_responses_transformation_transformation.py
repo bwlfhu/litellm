@@ -2872,3 +2872,41 @@ def test_response_completed_with_none_output_is_non_blocking():
     )
 
     assert result.choices[0].finish_reason == "stop"
+
+
+def test_streaming_chunks_share_one_chat_completion_id():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=iter(()),
+        sync_stream=True,
+    )
+    chunks = [
+        iterator.chunk_parser(
+            {
+                "type": "response.output_text.delta",
+                "delta": content,
+            }
+        )
+        for content in ("one", "two", "three")
+    ]
+
+    assert len({chunk.id for chunk in chunks}) == 1
+    assert chunks[0].id.startswith("chatcmpl-")
+
+
+def test_streaming_chunk_ids_are_isolated_between_iterators():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    first = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    second = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=iter(()), sync_stream=True)
+    event = {"type": "response.output_text.delta", "delta": "content"}
+
+    first_id = first.chunk_parser(event).id
+    second_id = second.chunk_parser(event).id
+
+    assert first_id != second_id
