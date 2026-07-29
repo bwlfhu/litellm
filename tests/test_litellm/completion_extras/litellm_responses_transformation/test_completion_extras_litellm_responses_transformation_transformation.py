@@ -2910,3 +2910,287 @@ def test_streaming_chunk_ids_are_isolated_between_iterators():
     second_id = second.chunk_parser(event).id
 
     assert first_id != second_id
+
+
+def _batch_d_message(text, item_id="msg_1"):
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    return ResponseOutputMessage(
+        id=item_id,
+        content=[
+            ResponseOutputText(
+                annotations=[],
+                text=text,
+                type="output_text",
+                logprobs=[],
+            )
+        ],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+
+
+def _batch_d_function_call(call_id="call_1"):
+    from openai.types.responses import ResponseFunctionToolCall
+
+    return ResponseFunctionToolCall(
+        arguments='{"city":"Paris"}',
+        call_id=call_id,
+        id=f"fc_{call_id}",
+        name="get_weather",
+        status="completed",
+        type="function_call",
+    )
+
+
+def _batch_d_reasoning(item_id, text, encrypted):
+    from openai.types.responses.response_reasoning_item import (
+        ResponseReasoningItem,
+        Summary,
+    )
+
+    return ResponseReasoningItem(
+        id=item_id,
+        summary=[Summary(text=text, type="summary_text")],
+        type="reasoning",
+        encrypted_content=encrypted,
+        status=None,
+    )
+
+
+def test_response_message_and_tool_calls_share_one_choice():
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [_batch_d_message("Checking weather"), _batch_d_function_call()]
+    )
+
+    assert len(choices) == 1
+    assert choices[0].index == 0
+    assert choices[0].finish_reason == "tool_calls"
+    assert choices[0].message.content == "Checking weather"
+    assert choices[0].message.tool_calls[0]["function"]["name"] == "get_weather"
+
+
+def test_reasoning_after_message_is_preserved_on_merged_choice():
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [
+            _batch_d_message("Checking weather"),
+            _batch_d_reasoning("rs_1", "choose city", "encrypted-1"),
+            _batch_d_function_call(),
+        ]
+    )
+
+    assert len(choices) == 1
+    assert choices[0].message.reasoning_content == "choose city"
+    assert choices[0].message.reasoning_items[0]["encrypted_content"] == "encrypted-1"
+
+
+def test_reasoning_on_both_sides_of_message_is_not_dropped():
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [
+            _batch_d_reasoning("rs_1", "first", "encrypted-1"),
+            _batch_d_message("Checking weather"),
+            _batch_d_reasoning("rs_2", "second", "encrypted-2"),
+            _batch_d_function_call(),
+        ]
+    )
+
+    assert len(choices) == 1
+    assert choices[0].message.reasoning_content == "first second"
+    assert [
+        item["encrypted_content"] for item in choices[0].message.reasoning_items
+    ] == ["encrypted-1", "encrypted-2"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        [
+            _batch_d_reasoning("rs_1", "first", "encrypted-1"),
+            _batch_d_reasoning("rs_2", "second", "encrypted-2"),
+            _batch_d_message("Checking weather"),
+            _batch_d_function_call(),
+        ],
+        [
+            _batch_d_message("Checking weather"),
+            _batch_d_reasoning("rs_1", "first", "encrypted-1"),
+            _batch_d_reasoning("rs_2", "second", "encrypted-2"),
+            _batch_d_function_call(),
+        ],
+    ],
+)
+def test_consecutive_reasoning_items_are_all_preserved(output):
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        output
+    )
+
+    assert choices[0].message.reasoning_content == "first second"
+    assert [
+        item["encrypted_content"] for item in choices[0].message.reasoning_items
+    ] == ["encrypted-1", "encrypted-2"]
+
+
+def test_raw_dict_message_reasoning_and_tool_call_are_merged():
+    handler = LiteLLMResponsesTransformationHandler()
+    output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Checking weather"}],
+        },
+        {
+            "type": "reasoning",
+            "id": "rs_raw",
+            "summary": [{"type": "summary_text", "text": "choose city"}],
+            "encrypted_content": "encrypted-raw",
+        },
+        {
+            "type": "function_call",
+            "id": "fc_raw",
+            "call_id": "call_raw",
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        },
+    ]
+
+    choices = handler._convert_response_output_to_choices(
+        output,
+        handle_raw_dict_callback=handler._handle_raw_dict_response_item,
+    )
+
+    assert len(choices) == 1
+    assert choices[0].index == 0
+    assert choices[0].finish_reason == "tool_calls"
+    assert choices[0].message.tool_calls[0]["id"] == "call_raw"
+    assert choices[0].message.reasoning_items[0]["encrypted_content"] == "encrypted-raw"
+
+
+def test_raw_reasoning_is_preserved_on_message_only_response():
+    handler = LiteLLMResponsesTransformationHandler()
+    output = [
+        {
+            "type": "reasoning",
+            "id": "rs_raw",
+            "summary": [{"type": "summary_text", "text": "plain answer"}],
+            "encrypted_content": "encrypted-raw",
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Done"}],
+        },
+    ]
+
+    choices = handler._convert_response_output_to_choices(
+        output,
+        handle_raw_dict_callback=handler._handle_raw_dict_response_item,
+    )
+
+    assert choices[0].finish_reason == "stop"
+    assert choices[0].message.reasoning_content == "plain answer"
+    assert choices[0].message.reasoning_items[0]["encrypted_content"] == "encrypted-raw"
+
+
+def test_raw_dict_apply_patch_call_merges_with_message():
+    handler = LiteLLMResponsesTransformationHandler()
+    output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Applying patch"}],
+        },
+        {
+            "type": "apply_patch_call",
+            "id": "apc_raw",
+            "call_id": "call_patch",
+            "operation": {
+                "type": "create_file",
+                "path": "hello.py",
+                "diff": "+print('hello')",
+            },
+        },
+    ]
+
+    choices = handler._convert_response_output_to_choices(
+        output,
+        handle_raw_dict_callback=handler._handle_raw_dict_response_item,
+    )
+
+    assert len(choices) == 1
+    assert choices[0].finish_reason == "tool_calls"
+    tool_call = choices[0].message.tool_calls[0]
+    assert tool_call["id"] == "call_patch"
+    assert tool_call["function"]["name"] == "apply_patch"
+    assert json.loads(tool_call["function"]["arguments"])["path"] == "hello.py"
+
+
+def test_tool_only_and_message_only_response_shapes_are_unchanged():
+    tool_choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [_batch_d_function_call()]
+    )
+    message_choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [_batch_d_message("Plain answer")]
+    )
+
+    assert len(tool_choices) == 1
+    assert tool_choices[0].finish_reason == "tool_calls"
+    assert tool_choices[0].message.content is None
+    assert len(message_choices) == 1
+    assert message_choices[0].finish_reason == "stop"
+    assert message_choices[0].message.content == "Plain answer"
+
+
+def test_tools_attach_to_the_last_of_multiple_message_choices():
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [
+            _batch_d_message("first", "msg_first"),
+            _batch_d_message("second", "msg_second"),
+            _batch_d_function_call(),
+        ]
+    )
+
+    assert len(choices) == 2
+    assert choices[0].finish_reason == "stop"
+    assert choices[0].message.tool_calls is None
+    assert choices[1].finish_reason == "tool_calls"
+    assert choices[1].message.content == "second"
+    assert len(choices[1].message.tool_calls) == 1
+
+
+def test_merged_tool_calls_are_validated_message_models():
+    import warnings
+
+    from litellm.types.utils import ChatCompletionMessageToolCall
+
+    handler = LiteLLMResponsesTransformationHandler()
+    raw_output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Checking"}],
+        },
+        {
+            "type": "function_call",
+            "id": "fc_raw",
+            "call_id": "call_raw",
+            "name": "get_weather",
+            "arguments": "{}",
+        },
+    ]
+    choices = [
+        *LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+            [_batch_d_message("Checking"), _batch_d_function_call()]
+        ),
+        *handler._convert_response_output_to_choices(
+            raw_output,
+            handle_raw_dict_callback=handler._handle_raw_dict_response_item,
+        ),
+    ]
+
+    for choice in choices:
+        assert isinstance(choice.message.tool_calls[0], ChatCompletionMessageToolCall)
+        assert choice.message.tool_calls[0].function.name == "get_weather"
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            choice.message.model_dump()
+        assert caught == []

@@ -38,6 +38,7 @@ from litellm.responses.sse_output_recovery import (
 from litellm.types.llms.openai import (
     ChatCompletionAnnotation,
     ChatCompletionReasoningItem,
+    ChatCompletionReasoningSummaryTextBlock,
     ChatCompletionToolParamFunctionChunk,
     Reasoning,
     ResponsesAPIOptionalRequestParams,
@@ -75,28 +76,28 @@ def _build_reasoning_item(
     item_id: str,
     encrypted_content: Optional[str],
     summary_raw: Any,
-) -> Dict[str, Any]:
+) -> ChatCompletionReasoningItem:
     """Build a ChatCompletionReasoningItem-shaped dict from raw response data.
 
     Handles both pydantic objects (attribute access) and plain dicts.
     """
-    summary: List[Dict[str, Any]] = []
+    summary: List[ChatCompletionReasoningSummaryTextBlock] = []
     for s in summary_raw or []:
         if isinstance(s, dict):
-            summary.append({"type": s.get("type", "summary_text"), "text": s.get("text", "")})
+            summary.append({"type": "summary_text", "text": str(s.get("text") or "")})
         else:
             summary.append(
                 {
-                    "type": getattr(s, "type", "summary_text"),
-                    "text": getattr(s, "text", ""),
+                    "type": "summary_text",
+                    "text": str(getattr(s, "text", "") or ""),
                 }
             )
-    return {
-        "id": item_id,
-        "type": "reasoning",
-        "encrypted_content": encrypted_content,
-        "summary": summary,
-    }
+    return ChatCompletionReasoningItem(
+        id=item_id,
+        type="reasoning",
+        encrypted_content=encrypted_content,
+        summary=summary,
+    )
 
 
 def _reasoning_item_to_response_input(
@@ -203,6 +204,20 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                 content=None,
                 tool_calls=[tool_call_dict],
             )
+            choice = Choices(message=msg, finish_reason="tool_calls", index=index)
+            return choice, index + 1
+
+        if item_type == "apply_patch_call":
+            operation = item.get("operation")
+            tool_call_dict = {
+                "id": item.get("call_id") or item.get("id", ""),
+                "function": {
+                    "name": "apply_patch",
+                    "arguments": json.dumps(operation if isinstance(operation, dict) else {}),
+                },
+                "type": "function",
+            }
+            msg = Message(content=None, tool_calls=[tool_call_dict])
             choice = Choices(message=msg, finish_reason="tool_calls", index=index)
             return choice, index + 1
 
@@ -479,12 +494,12 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
         except ImportError:
             ResponseApplyPatchToolCall = None  # type: ignore[assignment,misc]
 
-        from litellm.types.utils import Choices, Message
+        from litellm.types.utils import ChatCompletionMessageToolCall, Choices, Message
 
         choices: List[Choices] = []
         index = 0
-        reasoning_content: Optional[str] = None
-        pending_reasoning_item: Optional[Dict[str, Any]] = None
+        reasoning_parts: List[str] = []
+        pending_reasoning_items: List[ChatCompletionReasoningItem] = []
 
         # Collect all tool calls to put them in a single choice
         # (Chat Completions API expects all tool calls in one message)
@@ -493,12 +508,17 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
 
         for item in output_items or []:
             if isinstance(item, ResponseReasoningItem):
-                pending_reasoning_item = _build_reasoning_item(
+                reasoning_item = _build_reasoning_item(
                     item_id=item.id,
                     encrypted_content=getattr(item, "encrypted_content", None),
                     summary_raw=item.summary,
                 )
-                reasoning_content = " ".join(s["text"] for s in pending_reasoning_item["summary"] if s.get("text"))
+                pending_reasoning_items.append(reasoning_item)
+                reasoning_parts.extend(
+                    str(summary.get("text") or "")
+                    for summary in reasoning_item["summary"]
+                    if summary.get("text")
+                )
 
             elif isinstance(item, ResponseOutputMessage):
                 for content in item.content:
@@ -511,12 +531,9 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                     msg = Message(
                         role=item.role,
                         content=response_text if response_text else "",
-                        reasoning_content=reasoning_content,
+                        reasoning_content=" ".join(reasoning_parts) or None,
                         annotations=annotations,
-                        reasoning_items=cast(
-                            Optional[List[ChatCompletionReasoningItem]],
-                            ([pending_reasoning_item] if pending_reasoning_item is not None else None),
-                        ),
+                        reasoning_items=list(pending_reasoning_items) if pending_reasoning_items else None,
                     )
 
                     choices.append(
@@ -527,8 +544,8 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                         )
                     )
 
-                    reasoning_content = None  # flush
-                    pending_reasoning_item = None  # flush
+                    reasoning_parts = []
+                    pending_reasoning_items = []
                     index += 1
 
             elif isinstance(item, ResponseFunctionToolCall):
@@ -560,27 +577,87 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                 tool_call_index += 1
 
             elif isinstance(item, dict) and handle_raw_dict_callback is not None:
-                # Handle raw dict responses (e.g., from GPT-5 Codex)
-                choice, index = handle_raw_dict_callback(item=item, index=index)
+                if item.get("type") == "reasoning":
+                    reasoning_item = _build_reasoning_item(
+                        item_id=str(item.get("id") or ""),
+                        encrypted_content=item.get("encrypted_content"),
+                        summary_raw=item.get("summary"),
+                    )
+                    pending_reasoning_items.append(reasoning_item)
+                    reasoning_parts.extend(
+                        str(summary.get("text") or "")
+                        for summary in reasoning_item["summary"]
+                        if summary.get("text")
+                    )
+                    continue
+                choice, next_index = handle_raw_dict_callback(item=item, index=index)
                 if choice is not None:
-                    choices.append(choice)
+                    callback_tool_calls = getattr(choice.message, "tool_calls", None)
+                    if callback_tool_calls:
+                        accumulated_tool_calls.extend(callback_tool_calls)
+                        tool_call_index += len(callback_tool_calls)
+                    else:
+                        if reasoning_parts:
+                            existing_reasoning = getattr(choice.message, "reasoning_content", None)
+                            pending_reasoning = " ".join(reasoning_parts)
+                            choice.message.reasoning_content = (
+                                f"{existing_reasoning} {pending_reasoning}"
+                                if existing_reasoning
+                                else pending_reasoning
+                            )
+                        if pending_reasoning_items:
+                            existing_items = list(getattr(choice.message, "reasoning_items", None) or [])
+                            existing_items.extend(pending_reasoning_items)
+                            choice.message.reasoning_items = existing_items
+                        reasoning_parts = []
+                        pending_reasoning_items = []
+                        choices.append(choice)
+                        index = next_index
             else:
                 pass  # don't fail request if item in list is not supported
 
-        # If we accumulated tool calls, create a single choice with all of them
         if accumulated_tool_calls:
-            msg = Message(
-                content=None,
-                tool_calls=accumulated_tool_calls,
-                reasoning_content=reasoning_content,
-                reasoning_items=cast(
-                    Optional[List[ChatCompletionReasoningItem]],
-                    ([pending_reasoning_item] if pending_reasoning_item is not None else None),
+            normalized_tool_calls = [
+                tool_call
+                if isinstance(tool_call, ChatCompletionMessageToolCall)
+                else ChatCompletionMessageToolCall(**tool_call)
+                for tool_call in accumulated_tool_calls
+            ]
+            last_message_choice = next(
+                (
+                    choice
+                    for choice in reversed(choices)
+                    if getattr(choice, "message", None) is not None
+                    and not getattr(choice.message, "tool_calls", None)
                 ),
+                None,
             )
-            choices.append(Choices(message=msg, finish_reason="tool_calls", index=index))
-            reasoning_content = None
-            pending_reasoning_item = None
+            if last_message_choice is None:
+                msg = Message(
+                    content=None,
+                    tool_calls=normalized_tool_calls,
+                    reasoning_content=" ".join(reasoning_parts) or None,
+                    reasoning_items=list(pending_reasoning_items) if pending_reasoning_items else None,
+                )
+                choices.append(Choices(message=msg, finish_reason="tool_calls", index=index))
+            else:
+                message = last_message_choice.message
+                message.tool_calls = normalized_tool_calls
+                if message.content is None:
+                    message.content = ""
+                last_message_choice.finish_reason = "tool_calls"
+                reasoning_content = " ".join(reasoning_parts)
+                if reasoning_content:
+                    existing_reasoning = getattr(message, "reasoning_content", None)
+                    message.reasoning_content = (
+                        f"{existing_reasoning} {reasoning_content}" if existing_reasoning else reasoning_content
+                    )
+                if pending_reasoning_items:
+                    existing_items = list(getattr(message, "reasoning_items", None) or [])
+                    existing_items.extend(pending_reasoning_items)
+                    message.reasoning_items = existing_items
+            reasoning_parts = []
+            pending_reasoning_items = []
 
         return choices
 
