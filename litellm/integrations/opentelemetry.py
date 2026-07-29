@@ -2981,10 +2981,12 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
     def _get_metric_reader(self):
         """
         Get the appropriate metric reader based on the configuration.
+
+        Histograms keep the SDK's default cumulative temporality: Prometheus-backed
+        OTLP receivers reject delta histograms and drop the whole batch, while
+        backends that prefer delta still accept cumulative.
         """
-        from opentelemetry.sdk.metrics import Histogram
         from opentelemetry.sdk.metrics.export import (
-            AggregationTemporality,
             ConsoleMetricExporter,
             PeriodicExportingMetricReader,
         )
@@ -3015,7 +3017,6 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
             exporter = OTLPMetricExporter(
                 endpoint=normalized_endpoint,
                 headers=_split_otel_headers,
-                preferred_temporality={Histogram: AggregationTemporality.DELTA},
             )
             return PeriodicExportingMetricReader(exporter, export_interval_millis=5000)
 
@@ -3033,7 +3034,6 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
             exporter = OTLPMetricExporter(
                 endpoint=normalized_endpoint,
                 headers=_split_otel_headers,
-                preferred_temporality={Histogram: AggregationTemporality.DELTA},
             )
             return PeriodicExportingMetricReader(exporter, export_interval_millis=5000)
 

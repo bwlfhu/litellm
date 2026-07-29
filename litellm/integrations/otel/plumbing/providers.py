@@ -206,6 +206,13 @@ def build_metric_reader(config: OpenTelemetryV2Config) -> "MetricReader":
     ``console`` (and any unrecognized kind) exports to the console; ``otlp_http``
     and ``otlp_grpc`` export over OTLP with the configured endpoint/headers. The
     reader exports on a 5s period, matching v1.
+
+    Histograms keep the SDK's default cumulative temporality. Prometheus-backed
+    OTLP receivers (Grafana Cloud / Mimir, and the Prometheus OTLP endpoint)
+    reject delta histograms outright with ``invalid temporality and type
+    combination``, which drops the whole metric batch, while backends that
+    prefer delta still accept cumulative. The enterprise billing exporter
+    already relies on the same default.
     """
     from opentelemetry.sdk.metrics.export import (
         ConsoleMetricExporter,
@@ -217,18 +224,12 @@ def build_metric_reader(config: OpenTelemetryV2Config) -> "MetricReader":
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
             OTLPMetricExporter as HTTPMetricExporter,
         )
-        from opentelemetry.sdk.metrics import Histogram
-        from opentelemetry.sdk.metrics.export import AggregationTemporality
 
         exporter: Any = HTTPMetricExporter(
             endpoint=_otlp_metrics_endpoint(config.endpoint),
             headers=parse_headers(config.headers),
-            preferred_temporality={Histogram: AggregationTemporality.DELTA},
         )
     elif kind in ("otlp_grpc", "grpc"):
-        from opentelemetry.sdk.metrics import Histogram
-        from opentelemetry.sdk.metrics.export import AggregationTemporality
-
         try:
             from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
                 OTLPMetricExporter as GRPCMetricExporter,
@@ -242,7 +243,6 @@ def build_metric_reader(config: OpenTelemetryV2Config) -> "MetricReader":
         exporter = GRPCMetricExporter(
             endpoint=config.endpoint,
             headers=parse_headers(config.headers),
-            preferred_temporality={Histogram: AggregationTemporality.DELTA},
         )
     else:
         exporter = ConsoleMetricExporter()

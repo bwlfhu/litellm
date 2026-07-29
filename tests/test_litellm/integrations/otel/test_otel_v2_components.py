@@ -511,6 +511,24 @@ def test_build_span_exporter_variants():
     assert "OTLPSpanExporter" in type(http_exporter).__name__
 
 
+def test_otlp_metric_exporter_uses_cumulative_histogram_temporality():
+    """Histograms must export as cumulative, not delta.
+
+    Prometheus-backed OTLP receivers (Grafana Cloud / Mimir) reject delta
+    histograms with ``invalid temporality and type combination`` and drop the
+    entire metric batch, so a delta default silently loses every GenAI metric.
+    """
+    from opentelemetry.sdk.metrics import Histogram
+    from opentelemetry.sdk.metrics.export import AggregationTemporality
+
+    reader = providers.build_metric_reader(
+        OpenTelemetryV2Config(exporter="otlp_http", endpoint="http://h:4318")
+    )
+    temporality = reader._exporter._preferred_temporality  # noqa: SLF001  # exporter exposes no public accessor
+
+    assert temporality[Histogram] is AggregationTemporality.CUMULATIVE
+
+
 def test_otlp_logs_endpoint_normalization():
     norm = providers._otlp_logs_endpoint
     # A base endpoint gets the signal path appended (the common OTLP env shape).
