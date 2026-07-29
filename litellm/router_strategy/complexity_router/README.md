@@ -142,7 +142,7 @@ complexity_router_config:
   default_tier: MEDIUM  # SIMPLE | MEDIUM | COMPLEX | REASONING
 ```
 
-Set `default_tier: SIMPLE` to keep unmatched traffic on the cheapest tier, which is how the router behaved before this setting existed. Whichever tier you name has to exist in `tiers`, or `default_model` has to be set, the same requirement any scored tier already has.
+Set `default_tier: SIMPLE` to keep unmatched traffic on the cheapest tier, which is how the router behaved before this setting existed. A `default_tier` you set explicitly has to have a model behind it, either its own non-empty entry in `tiers` or a `default_model`; the config is rejected at load time otherwise, rather than failing on the first unmatched request.
 
 The check is on the individual dimensions, not on the weighted score, because contributions cancel. `"hi, quick python question"` scores zero with three dimensions firing (short prompt, a simple indicator, a code keyword); it has real evidence of being simple and stays SIMPLE. Prompts shorter than the `simple` token threshold or longer than the `complex` one also fire `tokenCount`, so they score normally and are outside this path.
 

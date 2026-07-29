@@ -273,7 +273,8 @@ class ComplexityRouterConfig(BaseModel):
         description=(
             "Tier used when no scoring dimension fires, i.e. the prompt matched no keyword, "
             "pattern or token-count threshold and the scorer has no evidence either way. "
-            "Must be a tier present in `tiers` (or `default_model` must be set). "
+            "When set explicitly it must have a model behind it: a non-empty entry in `tiers`, "
+            "or `default_model`. "
             "Set to SIMPLE to restore the previous behavior of treating unmatched traffic as simple"
         ),
     )
@@ -445,6 +446,18 @@ class ComplexityRouterConfig(BaseModel):
         if self.classifier_type == "llm" and self.classifier_llm_config is None:
             raise ValueError("classifier_llm_config is required when classifier_type is 'llm'")
         return self
+
+    @model_validator(mode="after")
+    def _validate_default_tier_is_servable(self) -> "ComplexityRouterConfig":
+        if "default_tier" not in self.model_fields_set:
+            return self
+        if self.tiers.get(self.default_tier.value) or self.default_model:
+            return self
+        raise ValueError(
+            f"default_tier {self.default_tier.value} has no model configured: it is not a non-empty "
+            f"entry in tiers ({sorted(self.tiers)}) and default_model is unset. Every no-signal "
+            f"request would fail at routing time"
+        )
 
     @model_validator(mode="after")
     def _validate_adaptive_pools(self) -> "ComplexityRouterConfig":

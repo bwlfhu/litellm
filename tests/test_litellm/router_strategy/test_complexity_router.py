@@ -3531,6 +3531,52 @@ class TestNoSignalDefaultTier:
         with pytest.raises(ValidationError):
             _router_with_default_tier(mock_router_instance, "CHEAPEST")
 
+    def test_default_tier_without_a_model_is_rejected_at_config_time(self, mock_router_instance):
+        """An explicit default_tier naming a tier with no model would only surface as a routing
+        failure on the first no-signal request, so reject the config instead."""
+        with pytest.raises(ValidationError, match="default_tier COMPLEX has no model configured"):
+            ComplexityRouter(
+                model_name="test-router",
+                litellm_router_instance=mock_router_instance,
+                complexity_router_config={
+                    "tiers": {"SIMPLE": "simple-model", "MEDIUM": "medium-model"},
+                    "default_tier": "COMPLEX",
+                },
+            )
+
+    def test_default_tier_with_an_empty_pool_is_rejected(self, mock_router_instance):
+        with pytest.raises(ValidationError, match="default_tier MEDIUM has no model configured"):
+            ComplexityRouter(
+                model_name="test-router",
+                litellm_router_instance=mock_router_instance,
+                complexity_router_config={
+                    "tiers": {"SIMPLE": "simple-model", "MEDIUM": []},
+                    "default_tier": "MEDIUM",
+                },
+            )
+
+    def test_default_tier_outside_tiers_is_allowed_with_default_model(self, mock_router_instance):
+        router = ComplexityRouter(
+            model_name="test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config={
+                "tiers": {"SIMPLE": "simple-model"},
+                "default_tier": "MEDIUM",
+                "default_model": "fallback-model",
+            },
+        )
+        assert router.get_model_for_tier(router.classify(RIVER_CROSSING)[0]) == "fallback-model"
+
+    def test_partial_tiers_map_still_loads_without_an_explicit_default_tier(self, mock_router_instance):
+        """The implicit MEDIUM default must not turn an existing partial tiers map into a
+        startup failure; it keeps the same resolution chain every other tier already has."""
+        router = ComplexityRouter(
+            model_name="test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config={"tiers": {"SIMPLE": "simple-model", "REASONING": "reasoning-model"}},
+        )
+        assert router.config.default_tier == ComplexityTier.MEDIUM
+
     def test_abstain_does_not_consult_tier_boundaries(self, mock_router_instance):
         """Boundaries that would map 0.0 to COMPLEX must not reach the no-signal path."""
         router = ComplexityRouter(
