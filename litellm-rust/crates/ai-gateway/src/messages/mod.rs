@@ -3,7 +3,7 @@ use serde_json::Value;
 
 mod client;
 mod common_utils;
-pub(crate) mod handler;
+mod handler;
 mod prepare;
 mod types;
 
@@ -16,7 +16,7 @@ pub async fn messages(request: MessagesRequest<'_>) -> CoreResult<Value> {
     match execute_messages(request, false).await? {
         MessagesResponse::Json(body) => Ok(body),
         MessagesResponse::Stream(response, counter) => {
-            drop(counter);
+            let _ = counter;
             drop(response);
             Err(litellm_core::CoreError::InvalidResponse(
                 "non-streaming messages execution returned a stream".to_string(),
@@ -27,7 +27,10 @@ pub async fn messages(request: MessagesRequest<'_>) -> CoreResult<Value> {
 
 pub(crate) enum MessagesResponse {
     Json(Value),
-    Stream(reqwest::Response, std::sync::Arc<handler::StreamCounter>),
+    Stream(
+        reqwest::Response,
+        std::sync::Arc<crate::integrations::provider_debug::StreamCounter>,
+    ),
 }
 
 pub(crate) async fn execute_messages(

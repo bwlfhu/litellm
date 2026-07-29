@@ -1,5 +1,7 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::integrations::provider_debug::{ProviderDebugEvent, ProviderDebugHook};
 use litellm_core::error::CoreError;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,6 +11,21 @@ use super::common_utils::{
     has_bearer_auth, has_header, messages_provider_config, string_headers, truncate_error_body,
 };
 use super::{MessagesRequest, messages};
+
+#[derive(Clone, Default)]
+struct RecordingHook(Arc<Mutex<Vec<ProviderDebugEvent>>>);
+
+impl ProviderDebugHook for RecordingHook {
+    fn emit(&self, event: &ProviderDebugEvent) {
+        self.0.lock().expect("recording lock").push(event.clone());
+    }
+}
+
+impl RecordingHook {
+    fn events(&self) -> Vec<ProviderDebugEvent> {
+        self.0.lock().expect("recording lock").clone()
+    }
+}
 
 async fn read_http_request(socket: &mut TcpStream) -> String {
     let mut request = Vec::new();
@@ -426,6 +443,161 @@ async fn messages_maps_provider_error_status_to_http_error() {
     .expect_err("provider error propagates");
 
     assert!(matches!(err, CoreError::Http { status: 401, .. }));
+}
+
+#[tokio::test]
+async fn debug_hook_records_transformed_request_and_response_without_credentials() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accepts request");
+        let request = read_http_request(&mut socket).await;
+        let body =
+            r#"{"id":"msg_debug","type":"message","role":"assistant","content":[],"model":"m"}"#;
+        socket
+            .write_all(write_response(body).as_bytes())
+            .await
+            .expect("writes response");
+        request
+    });
+    let hook = RecordingHook::default();
+    let original = json!({
+        "model": "m",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": [{
+            "type": "text", "text": "hello",
+            "cache_control": {"type": "ephemeral", "scope": "global"}
+        }]}]
+    });
+    let mut headers = Map::new();
+    for name in [
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "x-amz-security-token",
+        "cookie",
+        "set-cookie",
+    ] {
+        headers.insert(
+            name.to_string(),
+            Value::String("credential-secret".to_string()),
+        );
+    }
+    let _ = messages(MessagesRequest {
+        model: "m",
+        body: original.clone(),
+        api_key: Some("api-secret"),
+        api_base: Some(&format!("http://{addr}")),
+        custom_llm_provider: Some("azure_ai"),
+        extra_headers: Some(headers),
+        timeout: Some(Duration::from_secs(5)),
+        debug_hook: Some(Arc::new(hook.clone())),
+    })
+    .await
+    .expect("messages request succeeds");
+    let _ = server.await.expect("server task completes");
+    let events = hook.events();
+    assert_eq!(events.len(), 2);
+    let request = match &events[0] {
+        ProviderDebugEvent::Request(event) => event,
+        other => panic!("expected request event, got {other:?}"),
+    };
+    assert!(
+        request.url.ends_with("/anthropic/v1/messages"),
+        "{}",
+        request.url
+    );
+    assert_ne!(request.body, original);
+    assert_eq!(
+        request.body["messages"][0]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    let serialized = serde_json::to_string(&events).expect("events serialize");
+    assert!(!serialized.contains("credential-secret"));
+    assert!(!serialized.contains("api-secret"));
+    assert!(matches!(
+        events[1],
+        ProviderDebugEvent::Response(ref event) if event.status == 200
+    ));
+}
+
+#[tokio::test]
+async fn disabled_debug_hook_records_no_events() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accepts request");
+        let _ = read_http_request(&mut socket).await;
+        socket
+            .write_all(
+                write_response(
+                    r#"{"id":"msg_disabled","type":"message","role":"assistant","content":[],"model":"m"}"#,
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("writes response");
+    });
+    let hook = RecordingHook::default();
+    messages(MessagesRequest {
+        model: "m",
+        body: json!({"model": "m", "max_tokens": 8, "messages": []}),
+        api_key: Some("sk"),
+        api_base: Some(&format!("http://{addr}")),
+        custom_llm_provider: Some("anthropic"),
+        extra_headers: None,
+        timeout: Some(Duration::from_secs(5)),
+        debug_hook: None,
+    })
+    .await
+    .expect("messages request succeeds");
+    server.await.expect("server task completes");
+    assert!(hook.events().is_empty());
+}
+
+#[tokio::test]
+async fn debug_hook_records_one_http_error_with_status_and_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accepts request");
+        let _ = read_http_request(&mut socket).await;
+        let body = r#"{"error":{"message":"bad key","token":"secret-token"}}"#;
+        let response = format!(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("writes response");
+    });
+    let hook = RecordingHook::default();
+    let error = messages(MessagesRequest {
+        model: "m",
+        body: json!({"model": "m", "max_tokens": 8, "messages": []}),
+        api_key: Some("sk"),
+        api_base: Some(&format!("http://{addr}")),
+        custom_llm_provider: Some("anthropic"),
+        extra_headers: None,
+        timeout: Some(Duration::from_secs(5)),
+        debug_hook: Some(Arc::new(hook.clone())),
+    })
+    .await
+    .expect_err("provider error propagates");
+    server.await.expect("server task completes");
+    assert!(matches!(error, CoreError::Http { status: 401, .. }));
+    let events = hook.events();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[1],
+        ProviderDebugEvent::Error(event)
+            if event.kind == "http_error"
+                && event.status == Some(401)
+                && event.body.as_ref().is_some_and(|body| body["error"]["message"] == "bad key")
+    ));
 }
 
 #[tokio::test]

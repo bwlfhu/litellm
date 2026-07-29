@@ -9,7 +9,6 @@ use axum::http::StatusCode;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use futures_util::StreamExt;
 use litellm_core::CoreError;
 use serde_json::{Map, Value};
 
@@ -45,7 +44,7 @@ async fn handle(
 
 fn stream_response(
     upstream: reqwest::Response,
-    counter: std::sync::Arc<crate::messages::handler::StreamCounter>,
+    counter: std::sync::Arc<crate::integrations::provider_debug::StreamCounter>,
 ) -> Result<Response, MessagesRouteError> {
     let content_type = upstream
         .headers()
@@ -65,16 +64,12 @@ fn stream_response(
         response = response.header(CACHE_CONTROL, value);
     }
     response
-        .body(Body::from_stream(upstream.bytes_stream().map(
-            move |result| match result {
-                Ok(bytes) => {
-                    let events = bytes.windows(2).filter(|window| *window == b"\n\n").count();
-                    counter.record(bytes.len(), events);
-                    Ok(bytes)
-                }
-                Err(error) => Err(error),
-            },
-        )))
+        .body(Body::from_stream(
+            crate::integrations::provider_debug::count_forwarded_stream(
+                upstream.bytes_stream(),
+                counter,
+            ),
+        ))
         .map_err(|error| {
             MessagesRouteError(CoreError::InvalidResponse(format!(
                 "failed to build streaming response: {error}"

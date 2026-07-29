@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use litellm_core::CoreResult;
@@ -13,56 +12,9 @@ use super::common_utils::truncate_error_body;
 use super::types::ProviderMessagesRequest;
 use crate::constants::ANTHROPIC_MESSAGES_PROVIDER;
 use crate::integrations::provider_debug::{
-    ProviderDebugHook, ResponseBody, error_event, request_event, response_event, stream_completed,
-    stream_started,
+    ErrorEventInput, RequestEventInput, ResponseBody, ResponseEventInput, StreamCounter,
+    error_event, request_event, response_event, stream_started,
 };
-
-fn response_debug_value(text: &str, headers: &[(String, String)]) -> Value {
-    serde_json::from_str(text).unwrap_or_else(|_| {
-        serde_json::json!({
-            "media_type": headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("content-type")).map(|(_, value)| value),
-            "bytes": text.len(),
-        })
-    })
-}
-
-pub struct StreamCounter {
-    pub call_id: String,
-    pub provider: String,
-    pub hook: Option<Arc<dyn ProviderDebugHook>>,
-    pub started: Instant,
-    pub bytes_received: AtomicUsize,
-    pub frames_received: AtomicUsize,
-    pub events_decoded: AtomicUsize,
-}
-
-impl StreamCounter {
-    #[allow(dead_code)]
-    pub fn record(&self, bytes: usize, events: usize) {
-        self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
-        self.frames_received.fetch_add(1, Ordering::Relaxed);
-        self.events_decoded.fetch_add(events, Ordering::Relaxed);
-    }
-
-    fn complete(&self) {
-        if let Some(hook) = &self.hook {
-            hook.emit(&stream_completed(
-                self.call_id.clone(),
-                self.provider.clone(),
-                self.started.elapsed().as_millis(),
-                self.bytes_received.load(Ordering::Relaxed),
-                self.frames_received.load(Ordering::Relaxed),
-                self.events_decoded.load(Ordering::Relaxed),
-            ));
-        }
-    }
-}
-
-impl Drop for StreamCounter {
-    fn drop(&mut self) {
-        self.complete();
-    }
-}
 
 pub(super) async fn execute_messages_provider_call(
     request: ProviderMessagesRequest,
@@ -71,20 +23,29 @@ pub(super) async fn execute_messages_provider_call(
     let debug = request.debug_hook.clone();
     let call_id = request.call_id.clone();
     let provider = request.provider.clone();
+    let body_bytes = serde_json::to_vec(&request.body)
+        .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
     if let Some(hook) = &debug {
-        hook.emit(&request_event(
-            call_id.clone(),
-            provider.clone(),
-            request.model.clone(),
-            false,
-            request.url.clone(),
-            &request.upstream_headers,
-            request.body.clone(),
-        ));
+        hook.emit(&request_event(RequestEventInput {
+            call_id: call_id.clone(),
+            provider: provider.clone(),
+            model: request.model.clone(),
+            stream: false,
+            url: request.url.clone(),
+            headers: request.upstream_headers.clone(),
+            body: request.body,
+        }));
     }
-    let mut request_builder = http_client().post(&request.url).json(&request.body);
+    let mut request_builder = http_client().post(&request.url).body(body_bytes);
     for (key, value) in &request.upstream_headers {
         request_builder = request_builder.header(key, value);
+    }
+    if !request
+        .upstream_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        request_builder = request_builder.header(reqwest::header::CONTENT_TYPE, "application/json");
     }
     if let Some(duration) = request.timeout {
         request_builder = request_builder.timeout(duration);
@@ -92,15 +53,15 @@ pub(super) async fn execute_messages_provider_call(
 
     let response = request_builder.send().await.map_err(|err| {
         if let Some(hook) = &debug {
-            hook.emit(&error_event(
-                call_id.clone(),
-                provider.clone(),
-                started.elapsed().as_millis(),
-                None,
-                "network".to_string(),
-                err.to_string(),
-                None,
-            ));
+            hook.emit(&error_event(ErrorEventInput {
+                call_id: call_id.clone(),
+                provider: provider.clone(),
+                duration_ms: started.elapsed().as_millis(),
+                status: None,
+                kind: "network_error",
+                message: err.to_string(),
+                body: None,
+            }));
         }
         CoreError::Network(err.to_string())
     })?;
@@ -123,23 +84,15 @@ pub(super) async fn execute_messages_provider_call(
 
     if !status.is_success() {
         if let Some(hook) = &debug {
-            hook.emit(&response_event(
-                call_id.clone(),
-                provider.clone(),
-                status.as_u16(),
-                started.elapsed().as_millis(),
-                &response_headers,
-                ResponseBody::Json(response_debug_value(&text, &response_headers)),
-            ));
-            hook.emit(&error_event(
-                call_id.clone(),
-                provider.clone(),
-                started.elapsed().as_millis(),
-                Some(status.as_u16()),
-                "http".to_string(),
-                format!("provider returned HTTP {}", status.as_u16()),
-                Some(response_debug_value(&text, &response_headers)),
-            ));
+            hook.emit(&error_event(ErrorEventInput {
+                call_id: call_id.clone(),
+                provider: provider.clone(),
+                duration_ms: started.elapsed().as_millis(),
+                status: Some(status.as_u16()),
+                kind: "http_error",
+                message: format!("provider returned HTTP {}", status.as_u16()),
+                body: Some(response_body(&text, &response_headers)),
+            }));
         }
         return Err(CoreError::Http {
             status: status.as_u16(),
@@ -151,41 +104,33 @@ pub(super) async fn execute_messages_provider_call(
         Ok(response) => response,
         Err(err) => {
             if let Some(hook) = &debug {
-                hook.emit(&response_event(
-                    call_id.clone(),
-                    provider.clone(),
-                    status.as_u16(),
-                    started.elapsed().as_millis(),
-                    &response_headers,
-                    ResponseBody::Json(response_debug_value(&text, &response_headers)),
-                ));
-                hook.emit(&error_event(
-                    call_id.clone(),
-                    provider.clone(),
-                    started.elapsed().as_millis(),
-                    Some(status.as_u16()),
-                    "invalid_json".to_string(),
-                    err.to_string(),
-                    Some(response_debug_value(&text, &response_headers)),
-                ));
+                hook.emit(&error_event(ErrorEventInput {
+                    call_id: call_id.clone(),
+                    provider: provider.clone(),
+                    duration_ms: started.elapsed().as_millis(),
+                    status: Some(status.as_u16()),
+                    kind: "invalid_json",
+                    message: err.to_string(),
+                    body: Some(response_body(&text, &response_headers)),
+                }));
             }
             return Err(CoreError::InvalidResponse(format!(
                 "invalid messages response JSON: {err}"
             )));
         }
     };
-    if let Some(hook) = &debug {
-        hook.emit(&response_event(
-            call_id,
-            provider,
-            status.as_u16(),
-            started.elapsed().as_millis(),
-            &response_headers,
-            ResponseBody::Json(response.clone()),
-        ));
-    }
     let typed_response = AnthropicMessagesResponse::deserialize(&response)
         .map_err(|err| CoreError::InvalidResponse(format!("invalid messages response: {err}")))?;
+    if let Some(hook) = &debug {
+        hook.emit(&response_event(ResponseEventInput {
+            call_id,
+            provider,
+            status: status.as_u16(),
+            duration_ms: started.elapsed().as_millis(),
+            headers: response_headers,
+            body: ResponseBody::Json(response),
+        }));
+    }
     let transformed = request
         .config
         .transform_response(&request.model, typed_response)?;
@@ -204,60 +149,95 @@ pub(super) async fn execute_messages_provider_stream(
     }
 
     let started = Instant::now();
-    let mut request_builder = http_client().post(&request.url).json(&request.body);
+    let body_bytes = serde_json::to_vec(&request.body)
+        .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
+    if let Some(hook) = &request.debug_hook {
+        hook.emit(&request_event(RequestEventInput {
+            call_id: request.call_id.clone(),
+            provider: request.provider.clone(),
+            model: request.model.clone(),
+            stream: true,
+            url: request.url.clone(),
+            headers: request.upstream_headers.clone(),
+            body: request.body,
+        }));
+    }
+    let mut request_builder = http_client().post(&request.url).body(body_bytes);
     for (key, value) in &request.upstream_headers {
         request_builder = request_builder.header(key, value);
+    }
+    if !request
+        .upstream_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        request_builder = request_builder.header(reqwest::header::CONTENT_TYPE, "application/json");
     }
     if let Some(duration) = request.timeout {
         request_builder = request_builder.timeout(duration);
     }
-    if let Some(hook) = &request.debug_hook {
-        hook.emit(&request_event(
-            request.call_id.clone(),
-            request.provider.clone(),
-            request.model.clone(),
-            true,
-            request.url.clone(),
-            &request.upstream_headers,
-            request.body.clone(),
-        ));
-    }
-
-    let response = request_builder
-        .send()
-        .await
-        .map_err(|err| CoreError::Network(err.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
-        let text = response
-            .text()
-            .await
-            .map_err(|err| CoreError::Network(err.to_string()))?;
+    let response = request_builder.send().await.map_err(|err| {
         if let Some(hook) = &request.debug_hook {
-            hook.emit(&error_event(
-                request.call_id.clone(),
-                request.provider.clone(),
-                started.elapsed().as_millis(),
-                Some(status.as_u16()),
-                "http".to_string(),
-                format!("provider returned HTTP {}", status.as_u16()),
-                Some(Value::String(text.clone())),
-            ));
+            hook.emit(&error_event(ErrorEventInput {
+                call_id: request.call_id.clone(),
+                provider: request.provider.clone(),
+                duration_ms: started.elapsed().as_millis(),
+                status: None,
+                kind: "network_error",
+                message: err.to_string(),
+                body: None,
+            }));
+        }
+        CoreError::Network(err.to_string())
+    })?;
+    let status = response.status();
+    let response_headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect::<Vec<_>>();
+    if !status.is_success() {
+        let text = response.text().await.map_err(|err| {
+            if let Some(hook) = &request.debug_hook {
+                hook.emit(&error_event(ErrorEventInput {
+                    call_id: request.call_id.clone(),
+                    provider: request.provider.clone(),
+                    duration_ms: started.elapsed().as_millis(),
+                    status: Some(status.as_u16()),
+                    kind: "network_error",
+                    message: err.to_string(),
+                    body: None,
+                }));
+            }
+            CoreError::Network(err.to_string())
+        })?;
+        if let Some(hook) = &request.debug_hook {
+            hook.emit(&error_event(ErrorEventInput {
+                call_id: request.call_id.clone(),
+                provider: request.provider.clone(),
+                duration_ms: started.elapsed().as_millis(),
+                status: Some(status.as_u16()),
+                kind: "http_error",
+                message: format!("provider returned HTTP {}", status.as_u16()),
+                body: Some(response_body(&text, &response_headers)),
+            }));
         }
         return Err(CoreError::Http {
             status: status.as_u16(),
             body: truncate_error_body(&text),
         });
     }
-    let counter = Arc::new(StreamCounter {
-        call_id: request.call_id.clone(),
-        provider: request.provider.clone(),
-        hook: request.debug_hook.clone(),
+    let counter = Arc::new(StreamCounter::new(
+        request.call_id.clone(),
+        request.provider.clone(),
+        request.debug_hook.clone(),
         started,
-        bytes_received: AtomicUsize::new(0),
-        frames_received: AtomicUsize::new(0),
-        events_decoded: AtomicUsize::new(0),
-    });
+    ));
     if let Some(hook) = &request.debug_hook {
         hook.emit(&stream_started(
             request.call_id,
@@ -271,4 +251,26 @@ pub(super) async fn execute_messages_provider_stream(
         ));
     }
     Ok((response, counter))
+}
+
+fn response_body(text: &str, headers: &[(String, String)]) -> ResponseBody {
+    let is_json = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .is_some_and(|(_, value)| value.to_ascii_lowercase().contains("json"));
+    if is_json {
+        return serde_json::from_str(text)
+            .map(ResponseBody::Json)
+            .unwrap_or_else(|_| ResponseBody::Binary {
+                media_type: Some("application/json".to_string()),
+                bytes: text.len(),
+            });
+    }
+    ResponseBody::Binary {
+        media_type: headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.clone()),
+        bytes: text.len(),
+    }
 }

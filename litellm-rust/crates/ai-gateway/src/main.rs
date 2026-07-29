@@ -18,7 +18,7 @@ use litellm_core::router::{Deployment, LiteLLMParams, Router};
 
 use litellm_ai_gateway::integrations::custom_logger::CustomLogger;
 use litellm_ai_gateway::integrations::litellm_python_proxy_api::LiteLLMPythonProxyAPILogger;
-use litellm_ai_gateway::integrations::provider_debug::console::ConsoleDebugHook;
+use litellm_ai_gateway::integrations::provider_debug::console::hook_from_env;
 #[cfg(feature = "python-config")]
 use litellm_ai_gateway::python;
 
@@ -73,13 +73,7 @@ async fn main() {
         master_key,
         loggers: Arc::new(loggers),
         realtime_pool,
-        provider_debug_hook: std::env::var("LITELLM_LOG")
-            .ok()
-            .filter(|value| value.eq_ignore_ascii_case("DEBUG"))
-            .map(|_| {
-                Arc::new(ConsoleDebugHook::from_env())
-                    as Arc<dyn litellm_ai_gateway::integrations::provider_debug::ProviderDebugHook>
-            }),
+        provider_debug_hook: hook_from_env(),
     };
 
     let host = std::env::var("HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());

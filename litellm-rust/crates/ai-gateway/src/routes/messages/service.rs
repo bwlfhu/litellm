@@ -11,7 +11,7 @@ pub(crate) enum MessagesResponse {
     Json(Value),
     Stream(
         reqwest::Response,
-        std::sync::Arc<crate::messages::handler::StreamCounter>,
+        std::sync::Arc<crate::integrations::provider_debug::StreamCounter>,
     ),
 }
 

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use litellm_ai_gateway::integrations::provider_debug::ProviderDebugHook;
-use litellm_ai_gateway::integrations::provider_debug::console::ConsoleDebugHook;
+use litellm_ai_gateway::integrations::provider_debug::console::hook as console_hook;
 
 pub fn hook(enabled: bool) -> Option<Arc<dyn ProviderDebugHook>> {
-    enabled.then(|| Arc::new(ConsoleDebugHook::from_env()) as Arc<dyn ProviderDebugHook>)
+    console_hook(enabled)
 }
