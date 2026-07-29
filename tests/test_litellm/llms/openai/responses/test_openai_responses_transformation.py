@@ -15,6 +15,8 @@ from litellm.llms.base_llm.responses.transformation import BaseResponsesAPIConfi
 from litellm.llms.azure.responses.transformation import AzureOpenAIResponsesAPIConfig
 from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
 from litellm.types.llms.openai import (
+    CustomToolCallInputDeltaEvent,
+    CustomToolCallInputDoneEvent,
     ImageGenerationPartialImageEvent,
     OutputTextDeltaEvent,
     ResponseCompletedEvent,
@@ -446,6 +448,22 @@ class TestOpenAIResponsesAPIConfig:
         event_type = ResponsesAPIStreamEvents.IMAGE_GENERATION_PARTIAL_IMAGE
         result = self.config.get_event_model_class(event_type)
         assert result == ImageGenerationPartialImageEvent
+
+    @pytest.mark.parametrize(
+        ("event_type", "event_class"),
+        [
+            (
+                ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DELTA,
+                CustomToolCallInputDeltaEvent,
+            ),
+            (
+                ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DONE,
+                CustomToolCallInputDoneEvent,
+            ),
+        ],
+    )
+    def test_get_event_model_class_custom_tool_input(self, event_type, event_class):
+        assert self.config.get_event_model_class(event_type) == event_class
 
     def test_transform_streaming_response_image_generation_partial_image(self):
         """Test streaming response transformation for image generation partial image events"""

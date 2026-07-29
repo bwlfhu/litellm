@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -1664,6 +1665,525 @@ class TestToolTransformation:
         ]
         assert names == ["noop"]
         assert not any(name.startswith("litellm_unnamed_tool_") for name in names)
+
+
+class TestNamespaceToolTransformation:
+    @staticmethod
+    def _namespace_tools():
+        return [
+            {
+                "type": "namespace",
+                "name": "repo",
+                "description": "Repository tools",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "search",
+                        "description": "Search files",
+                        "parameters": {"properties": {"query": {"type": "string"}}},
+                        "strict": True,
+                        "allowed_callers": ["code_execution_20250825"],
+                    }
+                ],
+            }
+        ]
+
+    @staticmethod
+    def _tool_call_response(name, arguments, call_id="call_1"):
+        return ModelResponse(
+            choices=[
+                Choices(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=Message(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[
+                            ChatCompletionMessageToolCall(
+                                id=call_id,
+                                type="function",
+                                function=Function(name=name, arguments=arguments),
+                            )
+                        ],
+                    ),
+                )
+            ]
+        )
+
+    @staticmethod
+    def _streaming_iterator(tools):
+        from unittest.mock import Mock
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+
+        wrapper = Mock(spec=litellm.CustomStreamWrapper)
+        wrapper.logging_obj = Mock()
+        return LiteLLMCompletionStreamingIterator(
+            model="anthropic/claude-sonnet",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="tool request",
+            responses_api_request={"tools": tools},
+        )
+
+    def test_namespace_tools_flatten_to_chat_functions(self):
+        tools, web_search_options = (
+            LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(
+                self._namespace_tools()
+            )
+        )
+
+        assert web_search_options is None
+        assert len(tools) == 1
+        assert tools[0]["function"]["name"] == "repo__search"
+        assert tools[0]["function"]["description"] == "Repository tools\n\nSearch files"
+        assert tools[0]["function"]["parameters"]["type"] == "object"
+        assert tools[0]["function"]["strict"] is True
+        assert tools[0]["allowed_callers"] == ["code_execution_20250825"]
+
+    def test_namespace_tool_call_round_trip_restores_namespace(self):
+        response = self._tool_call_response("repo__search", '{"query":"usage"}')
+
+        output = LiteLLMCompletionResponsesConfig.transform_chat_completion_tools_to_responses_tools(
+            chat_completion_response=response,
+            responses_api_request={"tools": self._namespace_tools()},
+        )
+
+        assert len(output) == 1
+        assert output[0].name == "search"
+        assert getattr(output[0], "namespace", None) == "repo"
+
+    @pytest.mark.parametrize(
+        ("item_type", "payload"),
+        [
+            ("function_call", {"arguments": '{"query":"usage"}'}),
+            ("custom_tool_call", {"input": "usage"}),
+        ],
+    )
+    def test_namespace_tool_call_replay_restores_wire_name(self, item_type, payload):
+        input_item = {
+            "type": item_type,
+            "id": "call_1",
+            "call_id": "call_1",
+            "name": "search",
+            "namespace": "repo",
+            **payload,
+        }
+
+        messages = LiteLLMCompletionResponsesConfig._transform_responses_api_function_call_to_chat_completion_message(
+            input_item
+        )
+
+        tool_call = messages[0]["tool_calls"][0]
+        assert tool_call["function"]["name"] == "repo__search"
+        if item_type == "custom_tool_call":
+            assert tool_call["function"]["arguments"] == '{"content": "usage"}'
+
+    @pytest.mark.parametrize("namespace", [None, "repo"])
+    def test_empty_custom_tool_input_replays_as_valid_json(self, namespace):
+        input_item = {
+            "type": "custom_tool_call",
+            "id": "call_1",
+            "call_id": "call_1",
+            "name": "apply_patch",
+            "input": "",
+        }
+        if namespace:
+            input_item["namespace"] = namespace
+
+        messages = LiteLLMCompletionResponsesConfig._transform_responses_api_function_call_to_chat_completion_message(
+            input_item
+        )
+
+        tool_call = messages[0]["tool_calls"][0]
+        assert tool_call["function"]["arguments"] == '{"content": ""}'
+
+    def test_ambiguous_unqualified_namespace_name_is_not_restored(self):
+        tools = [
+            {
+                "type": "namespace",
+                "name": namespace,
+                "tools": [{"type": "function", "name": "search", "parameters": {}}],
+            }
+            for namespace in ("repo", "docs")
+        ]
+
+        namespace_map = LiteLLMCompletionResponsesConfig._namespace_tool_name_map(tools)
+
+        assert "search" not in namespace_map
+        assert namespace_map["repo__search"] == ("repo", "search", "function")
+        assert namespace_map["docs__search"] == ("docs", "search", "function")
+
+    def test_unqualified_alias_never_removes_a_canonical_wire_name(self):
+        tools = [
+            {
+                "type": "namespace",
+                "name": "a",
+                "tools": [{"type": "function", "name": "b", "parameters": {}}],
+            },
+            {
+                "type": "namespace",
+                "name": "x",
+                "tools": [
+                    {"type": "function", "name": "a__b", "parameters": {}}
+                ],
+            },
+        ]
+
+        namespace_map = LiteLLMCompletionResponsesConfig._namespace_tool_name_map(tools)
+
+        assert namespace_map["a__b"] == ("a", "b", "function")
+        assert namespace_map["x__a__b"] == ("x", "a__b", "function")
+        assert "b" in namespace_map
+
+    def test_namespace_custom_tool_flattens_and_round_trips(self):
+        tools = [
+            {
+                "type": "namespace",
+                "name": "repo",
+                "description": "Repository tools",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "apply_patch",
+                        "description": "Apply a patch",
+                        "format": {"type": "text"},
+                        "allowed_callers": ["code_execution_20250825"],
+                    }
+                ],
+            }
+        ]
+
+        chat_tools, _ = (
+            LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(
+                tools
+            )
+        )
+        assert chat_tools[0]["function"]["name"] == "repo__apply_patch"
+        assert chat_tools[0]["allowed_callers"] == ["code_execution_20250825"]
+
+        response = self._tool_call_response(
+            "repo__apply_patch",
+            '{"content":"*** Begin Patch"}',
+        )
+        output = LiteLLMCompletionResponsesConfig.transform_chat_completion_tools_to_responses_tools(
+            chat_completion_response=response,
+            responses_api_request={"tools": tools},
+        )
+
+        assert output[0].type == "custom_tool_call"
+        assert output[0].name == "apply_patch"
+        assert output[0].input == "*** Begin Patch"
+        assert getattr(output[0], "namespace", None) == "repo"
+
+    def test_restricted_namespace_requires_provider_enforcement(self):
+        import litellm
+
+        with pytest.raises(
+            litellm.BadRequestError,
+            match="cannot enforce caller restrictions",
+        ) as exc_info:
+            LiteLLMCompletionResponsesConfig.transform_responses_api_request_to_chat_completion_request(
+                model="gemini-2.5-pro",
+                input="search",
+                responses_api_request={"tools": self._namespace_tools()},
+                custom_llm_provider="gemini",
+            )
+        assert exc_info.value.status_code == 400
+
+    def test_anthropic_request_preserves_namespace_allowed_callers(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        request = LiteLLMCompletionResponsesConfig.transform_responses_api_request_to_chat_completion_request(
+            model="claude-sonnet-4-5",
+            input="search",
+            responses_api_request={"tools": self._namespace_tools()},
+            custom_llm_provider="anthropic",
+        )
+
+        provider_tools, _ = AnthropicConfig()._map_tools(request["tools"])
+
+        assert request["tools"][0]["allowed_callers"] == [
+            "code_execution_20250825"
+        ]
+        assert provider_tools[0]["allowed_callers"] == ["code_execution_20250825"]
+
+    def test_top_level_custom_name_does_not_retype_namespace_function(self):
+        tools = [
+            {"type": "custom", "name": "search", "description": "Freeform search"},
+            *self._namespace_tools(),
+        ]
+        response = self._tool_call_response("repo__search", '{"query":"usage"}')
+
+        output = LiteLLMCompletionResponsesConfig.transform_chat_completion_tools_to_responses_tools(
+            chat_completion_response=response,
+            responses_api_request={"tools": tools},
+        )
+
+        assert output[0].type == "function_call"
+        assert output[0].name == "search"
+        assert getattr(output[0], "namespace", None) == "repo"
+
+    def test_top_level_name_blocks_unqualified_namespace_restore(self):
+        tools = [
+            {"type": "function", "name": "run", "parameters": {}},
+            {
+                "type": "namespace",
+                "name": "admin",
+                "tools": [{"type": "function", "name": "run", "parameters": {}}],
+            },
+        ]
+        namespace_map = LiteLLMCompletionResponsesConfig._namespace_tool_name_map(tools)
+        response = self._tool_call_response("run", "{}")
+
+        output = LiteLLMCompletionResponsesConfig.transform_chat_completion_tools_to_responses_tools(
+            chat_completion_response=response,
+            responses_api_request={"tools": tools},
+        )
+
+        assert "run" not in namespace_map
+        assert output[0].name == "run"
+        assert getattr(output[0], "namespace", None) is None
+
+    @pytest.mark.parametrize(
+        "tools",
+        [
+            [
+                {"type": "function", "name": "admin__run", "parameters": {}},
+                {
+                    "type": "namespace",
+                    "name": "admin",
+                    "tools": [{"type": "function", "name": "run", "parameters": {}}],
+                },
+            ],
+            [
+                {
+                    "type": "namespace",
+                    "name": "admin",
+                    "tools": [{"type": "function", "name": "run", "parameters": {}}],
+                },
+                {
+                    "type": "namespace",
+                    "name": "admin",
+                    "tools": [{"type": "custom", "name": "run"}],
+                },
+            ],
+        ],
+    )
+    def test_flattened_namespace_name_collisions_fail(self, tools):
+        import litellm
+
+        with pytest.raises(
+            litellm.BadRequestError,
+            match="Namespace tool name collision for 'admin__run'",
+        ):
+            LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(
+                tools
+            )
+
+    def test_name_only_flat_namespace_is_not_a_callable_tool(self):
+        result, _ = (
+            LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(
+                [{"type": "namespace", "name": "repo"}]
+            )
+        )
+
+        assert result == []
+
+    def test_flat_namespace_with_schema_is_preserved(self):
+        result, _ = (
+            LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(
+                [
+                    {
+                        "type": "namespace",
+                        "name": "mcp__node_repl",
+                        "description": "Run JavaScript",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"code": {"type": "string"}},
+                        },
+                    }
+                ]
+            )
+        )
+
+        assert result[0]["function"]["name"] == "mcp__node_repl"
+        assert result[0]["function"]["parameters"]["properties"] == {
+            "code": {"type": "string"}
+        }
+
+    def test_flat_namespace_name_blocks_nested_unqualified_alias(self):
+        tools = [
+            {"type": "namespace", "name": "search", "parameters": {}},
+            {
+                "type": "namespace",
+                "name": "repo",
+                "tools": [
+                    {"type": "function", "name": "search", "parameters": {}}
+                ],
+            },
+        ]
+        response = self._tool_call_response("search", "{}")
+
+        output = LiteLLMCompletionResponsesConfig.transform_chat_completion_tools_to_responses_tools(
+            chat_completion_response=response,
+            responses_api_request={"tools": tools},
+        )
+        iterator = self._streaming_iterator(tools)
+        iterator._queue_tool_call_delta_events(
+            [
+                {
+                    "id": "call_1",
+                    "index": 0,
+                    "function": {"name": "search", "arguments": "{}"},
+                }
+            ]
+        )
+
+        assert output[0].name == "search"
+        assert getattr(output[0], "namespace", None) is None
+        assert iterator._pending_tool_events[0].item.name == "search"
+        assert getattr(iterator._pending_tool_events[0].item, "namespace", None) is None
+
+    def test_flat_namespace_collision_is_a_bad_request(self):
+        import litellm
+
+        tools = [
+            {"type": "function", "name": "run", "parameters": {}},
+            {"type": "namespace", "name": "run", "parameters": {}},
+        ]
+
+        with pytest.raises(
+            litellm.BadRequestError,
+            match="Namespace tool name collision for 'run'",
+        ) as exc_info:
+            LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(
+                tools
+            )
+        assert exc_info.value.status_code == 400
+
+    def test_long_namespace_wire_name_is_bounded_and_reversible(self):
+        namespace = "namespace_" + "n" * 40
+        tool_name = "tool_" + "t" * 40
+        tools = [
+            {
+                "type": "namespace",
+                "name": namespace,
+                "tools": [
+                    {"type": "function", "name": tool_name, "parameters": {}}
+                ],
+            }
+        ]
+
+        chat_tools, _ = (
+            LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(
+                tools
+            )
+        )
+        wire_name = chat_tools[0]["function"]["name"]
+        restored = LiteLLMCompletionResponsesConfig._restore_namespace_tool_name(
+            wire_name,
+            LiteLLMCompletionResponsesConfig._namespace_tool_name_map(tools),
+        )
+
+        assert len(wire_name) == 64
+        assert restored == (tool_name, namespace, "function")
+
+    @pytest.mark.parametrize(
+        ("nested_tool", "chat_name", "arguments", "expected_type", "payload_field", "payload"),
+        [
+            (
+                {"type": "function", "name": "search", "parameters": {}},
+                "repo__search",
+                '{"query":"usage"}',
+                "function_call",
+                "arguments",
+                '{"query":"usage"}',
+            ),
+            (
+                {"type": "custom", "name": "search"},
+                "repo__search",
+                '{"content":"usage"}',
+                "custom_tool_call",
+                "input",
+                "usage",
+            ),
+        ],
+    )
+    def test_streaming_namespace_tool_type_is_preserved(
+        self,
+        nested_tool,
+        chat_name,
+        arguments,
+        expected_type,
+        payload_field,
+        payload,
+    ):
+        tools = [
+            {"type": "custom", "name": "search"},
+            {
+                "type": "namespace",
+                "name": "repo",
+                "tools": [nested_tool],
+            },
+        ]
+        iterator = self._streaming_iterator(tools)
+
+        iterator._queue_tool_call_delta_events(
+            [
+                {
+                    "id": "call_1",
+                    "index": 0,
+                    "function": {"name": chat_name, "arguments": arguments},
+                }
+            ]
+        )
+        complete_response = self._tool_call_response(chat_name, arguments)
+        iterator._queue_final_tool_call_done_events(complete_response)
+
+        item_events = [
+            event
+            for event in iterator._pending_tool_events
+            if event.type in ("response.output_item.added", "response.output_item.done")
+        ]
+        assert len(item_events) == 2
+        for event in item_events:
+            assert event.item.type == expected_type
+            assert event.item.name == "search"
+            assert getattr(event.item, "namespace", None) == "repo"
+        assert getattr(item_events[1].item, payload_field) == payload
+        payload_events = [
+            event.type
+            for event in iterator._pending_tool_events
+            if event.type not in ("response.output_item.added", "response.output_item.done")
+        ]
+        if expected_type == "custom_tool_call":
+            assert payload_events == [
+                "response.custom_tool_call_input.delta",
+                "response.custom_tool_call_input.done",
+            ]
+        else:
+            assert payload_events[-1] == "response.function_call_arguments.done"
+            assert all(
+                event_type == "response.function_call_arguments.delta"
+                for event_type in payload_events[:-1]
+            )
+        serialized_events = [
+            json.loads(event.model_dump_json(exclude_none=True))
+            for event in iterator._pending_tool_events
+        ]
+        sequence_numbers = [event["sequence_number"] for event in serialized_events]
+        assert sequence_numbers == sorted(sequence_numbers)
+        assert len(sequence_numbers) == len(set(sequence_numbers))
+
+    def test_encrypted_content_is_not_forwarded_as_plaintext(self):
+        content = LiteLLMCompletionResponsesConfig._transform_responses_api_content_to_chat_completion_content(
+            [{"type": "encrypted_content", "encrypted_content": "encrypted-value"}]
+        )
+
+        assert content == []
 
 
 class TestUsageTransformation:

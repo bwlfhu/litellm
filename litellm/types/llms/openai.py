@@ -9,6 +9,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Union,
 )
@@ -917,6 +918,8 @@ class OpenAIChatCompletionToolParam(TypedDict):
 class ChatCompletionToolParam(OpenAIChatCompletionToolParam, total=False):
     cache_control: ChatCompletionCachedContent
     allowed_callers: List[str]
+    defer_loading: bool
+    input_examples: Sequence[Mapping[str, object]]
 
 
 class Function(TypedDict, total=False):
@@ -1401,6 +1404,9 @@ class ResponsesAPIStreamEvents(str, Enum):
     FUNCTION_CALL_ARGUMENTS_DELTA = "response.function_call_arguments.delta"
     FUNCTION_CALL_ARGUMENTS_DONE = "response.function_call_arguments.done"
 
+    CUSTOM_TOOL_CALL_INPUT_DELTA = "response.custom_tool_call_input.delta"
+    CUSTOM_TOOL_CALL_INPUT_DONE = "response.custom_tool_call_input.done"
+
     # File search events
     FILE_SEARCH_CALL_IN_PROGRESS = "response.file_search_call.in_progress"
     FILE_SEARCH_CALL_SEARCHING = "response.file_search_call.searching"
@@ -1496,6 +1502,7 @@ class OutputItemAddedEvent(BaseLiteLLMOpenAIResponseObject):
     type: Literal[ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED]
     output_index: int
     item: Optional[BaseLiteLLMOpenAIResponseObject]
+    sequence_number: Optional[int] = None
 
 
 class OutputItemDoneEvent(BaseLiteLLMOpenAIResponseObject):
@@ -1604,6 +1611,7 @@ class FunctionCallArgumentsDeltaEvent(BaseLiteLLMOpenAIResponseObject):
     item_id: str
     output_index: int
     delta: str
+    sequence_number: Optional[int] = None
 
 
 class FunctionCallArgumentsDoneEvent(BaseLiteLLMOpenAIResponseObject):
@@ -1611,6 +1619,23 @@ class FunctionCallArgumentsDoneEvent(BaseLiteLLMOpenAIResponseObject):
     item_id: str
     output_index: int
     arguments: str
+    sequence_number: Optional[int] = None
+
+
+class CustomToolCallInputDeltaEvent(BaseLiteLLMOpenAIResponseObject):
+    type: Literal[ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DELTA]
+    item_id: str
+    output_index: int
+    delta: str
+    sequence_number: int
+
+
+class CustomToolCallInputDoneEvent(BaseLiteLLMOpenAIResponseObject):
+    type: Literal[ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DONE]
+    item_id: str
+    output_index: int
+    input: str
+    sequence_number: int
 
 
 class FileSearchCallInProgressEvent(BaseLiteLLMOpenAIResponseObject):
@@ -1759,6 +1784,8 @@ ResponsesAPIStreamingResponse = Annotated[
         RefusalDoneEvent,
         FunctionCallArgumentsDeltaEvent,
         FunctionCallArgumentsDoneEvent,
+        CustomToolCallInputDeltaEvent,
+        CustomToolCallInputDoneEvent,
         FileSearchCallInProgressEvent,
         FileSearchCallSearchingEvent,
         FileSearchCallCompletedEvent,
