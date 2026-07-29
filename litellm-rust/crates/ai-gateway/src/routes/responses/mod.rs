@@ -318,6 +318,7 @@ mod tests {
             master_key: Some(Arc::from("master-key")),
             loggers: Arc::new(Vec::new()),
             realtime_pool: RealtimePool::disabled(),
+            provider_debug_hook: None,
         }
     }
 

@@ -46,6 +46,7 @@ class RecordingMessages:
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         timeout_seconds: float | None,
+        debug: bool = False,
     ) -> dict[str, object]:
         self.calls.append(
             {
@@ -56,6 +57,7 @@ class RecordingMessages:
                 "custom_llm_provider": custom_llm_provider,
                 "extra_headers": extra_headers,
                 "timeout_seconds": timeout_seconds,
+                "debug": debug,
             }
         )
         return dict(FAKE_MESSAGES_RESPONSE)
@@ -74,6 +76,7 @@ class RecordingAsyncMessages:
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         timeout_seconds: float | None,
+        debug: bool = False,
     ) -> dict[str, object]:
         self.calls.append(
             {
@@ -84,6 +87,7 @@ class RecordingAsyncMessages:
                 "custom_llm_provider": custom_llm_provider,
                 "extra_headers": extra_headers,
                 "timeout_seconds": timeout_seconds,
+                "debug": debug,
             }
         )
         return dict(FAKE_MESSAGES_RESPONSE)
@@ -192,7 +196,29 @@ def test_messages_wrapper_forwards_args_and_converts_timeout():
         "custom_llm_provider": "azure_ai",
         "extra_headers": {"anthropic-beta": "token-efficient-tools-2025-02-19"},
         "timeout_seconds": 42.0,
+        "debug": False,
     }
+
+
+def test_messages_wrapper_propagates_debug_flag():
+    bridge = RecordingMessages()
+    litellm.use_litellm_rust(True, messages=bridge)
+    litellm._turn_on_debug()
+    try:
+        rust_messages.messages(
+            model="claude-sonnet-4-5",
+            body=REQUEST_BODY,
+            api_key="sk-azure",
+            api_base="https://resource.services.ai.azure.com/anthropic",
+            custom_llm_provider="azure_ai",
+            extra_headers=None,
+            timeout=12.5,
+        )
+    finally:
+        from litellm._logging import _disable_debugging
+
+        _disable_debugging()
+    assert bridge.calls[0]["debug"] is True
 
 
 @pytest.mark.asyncio
@@ -213,6 +239,7 @@ async def test_amessages_wrapper_forwards_args():
     assert response == FAKE_MESSAGES_RESPONSE
     assert bridge.calls[0]["model"] == "claude-sonnet-4-5"
     assert bridge.calls[0]["timeout_seconds"] == 12.5
+    assert bridge.calls[0]["debug"] is False
 
 
 def _gate(**overrides):

@@ -56,3 +56,5 @@ pub(crate) const ANTHROPIC_MESSAGES_PROVIDER: &str = "anthropic";
 #[cfg(feature = "server")]
 pub(crate) const MESSAGES_HEADERS_NOT_FORWARDED: &[&str] =
     &["authorization", "connection", "content-length", "host"];
+
+pub(crate) const PROVIDER_DEBUG_BODY_MAX_BYTES: usize = 64 * 1024;

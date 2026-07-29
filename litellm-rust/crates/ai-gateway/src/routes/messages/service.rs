@@ -9,13 +9,17 @@ use crate::messages::{MessagesRequest, execute_messages};
 
 pub(crate) enum MessagesResponse {
     Json(Value),
-    Stream(reqwest::Response),
+    Stream(
+        reqwest::Response,
+        std::sync::Arc<crate::messages::handler::StreamCounter>,
+    ),
 }
 
 pub async fn run(
     router: &Arc<Router>,
     body: Value,
     extra_headers: Option<Map<String, Value>>,
+    debug_hook: Option<Arc<dyn crate::integrations::provider_debug::ProviderDebugHook>>,
 ) -> CoreResult<MessagesResponse> {
     let model = body
         .get("model")
@@ -51,14 +55,15 @@ pub async fn run(
         custom_llm_provider,
         extra_headers,
         timeout: None,
+        debug_hook,
     };
     let stream = request.body.get("stream").and_then(Value::as_bool) == Some(true);
     execute_messages(request, stream)
         .await
         .map(|response| match response {
             crate::messages::MessagesResponse::Json(body) => MessagesResponse::Json(body),
-            crate::messages::MessagesResponse::Stream(upstream) => {
-                MessagesResponse::Stream(upstream)
+            crate::messages::MessagesResponse::Stream(upstream, counter) => {
+                MessagesResponse::Stream(upstream, counter)
             }
         })
 }

@@ -37,6 +37,15 @@ one function per top-level route, starting with `ocr(payload)`.
 Run these before pushing Rust changes. GitHub Actions runs the same checks for
 changes under `litellm-rust/`.
 
+## Provider debug logging
+
+Call `litellm._turn_on_debug()` before using the native Python bridge to render
+the transformed provider request and upstream response. The Axum host enables
+the same logging with `LITELLM_LOG=DEBUG`. Set `JSON_LOGS=true` for compact
+JSON lines, and set `NO_COLOR` to keep pretty output without terminal colors.
+Prompts and responses remain visible by design and may contain sensitive
+application data
+
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings

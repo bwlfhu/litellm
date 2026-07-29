@@ -4,6 +4,7 @@ use crate::io::realtime_pool::RealtimePool;
 use litellm_core::router::Router;
 
 use crate::integrations::custom_logger::CustomLogger;
+use crate::integrations::provider_debug::ProviderDebugHook;
 
 /// Shared application state handed to every route handler.
 #[derive(Clone)]
@@ -18,4 +19,5 @@ pub struct AppState {
     /// (`RealtimePool::disabled()`) when `REALTIME_POOL_SIZE=0`, in which case
     /// every realtime connect fresh-dials exactly as before.
     pub realtime_pool: Arc<RealtimePool>,
+    pub provider_debug_hook: Option<Arc<dyn ProviderDebugHook>>,
 }

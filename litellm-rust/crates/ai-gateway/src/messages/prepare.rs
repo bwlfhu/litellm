@@ -5,6 +5,7 @@ use litellm_core::routing_utils::provider::{CustomLlmProvider, get_custom_llm_pr
 
 use super::common_utils::{has_bearer_auth, has_header, messages_provider_config, string_headers};
 use super::types::{MessagesRequest, ProviderMessagesRequest};
+use crate::integrations::provider_debug::next_call_id;
 
 pub(super) fn prepare_messages_call(
     request: MessagesRequest<'_>,
@@ -71,5 +72,7 @@ pub(super) fn prepare_messages_call(
         body,
         upstream_headers: headers,
         timeout: request.timeout,
+        debug_hook: request.debug_hook,
+        call_id: next_call_id(),
     })
 }

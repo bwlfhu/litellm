@@ -20,6 +20,7 @@ class RustMessages(Protocol):
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         timeout_seconds: float | None,
+        debug: bool = False,
     ) -> dict[str, object]:
         raise NotImplementedError
 
@@ -34,6 +35,7 @@ class RustAmessages(Protocol):
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         timeout_seconds: float | None,
+        debug: bool = False,
     ) -> Awaitable[dict[str, object]]:
         raise NotImplementedError
 
@@ -108,6 +110,7 @@ def messages(
         custom_llm_provider=custom_llm_provider,
         extra_headers=extra_headers,
         timeout_seconds=timeout_to_seconds(timeout),
+        debug=_debug_enabled(),
     )
 
 
@@ -132,4 +135,11 @@ async def amessages(
         custom_llm_provider=custom_llm_provider,
         extra_headers=extra_headers,
         timeout_seconds=timeout_to_seconds(timeout),
+        debug=_debug_enabled(),
     )
+
+
+def _debug_enabled() -> bool:
+    from litellm._logging import _is_debugging_on
+
+    return _is_debugging_on()

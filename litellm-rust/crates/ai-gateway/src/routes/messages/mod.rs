@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use futures_util::StreamExt;
 use litellm_core::CoreError;
 use serde_json::{Map, Value};
 
@@ -28,16 +29,24 @@ async fn handle(
     Json(body): Json<Value>,
 ) -> Result<Response, MessagesRouteError> {
     let extra_headers = forwarded_headers(&headers)?;
-    match service::run(&state.router, body, extra_headers)
-        .await
-        .map_err(MessagesRouteError::from)?
+    match service::run(
+        &state.router,
+        body,
+        extra_headers,
+        state.provider_debug_hook.clone(),
+    )
+    .await
+    .map_err(MessagesRouteError::from)?
     {
         service::MessagesResponse::Json(body) => Ok(Json(body).into_response()),
-        service::MessagesResponse::Stream(upstream) => stream_response(upstream),
+        service::MessagesResponse::Stream(upstream, counter) => stream_response(upstream, counter),
     }
 }
 
-fn stream_response(upstream: reqwest::Response) -> Result<Response, MessagesRouteError> {
+fn stream_response(
+    upstream: reqwest::Response,
+    counter: std::sync::Arc<crate::messages::handler::StreamCounter>,
+) -> Result<Response, MessagesRouteError> {
     let content_type = upstream
         .headers()
         .get(CONTENT_TYPE)
@@ -56,7 +65,16 @@ fn stream_response(upstream: reqwest::Response) -> Result<Response, MessagesRout
         response = response.header(CACHE_CONTROL, value);
     }
     response
-        .body(Body::from_stream(upstream.bytes_stream()))
+        .body(Body::from_stream(upstream.bytes_stream().map(
+            move |result| match result {
+                Ok(bytes) => {
+                    let events = bytes.windows(2).filter(|window| *window == b"\n\n").count();
+                    counter.record(bytes.len(), events);
+                    Ok(bytes)
+                }
+                Err(error) => Err(error),
+            },
+        )))
         .map_err(|error| {
             MessagesRouteError(CoreError::InvalidResponse(format!(
                 "failed to build streaming response: {error}"
@@ -160,6 +178,7 @@ mod tests {
             master_key: master_key.map(Arc::from),
             loggers: Arc::new(Vec::new()),
             realtime_pool: RealtimePool::disabled(),
+            provider_debug_hook: None,
         }
     }
 
