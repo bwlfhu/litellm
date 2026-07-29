@@ -2864,6 +2864,25 @@ def test_streaming_function_call_tool_id_for_degenerate_call_id():
     assert stream_tool_id("fc_2", "call_tokyo") == "call_tokyo"
 
 
+def test_convert_none_response_output_to_empty_choices():
+    assert LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(None) == []
+
+
+def test_response_completed_with_none_output_is_non_blocking():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    result = OpenAiResponsesToChatCompletionStreamIterator.translate_responses_chunk_to_openai_stream(
+        {
+            "type": "response.completed",
+            "response": {"status": "completed", "output": None},
+        }
+    )
+
+    assert result.choices[0].finish_reason == "stop"
+
+
 def test_streaming_chunks_share_one_chat_completion_id():
     """Every chunk of one streamed chat completion must carry the same ``id``, per the
     OpenAI spec. The bridge builds a fresh ``ModelResponseStream`` per Responses event,

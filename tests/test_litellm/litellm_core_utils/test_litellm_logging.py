@@ -2886,6 +2886,175 @@ def test_get_assembled_streaming_response_returns_result_for_streaming():
     assert assembled is result
 
 
+def test_get_assembled_streaming_response_handles_dict_responses_usage():
+    import datetime
+
+    from litellm.types.llms.openai import ResponseCompletedEvent, ResponsesAPIStreamEvents
+
+    logging_obj = _make_logging_obj(stream=True)
+    result = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={
+            "id": "resp-1",
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+        },
+    )
+
+    assembled = logging_obj._get_assembled_streaming_response(
+        result=result,
+        start_time=datetime.datetime.now(),
+        end_time=datetime.datetime.now(),
+        is_async=True,
+        streaming_chunks=[],
+    )
+
+    assert assembled is not result.response
+    assert assembled["usage"]["prompt_tokens"] == 5
+    assert assembled["usage"]["completion_tokens"] == 3
+    assert assembled["usage"]["total_tokens"] == 8
+    assert result.response["usage"] == {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+
+
+def test_get_assembled_streaming_response_keeps_invalid_dict_usage_non_blocking():
+    import datetime
+
+    from litellm.types.llms.openai import ResponseCompletedEvent, ResponsesAPIStreamEvents
+
+    logging_obj = _make_logging_obj(stream=True)
+    result = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={"id": "resp-1", "usage": {"input_tokens": "invalid"}},
+    )
+
+    assembled = logging_obj._get_assembled_streaming_response(
+        result=result,
+        start_time=datetime.datetime.now(),
+        end_time=datetime.datetime.now(),
+        is_async=True,
+        streaming_chunks=[],
+    )
+
+    assert assembled is not result.response
+    assert assembled["usage"]["prompt_tokens"] == 0
+    assert assembled["usage"]["completion_tokens"] == 0
+    assert assembled["usage"]["total_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_async_success_handler_keeps_invalid_responses_usage_non_blocking():
+    import datetime
+
+    from litellm.types.llms.openai import ResponseCompletedEvent, ResponsesAPIStreamEvents
+
+    logging_obj = _make_logging_obj(stream=True)
+    result = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={
+            "id": "resp-1",
+            "model": "openai/codex-mini-latest",
+            "output": [],
+            "usage": {
+                "input_tokens": "bad",
+                "output_tokens": "bad",
+                "total_tokens": "bad",
+            },
+        },
+    )
+
+    with patch.object(logging_obj, "get_combined_callback_list", return_value=[]):
+        await logging_obj.async_success_handler(
+            result=result,
+            start_time=datetime.datetime.now(),
+            end_time=datetime.datetime.now(),
+            cache_hit=False,
+        )
+
+    payload = logging_obj.model_call_details.get("standard_logging_object")
+    assert payload is not None
+    assert payload["prompt_tokens"] == 0
+    assert payload["completion_tokens"] == 0
+    assert payload["total_tokens"] == 0
+    assert result.response["usage"] == {
+        "input_tokens": "bad",
+        "output_tokens": "bad",
+        "total_tokens": "bad",
+    }
+
+
+def test_get_assembled_streaming_response_preserves_response_usage_details_and_cost():
+    import datetime
+
+    from litellm.types.llms.openai import ResponseCompletedEvent, ResponsesAPIStreamEvents
+
+    logging_obj = _make_logging_obj(stream=True)
+    result = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={
+            "id": "resp-1",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "input_token_details": {"cached_tokens": 6},
+                "output_token_details": {"reasoning_tokens": 2},
+                "cost": 0.25,
+            },
+        },
+    )
+
+    assembled = logging_obj._get_assembled_streaming_response(
+        result=result,
+        start_time=datetime.datetime.now(),
+        end_time=datetime.datetime.now(),
+        is_async=True,
+        streaming_chunks=[],
+    )
+
+    assert assembled["usage"]["prompt_tokens_details"]["cached_tokens"] == 6
+    assert assembled["usage"]["completion_tokens_details"]["reasoning_tokens"] == 2
+    assert assembled["usage"]["cost"] == 0.25
+
+
+def test_get_assembled_streaming_response_does_not_mutate_pydantic_response():
+    import datetime
+
+    from litellm.types.llms.openai import (
+        ResponseAPIUsage,
+        ResponseCompletedEvent,
+        ResponsesAPIResponse,
+        ResponsesAPIStreamEvents,
+    )
+
+    class NonDeepCopyable:
+        def __deepcopy__(self, memo):
+            raise TypeError("not deepcopyable")
+
+    response = ResponsesAPIResponse.model_construct(
+        id="resp-1",
+        output=[],
+        tool_choice=NonDeepCopyable(),
+        usage=ResponseAPIUsage(input_tokens=5, output_tokens=3, total_tokens=8),
+    )
+    result = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response=response,
+    )
+    logging_obj = _make_logging_obj(stream=True)
+
+    assembled = logging_obj._get_assembled_streaming_response(
+        result=result,
+        start_time=datetime.datetime.now(),
+        end_time=datetime.datetime.now(),
+        is_async=True,
+        streaming_chunks=[],
+    )
+
+    assert assembled is not response
+    assert assembled.usage["prompt_tokens"] == 5
+    assert assembled.usage["completion_tokens"] == 3
+    assert isinstance(response.usage, ResponseAPIUsage)
+    assert response.usage.input_tokens == 5
+
+
 def test_streaming_success_handler_includes_vertex_ai_metadata_in_standard_logging():
     """Assembled streaming responses should include Vertex AI metadata in logging payload."""
     import datetime

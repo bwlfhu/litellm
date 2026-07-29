@@ -1023,6 +1023,27 @@ class ResponsesAPIRequestUtils:
 
 class ResponseAPILoggingUtils:
     @staticmethod
+    def _coerce_response_api_usage(usage_input: object) -> ResponseAPIUsage | None:
+        try:
+            if isinstance(usage_input, ResponseAPIUsage):
+                return usage_input
+            if not isinstance(usage_input, dict):
+                return None
+            normalized_usage = dict(usage_input)
+            if normalized_usage.get("input_tokens_details") is None and "input_token_details" in normalized_usage:
+                normalized_usage["input_tokens_details"] = normalized_usage["input_token_details"]
+            if normalized_usage.get("output_tokens_details") is None and "output_token_details" in normalized_usage:
+                normalized_usage["output_tokens_details"] = normalized_usage["output_token_details"]
+            if normalized_usage.get("total_tokens") is None:
+                input_tokens = normalized_usage.get("input_tokens")
+                output_tokens = normalized_usage.get("output_tokens")
+                if input_tokens is not None and output_tokens is not None:
+                    normalized_usage["total_tokens"] = input_tokens + output_tokens
+            return ResponseAPIUsage(**normalized_usage)
+        except Exception:
+            return None
+
+    @staticmethod
     def _is_response_api_usage(usage: dict | ResponseAPIUsage) -> bool:
         """returns True if usage is from OpenAI Response API"""
         if isinstance(usage, ResponseAPIUsage):

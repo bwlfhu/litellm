@@ -90,6 +90,64 @@ def test_extract_partial_responses_usage_no_completed_response():
     assert usage is None
 
 
+def test_extract_partial_responses_usage_dict_response():
+    completed = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            "status": "completed",
+        },
+    )
+    source = MagicMock()
+    source.completed_response = completed
+
+    usage = Router._extract_partial_responses_usage(source)
+
+    assert usage == ResponseAPIUsage(input_tokens=5, output_tokens=3, total_tokens=8)
+
+
+def test_extract_partial_responses_usage_invalid_dict_returns_none():
+    completed = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={"usage": {"input_tokens": "invalid"}},
+    )
+    source = MagicMock()
+    source.completed_response = completed
+
+    assert Router._extract_partial_responses_usage(source) is None
+
+
+def test_extract_partial_responses_usage_invalid_total_calculation_returns_none():
+    completed = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={"usage": {"input_tokens": {}, "output_tokens": 1}},
+    )
+    source = MagicMock()
+    source.completed_response = completed
+
+    assert Router._extract_partial_responses_usage(source) is None
+
+
+def test_real_bridge_iterator_exposes_fallback_state_before_first_chunk():
+    from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+        LiteLLMCompletionStreamingIterator,
+    )
+
+    wrapper = MagicMock()
+    wrapper.logging_obj = MagicMock()
+    wrapper._hidden_params = {"model_id": "deployment-123"}
+    iterator = LiteLLMCompletionStreamingIterator(
+        model="anthropic/claude-sonnet",
+        litellm_custom_stream_wrapper=wrapper,
+        request_input="hi",
+        responses_api_request={},
+    )
+
+    assert iterator.completed_response is None
+    assert iterator._hidden_params == {"model_id": "deployment-123"}
+    assert Router._extract_partial_responses_usage(iterator) is None
+
+
 # -------- _combine_responses_fallback_usage --------
 
 
@@ -105,6 +163,27 @@ def test_combine_responses_fallback_usage_sums_completed_event():
     assert combined.input_tokens == 16
     assert combined.output_tokens == 10
     assert combined.total_tokens == 26
+
+
+def test_combine_responses_fallback_usage_supports_dict_response():
+    fallback_event = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+        },
+    )
+    partial = ResponseAPIUsage(input_tokens=11, output_tokens=7, total_tokens=18)
+
+    Router._combine_responses_fallback_usage(fallback_event, partial)
+
+    assert fallback_event.response["usage"] == {
+        "input_tokens": 16,
+        "input_tokens_details": None,
+        "output_tokens": 10,
+        "output_tokens_details": None,
+        "total_tokens": 26,
+        "cost": None,
+    }
 
 
 def test_combine_responses_fallback_usage_passthrough_for_unknown_event():

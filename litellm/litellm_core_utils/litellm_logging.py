@@ -3211,7 +3211,7 @@ class Logging(LiteLLMLoggingBaseClass):
         end_time: datetime.datetime,
         is_async: bool,
         streaming_chunks: list[Any],
-    ) -> ModelResponse | TextCompletionResponse | ResponsesAPIResponse | None:
+    ) -> ModelResponse | TextCompletionResponse | ResponsesAPIResponse | dict[str, Any] | None:
         if self.stream is not True:
             return None
         if isinstance(result, ModelResponse) or isinstance(result, TextCompletionResponse):
@@ -3220,22 +3220,33 @@ class Logging(LiteLLMLoggingBaseClass):
             result,
             (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent),
         ):
-            ## return unified Usage object
-            if isinstance(result.response.usage, ResponseAPIUsage):
+            if isinstance(result.response, dict):
+                response = dict(result.response)
+            elif isinstance(result.response, BaseModel):
+                response = result.response.model_copy()
+            else:
+                response = copy.copy(result.response)
+            usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            normalized_usage = ResponseAPILoggingUtils._coerce_response_api_usage(usage)
+            if normalized_usage is not None:
                 transformed_usage: Final = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-                    result.response.usage
+                    normalized_usage
                 )
-                # Set as dict instead of Usage object so model_dump() serializes it correctly
-                setattr(
-                    result.response,
-                    "usage",
-                    (
-                        transformed_usage.model_dump()
-                        if hasattr(transformed_usage, "model_dump")
-                        else dict(transformed_usage)
-                    ),
+                serialized_usage = (
+                    transformed_usage.model_dump()
+                    if hasattr(transformed_usage, "model_dump")
+                    else dict(transformed_usage)
                 )
-            return result.response
+            elif usage is not None:
+                serialized_usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0).model_dump()
+            else:
+                serialized_usage = None
+            if serialized_usage is not None:
+                if isinstance(response, dict):
+                    response["usage"] = serialized_usage
+                else:
+                    setattr(response, "usage", serialized_usage)
+            return response
         else:
             return None
 

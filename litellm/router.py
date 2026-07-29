@@ -2275,6 +2275,7 @@ class Router:
         from litellm.responses.litellm_completion_transformation.streaming_iterator import (
             LiteLLMCompletionStreamingIterator,
         )
+        from litellm.responses.utils import ResponseAPILoggingUtils
         from litellm.types.llms.openai import (
             ResponseAPIUsage,
             ResponseCompletedEvent,
@@ -2317,12 +2318,14 @@ class Router:
         # Native path: completed_response is set only if RESPONSE_COMPLETED
         # arrived before the error (uncommon mid-stream but worth checking).
         # Already ResponseAPIUsage-shaped — return as-is.
-        completed: Final = source_iterator.completed_response
+        completed: Final = getattr(source_iterator, "completed_response", None)
         if isinstance(
             completed,
             (ResponseCompletedEvent, ResponseFailedEvent, ResponseIncompleteEvent),
         ):
-            return completed.response.usage
+            response = completed.response
+            usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            return ResponseAPILoggingUtils._coerce_response_api_usage(usage)
         return None
 
     @staticmethod
@@ -2356,16 +2359,25 @@ class Router:
             (ResponseCompletedEvent, ResponseFailedEvent, ResponseIncompleteEvent),
         ):
             return
-        response: Final = fallback_item.response
-        if response.usage is None:
-            return
+        from litellm.responses.utils import ResponseAPILoggingUtils
 
-        fb: Final = response.usage
-        response.usage = ResponseAPIUsage(
-            input_tokens=(partial_usage.input_tokens or 0) + (fb.input_tokens or 0),
-            output_tokens=(partial_usage.output_tokens or 0) + (fb.output_tokens or 0),
-            total_tokens=(partial_usage.total_tokens or 0) + (fb.total_tokens or 0),
-        )
+        try:
+            response = fallback_item.response
+            usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            fallback_usage = ResponseAPILoggingUtils._coerce_response_api_usage(usage)
+            if fallback_usage is None:
+                return
+            combined_usage = ResponseAPIUsage(
+                input_tokens=(partial_usage.input_tokens or 0) + (fallback_usage.input_tokens or 0),
+                output_tokens=(partial_usage.output_tokens or 0) + (fallback_usage.output_tokens or 0),
+                total_tokens=(partial_usage.total_tokens or 0) + (fallback_usage.total_tokens or 0),
+            )
+            if isinstance(response, dict):
+                response["usage"] = combined_usage.model_dump()
+            else:
+                response.usage = combined_usage
+        except Exception:
+            return
 
     @staticmethod
     def _build_responses_continuation_input(
@@ -2577,7 +2589,10 @@ class Router:
                 async for item in source_iterator:
                     yield item
             except MidStreamFallbackError as e:
-                partial_usage: Final = Router._extract_partial_responses_usage(source_iterator)
+                try:
+                    partial_usage: Final = Router._extract_partial_responses_usage(source_iterator)
+                except Exception:
+                    partial_usage = None
                 try:
                     model_group: Final = cast(str, initial_kwargs.get("model"))
                     fallbacks: Final[list | None] = initial_kwargs.get("fallbacks", self.fallbacks)
