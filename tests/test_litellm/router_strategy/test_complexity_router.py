@@ -27,7 +27,9 @@ from litellm.router_strategy.complexity_router.complexity_router import (
 )
 from litellm.router_strategy.complexity_router.config import (
     DEFAULT_COMPLEXITY_CONFIG,
+    DEFAULT_DIMENSION_WEIGHTS,
     DEFAULT_TECHNICAL_KEYWORDS,
+    NO_SIGNAL_MARKER,
     ComplexityRouterConfig,
     ComplexityTier,
 )
@@ -3400,3 +3402,265 @@ class TestEscalationKeywords:
             messages=[{"role": "user", "content": "LITELLM ESCALATE do better"}],
         )
         assert result.model == "o1-b"  # unchanged: no random hop to o1-a / o1-c
+
+
+DEFAULT_TIER_MODELS_FOR_TEST = {
+    "SIMPLE": "simple-model",
+    "MEDIUM": "medium-model",
+    "COMPLEX": "complex-model",
+    "REASONING": "reasoning-model",
+}
+
+RIVER_CROSSING = (
+    "A farmer must ferry a wolf, a goat, and a cabbage across a river. The boat holds the farmer "
+    "and one other item. Left alone, the wolf eats the goat and the goat eats the cabbage. Give "
+    "the shortest sequence of crossings."
+)
+
+ESCALATION_TRIAGE = (
+    "Three of our largest accounts have all asked for the same thing this quarter, but each one "
+    "wants it on a different timeline and two of them have contracts that expire before the "
+    "earliest date we could deliver. Draft the note to the leadership team laying out what we "
+    "should promise, to whom, and in what order."
+)
+
+BOARD_SUMMARY = (
+    "Summarize the attached quarterly report for a board audience and highlight anything that "
+    "changed materially from last quarter, keeping it to roughly one page and avoiding jargon "
+    "that a non-specialist reader would stumble over."
+)
+
+NO_SIGNAL_PROMPTS = (RIVER_CROSSING, ESCALATION_TRIAGE, BOARD_SUMMARY)
+
+CANCELLING_PROMPT = "hi, quick python question"
+
+
+@pytest.fixture
+def default_boundaries_router(mock_router_instance):
+    """Router on the shipped defaults: only the tier -> model map is overridden."""
+    return ComplexityRouter(
+        model_name="test-default-tier-router",
+        litellm_router_instance=mock_router_instance,
+        complexity_router_config={"tiers": dict(DEFAULT_TIER_MODELS_FOR_TEST)},
+    )
+
+
+def _router_with_default_tier(mock_router_instance, default_tier):
+    return ComplexityRouter(
+        model_name="test-default-tier-router",
+        litellm_router_instance=mock_router_instance,
+        complexity_router_config={
+            "tiers": dict(DEFAULT_TIER_MODELS_FOR_TEST),
+            "default_tier": default_tier,
+        },
+    )
+
+
+class TestNoSignalDefaultTier:
+    """LIT-4898: a prompt that fires no dimension is unclassifiable, not simple."""
+
+    @pytest.mark.parametrize("prompt", NO_SIGNAL_PROMPTS)
+    def test_no_signal_prompt_abstains_to_medium(self, default_boundaries_router, prompt):
+        tier, score, signals = default_boundaries_router.classify(prompt)
+        assert tier == ComplexityTier.MEDIUM
+        assert score == 0.0
+        assert signals == [NO_SIGNAL_MARKER]
+
+    def test_cancelling_dimensions_score_zero_but_do_not_abstain(self, default_boundaries_router):
+        """Guards the predicate itself: this prompt cancels to a score of zero with three
+        dimensions firing (short prompt, simple indicator, code keyword), so an abstain branch
+        written against the weighted score would wrongly promote it to MEDIUM."""
+        tier, score, signals = default_boundaries_router.classify(CANCELLING_PROMPT)
+        assert score == pytest.approx(0.0, abs=1e-9)
+        assert tier == ComplexityTier.SIMPLE
+        assert NO_SIGNAL_MARKER not in signals
+        assert signals == ["short (6 tokens)", "code (python)", "simple (quick, hi)"]
+
+    def test_exactly_zero_weighted_score_with_signal_does_not_abstain(self, mock_router_instance):
+        """Same guard as above, but with weights that cancel to a bit-exact 0.0 rather than to
+        float dust, so `weighted_score == 0.0` is a live substitution the suite has to reject."""
+        router = ComplexityRouter(
+            model_name="test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config={
+                "tiers": dict(DEFAULT_TIER_MODELS_FOR_TEST),
+                "dimension_weights": {**DEFAULT_DIMENSION_WEIGHTS, "tokenCount": 0.25, "codePresence": 0.5},
+            },
+        )
+        tier, score, signals = router.classify("please add a def here")
+        assert score == 0.0
+        assert signals == ["short (5 tokens)", "code (def)"]
+        assert tier == ComplexityTier.SIMPLE
+
+    def test_only_simple_indicator_fires_stays_simple(self, default_boundaries_router):
+        tier, _, signals = default_boundaries_router.classify("What is machine learning?")
+        assert tier == ComplexityTier.SIMPLE
+        assert NO_SIGNAL_MARKER not in signals
+
+    def test_only_token_count_fires_stays_simple(self, default_boundaries_router):
+        tier, _, signals = default_boundaries_router.classify("Where did we land on the offer letter")
+        assert signals == ["short (9 tokens)"]
+        assert tier == ComplexityTier.SIMPLE
+
+    def test_default_tier_simple_restores_previous_behavior(self, mock_router_instance):
+        router = _router_with_default_tier(mock_router_instance, "SIMPLE")
+        for prompt in NO_SIGNAL_PROMPTS:
+            tier, score, _ = router.classify(prompt)
+            assert tier == ComplexityTier.SIMPLE, prompt
+            assert score == 0.0
+
+    @pytest.mark.parametrize(
+        "configured, expected",
+        [
+            ("SIMPLE", ComplexityTier.SIMPLE),
+            ("MEDIUM", ComplexityTier.MEDIUM),
+            ("COMPLEX", ComplexityTier.COMPLEX),
+            ("REASONING", ComplexityTier.REASONING),
+        ],
+    )
+    def test_default_tier_is_configurable(self, mock_router_instance, configured, expected):
+        router = _router_with_default_tier(mock_router_instance, configured)
+        tier, _, _ = router.classify(RIVER_CROSSING)
+        assert tier == expected
+
+    def test_default_tier_defaults_to_medium(self):
+        assert ComplexityRouterConfig().default_tier == ComplexityTier.MEDIUM
+        assert DEFAULT_COMPLEXITY_CONFIG.default_tier == ComplexityTier.MEDIUM
+
+    def test_unknown_default_tier_is_rejected(self, mock_router_instance):
+        with pytest.raises(ValidationError):
+            _router_with_default_tier(mock_router_instance, "CHEAPEST")
+
+    def test_abstain_does_not_consult_tier_boundaries(self, mock_router_instance):
+        """Boundaries that would map 0.0 to COMPLEX must not reach the no-signal path."""
+        router = ComplexityRouter(
+            model_name="test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config={
+                "tiers": dict(DEFAULT_TIER_MODELS_FOR_TEST),
+                "tier_boundaries": {
+                    "simple_medium": -1.0,
+                    "medium_complex": -0.5,
+                    "complex_reasoning": 1.0,
+                },
+            },
+        )
+        tier, _, _ = router.classify(RIVER_CROSSING)
+        assert tier == ComplexityTier.MEDIUM
+
+    def test_reasoning_override_wins_over_abstain(self, default_boundaries_router):
+        tier, _, signals = default_boundaries_router.classify(
+            "Let's think step by step and reason through this carefully"
+        )
+        assert tier == ComplexityTier.REASONING
+        assert NO_SIGNAL_MARKER not in signals
+
+    @pytest.mark.asyncio
+    async def test_no_signal_request_routes_to_the_medium_model(self, default_boundaries_router):
+        result = await default_boundaries_router.async_pre_routing_hook(
+            model="test-model",
+            request_kwargs={},
+            messages=[{"role": "user", "content": RIVER_CROSSING}],
+        )
+        assert result is not None
+        assert result.model == "medium-model"
+
+    @pytest.mark.asyncio
+    async def test_no_signal_request_honors_default_tier_simple(self, mock_router_instance):
+        router = _router_with_default_tier(mock_router_instance, "SIMPLE")
+        result = await router.async_pre_routing_hook(
+            model="test-model",
+            request_kwargs={},
+            messages=[{"role": "user", "content": RIVER_CROSSING}],
+        )
+        assert result is not None
+        assert result.model == "simple-model"
+
+    @pytest.mark.asyncio
+    async def test_abstain_still_escalates(self, mock_router_instance):
+        router = ComplexityRouter(
+            model_name="test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config={"tiers": dict(DEFAULT_TIER_MODELS_FOR_TEST)},
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model",
+            request_kwargs={},
+            messages=[{"role": "user", "content": f"LITELLM ESCALATE {RIVER_CROSSING}"}],
+        )
+        assert result is not None
+        assert result.model == "complex-model"
+
+
+LONG_UNMATCHED_PROMPT = " ".join(
+    [
+        "The tenant moved out on the fifteenth and left the place in a state that neither of us",
+        "expected. We had walked through it together in the spring and everything looked ordinary",
+        "then. Now there are marks along the hallway that were not in the move-in photos, the back",
+        "door does not sit flush in its frame, and the garden that was part of the agreement has",
+        "clearly been left to itself for most of the summer. I have the deposit, the signed",
+        "inventory from the start of the tenancy, and about forty photographs taken on the day they",
+        "handed the keys back. The tenant says the hallway marks were there when they arrived and",
+        "that the garden was never their responsibility because we had someone come round for the",
+        "first two months. I would like a letter to send them that sets out what I intend to hold",
+        "back from the deposit and why, that reads as reasonable rather than aggressive, and that",
+        "leaves room for them to come back with their side before I file anything formally. Keep it",
+        "to a page. I want the tone to be the sort a longtime neighbour would use, firm about the",
+        "money but not spoiling for a fight, because they may well end up renting the flat upstairs",
+        "from my sister and I would rather this ended quietly than turned into a matter that follows",
+        "everyone around for a year afterwards. Mention the walkthrough, mention the photographs,",
+        "and leave the specific figures blank for me to fill in myself once I have the quotes back",
+        "from the two people I asked to look at the door and the hallway this coming week, and say",
+        "plainly that I would rather settle the difference between us than have either of us spend",
+        "another weekend on it.",
+    ]
+)
+
+TIER_CORPUS = (
+    (RIVER_CROSSING, ComplexityTier.MEDIUM),
+    (ESCALATION_TRIAGE, ComplexityTier.MEDIUM),
+    (BOARD_SUMMARY, ComplexityTier.MEDIUM),
+    ("The quarterly numbers came in under what we told the board in April. Walk me through how "
+     "you would open that conversation with them, what you would concede up front, and where you "
+     "would push back if they ask whether the forecast was ever realistic.", ComplexityTier.MEDIUM),
+    (CANCELLING_PROMPT, ComplexityTier.SIMPLE),
+    ("Hi there!", ComplexityTier.SIMPLE),
+    ("Thanks!", ComplexityTier.SIMPLE),
+    ("What is machine learning?", ComplexityTier.SIMPLE),
+    ("Explain how REST APIs work with HTTP methods", ComplexityTier.SIMPLE),
+    (LONG_UNMATCHED_PROMPT, ComplexityTier.SIMPLE),
+    ("Write a function that reverses a linked list in python", ComplexityTier.MEDIUM),
+    ("Design a distributed microservice architecture for a high-throughput real-time data "
+     "processing pipeline with Kubernetes orchestration, implementing proper authentication "
+     "and encryption protocols", ComplexityTier.COMPLEX),
+    ("Think step by step and reason through the pros and cons of different database "
+     "architectures", ComplexityTier.REASONING),
+)
+
+
+class TestDefaultConfigTierCorpus:
+    """Pins the shipped-default tier mix so a weight or keyword edit cannot silently walk
+    unmatched traffic back onto the cheapest tier."""
+
+    @pytest.mark.parametrize("prompt, expected", TIER_CORPUS)
+    def test_corpus_tier(self, default_boundaries_router, prompt, expected):
+        tier, score, signals = default_boundaries_router.classify(prompt)
+        assert tier == expected, f"{prompt[:60]!r} -> {tier} (score={score:.4f}, signals={signals})"
+
+    def test_no_signal_share_of_corpus_never_lands_on_simple(self, default_boundaries_router):
+        abstained = [
+            prompt
+            for prompt, _ in TIER_CORPUS
+            if default_boundaries_router.classify(prompt)[2] == [NO_SIGNAL_MARKER]
+        ]
+        assert len(abstained) == 4
+        for prompt in abstained:
+            assert default_boundaries_router.classify(prompt)[0] != ComplexityTier.SIMPLE
+
+    def test_long_unmatched_prompt_fires_token_count_and_is_not_abstain(self, default_boundaries_router):
+        """The >400-token band is outside the abstain set by design: tokenCount fires, so the
+        prompt scores +0.10 and the boundary (not default_tier) decides. Moving that boundary
+        is the separate pricing decision tracked as a follow-up."""
+        _, score, signals = default_boundaries_router.classify(LONG_UNMATCHED_PROMPT)
+        assert len(signals) == 1 and signals[0].startswith("long (")
+        assert score == pytest.approx(0.10)

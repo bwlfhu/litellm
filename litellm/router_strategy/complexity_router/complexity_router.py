@@ -33,6 +33,7 @@ from .config import (
     DEFAULT_REASONING_KEYWORDS,
     DEFAULT_SIMPLE_KEYWORDS,
     DEFAULT_TECHNICAL_KEYWORDS,
+    NO_SIGNAL_MARKER,
     TIER_SEVERITY_ORDER,
     ComplexityRouterConfig,
     ComplexityTier,
@@ -291,6 +292,13 @@ class ComplexityRouter(CustomLogger):
         """
         Classify a prompt by complexity.
 
+        When no dimension fires at all, the prompt carries no evidence either way, so
+        `default_tier` (MEDIUM unless configured otherwise) is returned instead of letting
+        the score of 0.0 fall through the band mapping into SIMPLE. The check is on the
+        dimension scores rather than the weighted score because contributions cancel:
+        "hi, quick python question" scores zero with three dimensions firing, and is
+        genuinely simple.
+
         Args:
             prompt: The user's prompt/message.
             system_prompt: Optional system prompt for context.
@@ -299,7 +307,8 @@ class ComplexityRouter(CustomLogger):
             Tuple of (tier, score, signals) where:
             - tier: The ComplexityTier (SIMPLE, MEDIUM, COMPLEX, REASONING)
             - score: The raw weighted score
-            - signals: List of triggered signals for debugging
+            - signals: List of triggered signals for debugging, or ["no-signal"] when the
+              prompt matched nothing and default_tier was applied
         """
         # Combine text for analysis.
         # System prompt is intentionally included in code/technical/simple scoring
@@ -367,6 +376,9 @@ class ComplexityRouter(CustomLogger):
         # Reuse match count from _score_keyword_match to avoid scanning twice
         if reasoning_match_count >= 2:
             return ComplexityTier.REASONING, weighted_score, signals
+
+        if all(dimension.score == 0 for dimension in dimensions):
+            return self.config.default_tier, weighted_score, [NO_SIGNAL_MARKER]
 
         # Map score to tier
         boundaries = self.config.tier_boundaries

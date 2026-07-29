@@ -31,6 +31,8 @@ TIER_SEVERITY_ORDER: tuple[ComplexityTier, ...] = (
 
 DEFAULT_TIER_DISTANCE_PENALTY: float = 0.5
 
+NO_SIGNAL_MARKER: str = "no-signal"
+
 
 class KeywordTierRule(BaseModel):
     """A deterministic override: if any keyword matches, route to this tier."""
@@ -264,6 +266,16 @@ class ComplexityRouterConfig(BaseModel):
     tier_boundaries: dict[str, float] = Field(
         default_factory=lambda: DEFAULT_TIER_BOUNDARIES.copy(),
         description="Score boundaries between tiers",
+    )
+
+    default_tier: ComplexityTier = Field(
+        default=ComplexityTier.MEDIUM,
+        description=(
+            "Tier used when no scoring dimension fires, i.e. the prompt matched no keyword, "
+            "pattern or token-count threshold and the scorer has no evidence either way. "
+            "Must be a tier present in `tiers` (or `default_model` must be set). "
+            "Set to SIMPLE to restore the previous behavior of treating unmatched traffic as simple"
+        ),
     )
 
     # Token count thresholds
