@@ -190,6 +190,187 @@ class TestResponsesAPIRequestUtils:
         assert decoded.get("custom_llm_provider") == "azure"
         assert decoded.get("response_id") == "cntr_x"
 
+    @pytest.mark.parametrize(
+        ("provider", "model"),
+        [
+            ("openai", "gpt-5.4"),
+            ("azure", "gpt-5.4"),
+            ("xai", "grok-4"),
+            ("hosted_vllm", "gpt-5.4"),
+        ],
+    )
+    def test_openai_responses_adapters_normalize_foreign_function_call_item_ids(self, provider, model):
+        assert ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+            item_id="call_abc123",
+            model=model,
+            custom_llm_provider=provider,
+        ) == "fc_abc123"
+        assert ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+            item_id="tooluse_abc123",
+            model=model,
+            custom_llm_provider=provider,
+        ) == "fc_abc123"
+        assert ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+            item_id="toolu_vrtx_abc123",
+            model=model,
+            custom_llm_provider=provider,
+        ) == "fc_abc123"
+
+    def test_replayed_item_ids_are_normalized_by_item_type_for_openai(self):
+        from litellm.litellm_core_utils.prompt_templates.factory import (
+            THOUGHT_SIGNATURE_SEPARATOR,
+        )
+
+        signed_call_id = f"call_abc{THOUGHT_SIGNATURE_SEPARATOR}signature"
+        request_input = [
+            {
+                "type": "reasoning",
+                "id": "item_0c2b855288fb3034c4de8e23",
+                "encrypted_content": "encrypted",
+                "summary": [],
+            },
+            {
+                "type": "function_call",
+                "id": "tooluse_xyz",
+                "call_id": signed_call_id,
+                "name": "get_weather",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": signed_call_id,
+                "output": "sunny",
+            },
+            {"type": "message", "id": "item_message", "role": "user", "content": "hello"},
+        ]
+
+        result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=request_input,
+            model="gpt-5.4",
+            custom_llm_provider="openai",
+        )
+
+        assert "id" not in result[0]
+        assert result[1]["id"] == "fc_xyz"
+        assert result[1]["call_id"] == "call_abc"
+        assert result[2]["call_id"] == "call_abc"
+        assert result[3]["id"] == "item_message"
+        assert request_input[0]["id"] == "item_0c2b855288fb3034c4de8e23"
+        assert request_input[1]["id"] == "tooluse_xyz"
+        assert request_input[1]["call_id"] == signed_call_id
+        assert request_input[2]["call_id"] == signed_call_id
+        assert result is not request_input
+        assert result[0] is not request_input[0]
+
+    def test_replayed_item_id_normalization_is_isolated_between_provider_attempts(self):
+        request_input = [
+            {"type": "reasoning", "id": "item_foreign", "summary": []},
+            {"type": "function_call", "id": "tooluse_foreign", "call_id": "call_1"},
+        ]
+
+        openai_result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=request_input,
+            model="gpt-5.4",
+            custom_llm_provider="openai",
+        )
+        anthropic_result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=request_input,
+            model="claude-opus-4-1",
+            custom_llm_provider="anthropic",
+        )
+
+        assert "id" not in openai_result[0]
+        assert openai_result[1]["id"] == "fc_foreign"
+        assert anthropic_result == request_input
+        assert request_input[0]["id"] == "item_foreign"
+        assert request_input[1]["id"] == "tooluse_foreign"
+
+    @pytest.mark.parametrize(
+        ("provider", "model"),
+        [
+            ("xai", "grok-4"),
+            ("hosted_vllm", "gpt-5.4"),
+            ("litellm_proxy", "gpt-5.4"),
+        ],
+    )
+    def test_compatible_adapters_do_not_drop_foreign_reasoning_ids_without_evidence(self, provider, model):
+        request_input = [{"type": "reasoning", "id": "item_foreign", "summary": []}]
+
+        result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=request_input,
+            model=model,
+            custom_llm_provider=provider,
+        )
+
+        assert result[0]["id"] == "item_foreign"
+
+    def test_replayed_item_id_normalization_preserves_native_and_non_openai_ids(self):
+        openai_input = [
+            {"type": "reasoning", "id": "rs_native", "summary": []},
+            {"type": "reasoning", "id": "foreign_unknown", "summary": []},
+            {"type": "function_call", "id": "fc_native", "call_id": "call_native"},
+        ]
+        anthropic_input = [
+            {"type": "reasoning", "id": "item_foreign", "summary": []},
+            {"type": "function_call", "id": "tooluse_native", "call_id": "call_native"},
+        ]
+
+        assert ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=openai_input,
+            model="gpt-5.4",
+            custom_llm_provider="openai",
+        ) == [
+            {"type": "reasoning", "id": "rs_native", "summary": []},
+            {"type": "reasoning", "id": "foreign_unknown", "summary": []},
+            {"type": "function_call", "id": "fc_native", "call_id": "call_native"},
+        ]
+        assert ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=anthropic_input,
+            model="claude-opus-4-1",
+            custom_llm_provider="anthropic",
+        ) == [
+            {"type": "reasoning", "id": "item_foreign", "summary": []},
+            {"type": "function_call", "id": "tooluse_native", "call_id": "call_native"},
+        ]
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_openai_and_azure_drop_foreign_reasoning_item_ids(self, provider):
+        result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=[{"type": "reasoning", "id": "item_foreign", "summary": []}],
+            model="gpt-5.4",
+            custom_llm_provider=provider,
+        )
+
+        assert "id" not in result[0]
+
+    def test_replayed_item_id_normalization_preserves_gemini_thought_signature(self):
+        from litellm.litellm_core_utils.prompt_templates.factory import (
+            THOUGHT_SIGNATURE_SEPARATOR,
+        )
+
+        call_id = f"call_abc{THOUGHT_SIGNATURE_SEPARATOR}signature"
+        request_input = [{"type": "function_call", "id": "call_abc", "call_id": call_id}]
+
+        result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=request_input,
+            model="gemini-2.5-flash",
+            custom_llm_provider="gemini",
+        )
+
+        assert result[0]["id"] == "call_abc"
+        assert result[0]["call_id"] == call_id
+
+    @pytest.mark.parametrize("request_input", ["text", {"type": "reasoning"}, None])
+    def test_replayed_item_id_normalization_ignores_non_list_input(self, request_input):
+        assert (
+            ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+                request_input=request_input,
+                model="gpt-5.4",
+                custom_llm_provider="openai",
+            )
+            is request_input
+        )
+
 
 class TestResponseAPILoggingUtils:
     def test_is_response_api_usage_true(self):
@@ -503,6 +684,33 @@ def test_responses_extra_body_forwarded_to_completion_transformation_handler():
         call_kwargs = mock_handler.call_args
         # extra_body can be a positional or keyword arg; check both
         assert call_kwargs.kwargs.get("extra_body") == {"custom_key": "custom_value"}
+
+
+def test_responses_normalizes_replayed_item_ids_before_native_dispatch():
+    with (
+        patch(
+            "litellm.responses.main.ProviderConfigManager.get_provider_responses_api_config",
+            return_value=OpenAIResponsesAPIConfig(),
+        ),
+        patch("litellm.responses.main.base_llm_http_handler.response_api_handler") as mock_handler,
+    ):
+        mock_handler.return_value = MagicMock()
+
+        litellm.responses(
+            model="openai/gpt-4o",
+            input=[
+                {
+                    "type": "reasoning",
+                    "id": "item_0c2b855288fb3034c4de8e23",
+                    "summary": [],
+                    "encrypted_content": "encrypted",
+                }
+            ],
+            litellm_logging_obj=MagicMock(),
+        )
+
+        forwarded_input = mock_handler.call_args.kwargs["input"]
+        assert "id" not in forwarded_input[0]
 
 
 def test_responses_maps_reasoning_effort_from_litellm_params_to_reasoning():
