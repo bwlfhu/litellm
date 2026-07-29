@@ -2902,3 +2902,49 @@ async def test_compression_savings_survive_to_spend_log_payload_metadata(monkeyp
         "tokens_saved": 7000,
         "source": "compression_interception",
     }
+
+
+def test_routing_decision_survives_to_spend_log_payload_metadata():
+    """A routing_decision stashed by the router's pre-routing hook must land in the
+    spend log row's metadata (it is whitelisted on SpendLogsMetadata); without the
+    whitelist entry the metadata filter silently drops it."""
+    routing_decision = {
+        "router_model_name": "smart-router",
+        "router_type": "complexity",
+        "routed_model": "gpt-4o-mini",
+        "cause": "heuristic_scorer",
+        "tier": "SIMPLE",
+        "score": 0.1,
+        "signals": ["short (3 tokens)"],
+        "tier_boundaries": {"simple_medium": 0.15, "medium_complex": 0.35, "complex_reasoning": 0.60},
+    }
+    payload = get_logging_payload(
+        kwargs={
+            "model": "gpt-4o-mini",
+            "litellm_params": {
+                "metadata": {
+                    "user_api_key": "test-key",
+                    "routing_decision": routing_decision,
+                }
+            },
+        },
+        response_obj=litellm.ModelResponse(id="chatcmpl-routing-decision", choices=[], usage=litellm.Usage()),
+        start_time=datetime.datetime.now(timezone.utc),
+        end_time=datetime.datetime.now(timezone.utc),
+    )
+    metadata = json.loads(payload["metadata"])
+    assert metadata["routing_decision"] == routing_decision
+
+
+def test_no_routing_decision_key_defaults_to_none_in_spend_log_metadata():
+    payload = get_logging_payload(
+        kwargs={
+            "model": "gpt-4o-mini",
+            "litellm_params": {"metadata": {"user_api_key": "test-key"}},
+        },
+        response_obj=litellm.ModelResponse(id="chatcmpl-no-routing-decision", choices=[], usage=litellm.Usage()),
+        start_time=datetime.datetime.now(timezone.utc),
+        end_time=datetime.datetime.now(timezone.utc),
+    )
+    metadata = json.loads(payload["metadata"])
+    assert metadata["routing_decision"] is None

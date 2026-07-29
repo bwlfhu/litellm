@@ -10,6 +10,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Union,
     get_args,
 )
@@ -2674,6 +2675,47 @@ class StandardLoggingPromptManagementMetadata(TypedDict):
     prompt_integration: str
 
 
+class StandardLoggingRoutingDecisionTierBoundaries(TypedDict):
+    """Snapshot of the complexity scorer's tier boundaries at decision time, so a
+    historical spend log row stays explainable after the router config changes."""
+
+    simple_medium: float
+    medium_complex: float
+    complex_reasoning: float
+
+
+RoutingDecisionCause = Literal[
+    "heuristic_scorer",
+    "llm_classifier",
+    "literal_keyword_match",
+    "semantic_keyword_match",
+    "session_affinity_pin",
+    "session_affinity_escalation",
+    "semantic_route",
+    "default_fallback",
+    "keyword",
+    "quality_tier",
+    "bandit",
+]
+
+
+class StandardLoggingRoutingDecision(TypedDict, total=False):
+    """Per-request provenance for a pre-routing strategy (auto-router) decision."""
+
+    router_model_name: str
+    router_type: Literal["semantic", "complexity", "adaptive", "quality"]
+    routed_model: str
+    cause: RoutingDecisionCause
+    tier: str
+    score: float
+    signals: Sequence[str]
+    matched_keyword: str
+    escalation_keyword: str
+    classifier_model: str
+    escalated: bool
+    tier_boundaries: StandardLoggingRoutingDecisionTierBoundaries
+
+
 class StandardLoggingMetadata(StandardLoggingUserAPIKeyMetadata):
     """
     Specific metadata k,v pairs logged to integration for easier cost tracking and prompt management
@@ -2687,6 +2729,7 @@ class StandardLoggingMetadata(StandardLoggingUserAPIKeyMetadata):
     prompt_management_metadata: Optional[StandardLoggingPromptManagementMetadata]
     mcp_tool_call_metadata: Optional[StandardLoggingMCPToolCall]
     vector_store_request_metadata: Optional[List[StandardLoggingVectorStoreRequest]]
+    routing_decision: StandardLoggingRoutingDecision | None
     applied_guardrails: Optional[List[str]]
     usage_object: Optional[dict]
     cold_storage_object_key: Optional[str]  # S3/GCS object key for cold storage retrieval
