@@ -1111,6 +1111,33 @@ def test_vertex_ai_map_tools():
     assert tools == new_tools
 
 
+def test_vertex_ai_map_tools_does_not_mutate_fallback_schema():
+    v = VertexGeminiConfig()
+    value = [
+        {
+            "type": "function",
+            "function": {
+                "name": "strict_tool",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+
+    mapped = v._map_function(value=value, optional_params={})
+
+    assert value[0]["function"]["strict"] is True
+    assert value[0]["function"]["parameters"]["additionalProperties"] is False
+    declaration = mapped[0]["function_declarations"][0]
+    assert "strict" not in declaration
+    assert "additionalProperties" not in declaration["parameters"]
+
+
 def test_vertex_ai_map_tool_with_anyof():
     """
     Related issue: https://github.com/BerriAI/litellm/issues/11164
