@@ -98,25 +98,53 @@ class _CombinedChunkSplitter:
 
     @staticmethod
     def _split(chunk: Any) -> List[Any]:
-        """Return ``[chunk]``, or ``[content_chunk, finish_chunk]`` if combined."""
-        if not _CombinedChunkSplitter._is_combined(chunk):
-            return [chunk]
+        """Split wire-incompatible combinations into ordered logical chunks."""
+        finish_chunk: Any | None = None
+        if _CombinedChunkSplitter._is_combined(chunk):
+            # Content chunk: keep the delta payload, clear the finish_reason.
+            content_chunk = copy.deepcopy(chunk)
+            content_chunk.choices[0].finish_reason = None
 
-        # Content chunk: keep the delta payload, clear the finish_reason.
-        content_chunk = copy.deepcopy(chunk)
-        content_chunk.choices[0].finish_reason = None
+            # Finish chunk: keep finish_reason (and usage), clear the delta payload.
+            finish_chunk = copy.deepcopy(chunk)
+            finish_delta = finish_chunk.choices[0].delta
+            finish_delta.content = None
+            if hasattr(finish_delta, "tool_calls"):
+                finish_delta.tool_calls = None
+            if hasattr(finish_delta, "reasoning_content"):
+                finish_delta.reasoning_content = None
+            if hasattr(finish_delta, "thinking_blocks"):
+                finish_delta.thinking_blocks = None
+        else:
+            content_chunk = chunk
 
-        # Finish chunk: keep finish_reason (and usage), clear the delta payload.
-        finish_chunk = copy.deepcopy(chunk)
-        finish_delta = finish_chunk.choices[0].delta
-        finish_delta.content = None
-        if hasattr(finish_delta, "tool_calls"):
-            finish_delta.tool_calls = None
-        if hasattr(finish_delta, "reasoning_content"):
-            finish_delta.reasoning_content = None
-        if hasattr(finish_delta, "thinking_blocks"):
-            finish_delta.thinking_blocks = None
-        return [content_chunk, finish_chunk]
+        choices = getattr(content_chunk, "choices", None)
+        if not choices or getattr(choices[0], "delta", None) is None:
+            return [content_chunk, *([finish_chunk] if finish_chunk is not None else [])]
+
+        delta = choices[0].delta
+        has_text = bool(getattr(delta, "content", None))
+        has_reasoning = bool(getattr(delta, "reasoning_content", None)) or bool(getattr(delta, "thinking_blocks", None))
+        has_tool_calls = bool(getattr(delta, "tool_calls", None))
+
+        payload_chunks: List[Any]
+        if has_text and has_reasoning and not has_tool_calls:
+            reasoning_chunk = copy.deepcopy(content_chunk)
+            reasoning_chunk.choices[0].delta.content = None
+
+            text_chunk = copy.deepcopy(content_chunk)
+            text_delta = text_chunk.choices[0].delta
+            if hasattr(text_delta, "reasoning_content"):
+                text_delta.reasoning_content = None
+            if hasattr(text_delta, "thinking_blocks"):
+                text_delta.thinking_blocks = None
+            payload_chunks = [reasoning_chunk, text_chunk]
+        else:
+            payload_chunks = [content_chunk]
+
+        if finish_chunk is not None:
+            payload_chunks.append(finish_chunk)
+        return payload_chunks
 
     def __iter__(self) -> "Iterator[Any]":
         return self

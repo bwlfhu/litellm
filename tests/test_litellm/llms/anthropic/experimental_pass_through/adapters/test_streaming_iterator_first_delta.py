@@ -65,9 +65,7 @@ def _thinking_chunk(thinking: str, signature: str = "") -> MagicMock:
     return _make_chunk(Delta(content=None, thinking_blocks=[block]))
 
 
-def _tool_chunk(
-    call_id: str, name: Optional[str], arguments: Optional[str]
-) -> MagicMock:
+def _tool_chunk(call_id: str, name: Optional[str], arguments: Optional[str]) -> MagicMock:
     return _make_chunk(
         Delta(
             content=None,
@@ -109,8 +107,7 @@ def _text_deltas(events: List[dict]) -> List[str]:
     return [
         e["delta"]["text"]
         for e in events
-        if e.get("type") == "content_block_delta"
-        and e["delta"].get("type") == "text_delta"
+        if e.get("type") == "content_block_delta" and e["delta"].get("type") == "text_delta"
     ]
 
 
@@ -118,8 +115,7 @@ def _input_json_deltas(events: List[dict]) -> List[str]:
     return [
         e["delta"]["partial_json"]
         for e in events
-        if e.get("type") == "content_block_delta"
-        and e["delta"].get("type") == "input_json_delta"
+        if e.get("type") == "content_block_delta" and e["delta"].get("type") == "input_json_delta"
     ]
 
 
@@ -127,8 +123,7 @@ def _thinking_deltas(events: List[dict]) -> List[str]:
     return [
         e["delta"]["thinking"]
         for e in events
-        if e.get("type") == "content_block_delta"
-        and e["delta"].get("type") == "thinking_delta"
+        if e.get("type") == "content_block_delta" and e["delta"].get("type") == "thinking_delta"
     ]
 
 
@@ -136,8 +131,7 @@ def _signature_deltas(events: List[dict]) -> List[str]:
     return [
         e["delta"]["signature"]
         for e in events
-        if e.get("type") == "content_block_delta"
-        and e["delta"].get("type") == "signature_delta"
+        if e.get("type") == "content_block_delta" and e["delta"].get("type") == "signature_delta"
     ]
 
 
@@ -228,9 +222,7 @@ async def test_first_text_delta_after_tool_use_is_not_dropped_async():
         _make_chunk(Delta(content=" Bye.")),
         _make_chunk(Delta(content=None), finish_reason="stop"),
     ]
-    wrapper = AnthropicStreamWrapper(
-        completion_stream=_AsyncStream(chunks), model="claude-x"
-    )
+    wrapper = AnthropicStreamWrapper(completion_stream=_AsyncStream(chunks), model="claude-x")
     events = await _drain_async(wrapper)
 
     assert _input_json_deltas(events) == ['{"city": "NY"}']
@@ -239,6 +231,43 @@ async def test_first_text_delta_after_tool_use_is_not_dropped_async():
         "The weather is nice.",
         " Bye.",
     ]
+
+
+def test_combined_reasoning_and_text_chunk_preserves_both_sync():
+    chunks = [
+        _make_chunk(
+            Delta(
+                content="visible answer",
+                reasoning_content="internal thought",
+                thinking_blocks=None,
+            )
+        ),
+        _make_chunk(Delta(content=None), finish_reason="stop"),
+    ]
+    events = _drain_sync(AnthropicStreamWrapper(completion_stream=iter(chunks), model="claude-x"))
+
+    assert _thinking_deltas(events) == ["internal thought"]
+    assert _text_deltas(events) == ["visible answer"]
+    _assert_deltas_match_their_block_type(events)
+
+
+@pytest.mark.asyncio
+async def test_combined_reasoning_and_text_chunk_preserves_both_async():
+    chunks = [
+        _make_chunk(
+            Delta(
+                content="visible answer",
+                reasoning_content="internal thought",
+                thinking_blocks=None,
+            )
+        ),
+        _make_chunk(Delta(content=None), finish_reason="stop"),
+    ]
+    events = await _drain_async(AnthropicStreamWrapper(completion_stream=_AsyncStream(chunks), model="claude-x"))
+
+    assert _thinking_deltas(events) == ["internal thought"]
+    assert _text_deltas(events) == ["visible answer"]
+    _assert_deltas_match_their_block_type(events)
 
 
 def test_single_first_text_token_after_tool_use_preserved_sync():
