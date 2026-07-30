@@ -214,6 +214,7 @@ class TestResponsesAPIRequestUtils:
             {
                 "type": "reasoning",
                 "id": "item_0c2b855288fb3034c4de8e23",
+                "status": "completed",
                 "encrypted_content": "encrypted",
                 "summary": [],
             },
@@ -223,13 +224,20 @@ class TestResponsesAPIRequestUtils:
                 "call_id": signed_call_id,
                 "name": "get_weather",
                 "arguments": "{}",
+                "status": "completed",
             },
             {
                 "type": "function_call_output",
                 "call_id": signed_call_id,
                 "output": "sunny",
             },
-            {"type": "message", "id": "item_message", "role": "user", "content": "hello"},
+            {
+                "type": "message",
+                "id": "item_message",
+                "role": "user",
+                "content": "hello",
+                "status": "completed",
+            },
         ]
 
         result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
@@ -242,7 +250,10 @@ class TestResponsesAPIRequestUtils:
         assert result[1]["id"] == "fc_xyz"
         assert result[1]["call_id"] == "call_abc"
         assert result[2]["call_id"] == "call_abc"
-        assert result[3]["id"] == "item_message"
+        assert "id" not in result[3]
+        assert result[0]["status"] == "completed"
+        assert result[1]["status"] == "completed"
+        assert "status" not in result[3]
         assert request_input[0]["id"] == "item_0c2b855288fb3034c4de8e23"
         assert request_input[1]["id"] == "tooluse_xyz"
         assert request_input[1]["call_id"] == signed_call_id
@@ -309,7 +320,7 @@ class TestResponsesAPIRequestUtils:
             custom_llm_provider="openai",
         ) == [
             {"type": "reasoning", "id": "rs_native", "summary": []},
-            {"type": "reasoning", "id": "foreign_unknown", "summary": []},
+            {"type": "reasoning", "summary": []},
             {"type": "function_call", "id": "fc_native", "call_id": "call_native"},
         ]
         assert ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
@@ -330,6 +341,53 @@ class TestResponsesAPIRequestUtils:
         )
 
         assert "id" not in result[0]
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_openai_and_azure_drop_foreign_function_call_and_message_item_ids(self, provider):
+        result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=[
+                {"type": "function_call", "id": "item_function", "call_id": "call_native"},
+                {"type": "message", "id": "item_message", "role": "assistant", "content": []},
+            ],
+            model="gpt-5.4",
+            custom_llm_provider=provider,
+        )
+
+        assert "id" not in result[0]
+        assert "id" not in result[1]
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_openai_and_azure_preserve_native_item_ids_and_status(self, provider):
+        result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=[
+                {"type": "reasoning", "id": "rs_native", "status": "completed", "summary": []},
+                {"type": "function_call", "id": "fc_native", "status": "completed", "call_id": "call_native"},
+                {
+                    "type": "message",
+                    "id": "msg_native",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [],
+                },
+            ],
+            model="gpt-5.4",
+            custom_llm_provider=provider,
+        )
+
+        assert [item["id"] for item in result] == ["rs_native", "fc_native", "msg_native"]
+        assert [item["status"] for item in result] == ["completed", "completed", "completed"]
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_openai_and_azure_preserve_status_for_unhandled_item_types(self, provider):
+        request_input = [{"type": "image_generation_call", "id": "ig_native", "status": "completed"}]
+
+        result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=request_input,
+            model="gpt-5.4",
+            custom_llm_provider=provider,
+        )
+
+        assert result == request_input
 
     def test_replayed_item_id_normalization_preserves_gemini_thought_signature(self):
         from litellm.litellm_core_utils.prompt_templates.factory import (

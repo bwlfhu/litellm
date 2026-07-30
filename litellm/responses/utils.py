@@ -469,7 +469,25 @@ class ResponsesAPIRequestUtils:
     ) -> bool:
         if custom_llm_provider not in {"openai", "azure"}:
             return False
-        return item_id.startswith("item_")
+        return not item_id.startswith("rs_")
+
+    @staticmethod
+    def _should_drop_function_call_item_id_for_provider(
+        item_id: str,
+        custom_llm_provider: str | None,
+    ) -> bool:
+        if custom_llm_provider not in {"openai", "azure"}:
+            return False
+        return not item_id.startswith("fc_")
+
+    @staticmethod
+    def _should_drop_message_item_id_for_provider(
+        item_id: str,
+        custom_llm_provider: str | None,
+    ) -> bool:
+        if custom_llm_provider not in {"openai", "azure"}:
+            return False
+        return not item_id.startswith("msg_")
 
     @staticmethod
     def _normalize_replayed_item_ids_in_input(
@@ -497,11 +515,18 @@ class ResponsesAPIRequestUtils:
 
                 item_id = item.get("id")
                 if isinstance(item_id, str) and item_id:
-                    item["id"] = ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+                    normalized_item_id = ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
                         item_id=item_id,
                         model=model,
                         custom_llm_provider=custom_llm_provider,
                     )
+                    if ResponsesAPIRequestUtils._should_drop_function_call_item_id_for_provider(
+                        item_id=normalized_item_id,
+                        custom_llm_provider=custom_llm_provider,
+                    ):
+                        item.pop("id", None)
+                    else:
+                        item["id"] = normalized_item_id
             elif item_type == "function_call_output":
                 call_id = item.get("call_id")
                 if isinstance(call_id, str) and call_id:
@@ -521,6 +546,18 @@ class ResponsesAPIRequestUtils:
                     )
                 ):
                     item.pop("id", None)
+            elif item_type == "message":
+                item_id = item.get("id")
+                if (
+                    isinstance(item_id, str)
+                    and item_id
+                    and ResponsesAPIRequestUtils._should_drop_message_item_id_for_provider(
+                        item_id=item_id,
+                        custom_llm_provider=custom_llm_provider,
+                    )
+                ):
+                    item.pop("id", None)
+                    item.pop("status", None)
 
         return normalized_input
 
