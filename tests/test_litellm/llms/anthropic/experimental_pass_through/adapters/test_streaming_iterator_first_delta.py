@@ -43,7 +43,11 @@ from litellm.types.utils import (
 )
 
 
-def _make_chunk(delta: Delta, finish_reason: Optional[str] = None) -> MagicMock:
+def _make_chunk(
+    delta: Delta,
+    finish_reason: Optional[str] = None,
+    usage: Optional[Usage] = None,
+) -> MagicMock:
     chunk = MagicMock()
     chunk.choices = [
         StreamingChoices(
@@ -53,7 +57,7 @@ def _make_chunk(delta: Delta, finish_reason: Optional[str] = None) -> MagicMock:
             logprobs=None,
         )
     ]
-    chunk.usage = None
+    chunk.usage = usage
     chunk._hidden_params = {}
     return chunk
 
@@ -135,6 +139,14 @@ def _signature_deltas(events: List[dict]) -> List[str]:
     ]
 
 
+def _content_block_types(events: List[dict]) -> List[str]:
+    return [e["content_block"]["type"] for e in events if e.get("type") == "content_block_start"]
+
+
+def _message_deltas(events: List[dict]) -> List[dict]:
+    return [e for e in events if e.get("type") == "message_delta"]
+
+
 _DELTA_TYPES_PER_BLOCK_TYPE = {
     "text": {"text_delta"},
     "thinking": {"thinking_delta", "signature_delta"},
@@ -207,6 +219,107 @@ def test_first_text_delta_after_tool_use_is_not_dropped_sync():
         "Let me check.",
         "The weather is nice.",
         " Bye.",
+    ]
+
+
+def test_reasoning_first_stream_opens_thinking_block_sync():
+    chunks = [
+        _thinking_chunk("Let me think"),
+        _make_chunk(Delta(content="Answer")),
+        _make_chunk(Delta(content=None), finish_reason="stop"),
+    ]
+
+    events = _drain_sync(AnthropicStreamWrapper(completion_stream=iter(chunks), model="claude-x"))
+
+    assert _content_block_types(events) == ["thinking", "text"]
+    thinking_start = next(
+        e["content_block"]
+        for e in events
+        if e.get("type") == "content_block_start" and e["content_block"]["type"] == "thinking"
+    )
+    assert thinking_start == {"type": "thinking", "thinking": "", "signature": ""}
+    assert _thinking_deltas(events) == ["Let me think"]
+    assert _text_deltas(events) == ["Answer"]
+    _assert_deltas_match_their_block_type(events)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_first_stream_opens_thinking_block_async():
+    chunks = [
+        _thinking_chunk("Let me think"),
+        _make_chunk(Delta(content="Answer")),
+        _make_chunk(Delta(content=None), finish_reason="stop"),
+    ]
+
+    events = await _drain_async(AnthropicStreamWrapper(completion_stream=_AsyncStream(chunks), model="claude-x"))
+
+    assert _content_block_types(events) == ["thinking", "text"]
+    thinking_start = next(
+        e["content_block"]
+        for e in events
+        if e.get("type") == "content_block_start" and e["content_block"]["type"] == "thinking"
+    )
+    assert thinking_start == {"type": "thinking", "thinking": "", "signature": ""}
+    assert _thinking_deltas(events) == ["Let me think"]
+    assert _text_deltas(events) == ["Answer"]
+    _assert_deltas_match_their_block_type(events)
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.asyncio
+async def test_finish_first_chunk_merges_trailing_usage(async_mode: bool):
+    finish_chunk = _make_chunk(Delta(content=None), finish_reason="stop")
+    usage_chunk = _make_chunk(
+        Delta(content=None),
+        usage=Usage(prompt_tokens=12, completion_tokens=7, total_tokens=19),
+    )
+    chunks = [finish_chunk, usage_chunk]
+    iterations_usage = [{"type": "compaction", "input_tokens": 30, "output_tokens": 5}]
+    wrapper = AnthropicStreamWrapper(
+        completion_stream=_AsyncStream(chunks) if async_mode else iter(chunks),
+        model="claude-x",
+        iterations_usage=iterations_usage,
+    )
+
+    events = await _drain_async(wrapper) if async_mode else _drain_sync(wrapper)
+
+    message_deltas = _message_deltas(events)
+    assert len(message_deltas) == 1
+    assert message_deltas[0]["delta"]["stop_reason"] == "end_turn"
+    assert message_deltas[0]["usage"]["input_tokens"] == 12
+    assert message_deltas[0]["usage"]["output_tokens"] == 7
+    assert message_deltas[0]["usage"]["iterations"] == [
+        {"type": "compaction", "input_tokens": 30, "output_tokens": 5},
+        {"type": "message", "input_tokens": 12, "output_tokens": 7},
+    ]
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.asyncio
+async def test_finish_first_chunk_preserves_inline_usage_and_iterations(async_mode: bool):
+    chunks = [
+        _make_chunk(
+            Delta(content=None),
+            finish_reason="stop",
+            usage=Usage(prompt_tokens=9, completion_tokens=4, total_tokens=13),
+        )
+    ]
+    iterations_usage = [{"type": "compaction", "input_tokens": 20, "output_tokens": 3}]
+    wrapper = AnthropicStreamWrapper(
+        completion_stream=_AsyncStream(chunks) if async_mode else iter(chunks),
+        model="claude-x",
+        iterations_usage=iterations_usage,
+    )
+
+    events = await _drain_async(wrapper) if async_mode else _drain_sync(wrapper)
+
+    message_deltas = _message_deltas(events)
+    assert len(message_deltas) == 1
+    assert message_deltas[0]["usage"]["input_tokens"] == 9
+    assert message_deltas[0]["usage"]["output_tokens"] == 4
+    assert message_deltas[0]["usage"]["iterations"] == [
+        {"type": "compaction", "input_tokens": 20, "output_tokens": 3},
+        {"type": "message", "input_tokens": 9, "output_tokens": 4},
     ]
 
 

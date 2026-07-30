@@ -1395,15 +1395,7 @@ class LiteLLMAnthropicMessagesAdapter:
                 if len(thinking_blocks) > 0:
                     thinking_block = thinking_blocks[0]
                     if thinking_block["type"] == "thinking":
-                        thinking = thinking_block.get("thinking") or ""
-                        signature = thinking_block.get("signature") or ""
-
-                        assert isinstance(thinking, str)
-                        assert isinstance(signature, str)
-
-                        return "thinking", ChatCompletionThinkingBlock(
-                            type="thinking", thinking=thinking, signature=signature
-                        )
+                        return "thinking", ChatCompletionThinkingBlock(type="thinking", thinking="", signature="")
             # OpenAI-compatible reasoning backends (e.g. vLLM/SGLang reasoning
             # parsers) populate ``reasoning_content`` without ``thinking_blocks``.
             # ``Delta`` deletes the ``thinking_blocks`` attribute when unset, so the
