@@ -17,7 +17,9 @@ from litellm.llms.anthropic.experimental_pass_through.adapters.transformation im
     truncate_tool_name,
 )
 from litellm.types.llms.anthropic import (
+    AllAnthropicToolsValues,
     AnthopicMessagesAssistantMessageParam,
+    AnthropicInputSchema,
     AnthropicMessagesUserMessageParam,
 )
 from litellm.types.llms.openai import ChatCompletionAssistantToolCall
@@ -3039,12 +3041,14 @@ def test_translate_anthropic_tools_to_openai_preserves_parameters_type():
     """Regression for #30557: the Anthropic tool `type` ("custom") must not be
     merged into the OpenAI function `parameters`, overwriting parameters.type."""
     adapter = LiteLLMAnthropicMessagesAdapter()
+    input_schema: AnthropicInputSchema = {"type": "object", "properties": {}}
     tools = [
         {
             "type": "custom",
             "name": "get_weather",
             "description": "Get weather",
-            "input_schema": {"type": "object", "properties": {}},
+            "input_schema": input_schema,
+            "display_width_px": 1024,
         }
     ]
 
@@ -3052,4 +3056,15 @@ def test_translate_anthropic_tools_to_openai_preserves_parameters_type():
 
     params = new_tools[0]["function"]["parameters"]
     assert params["type"] == "object"
+    assert params["display_width_px"] == 1024
     assert new_tools[0]["type"] == "function"
+    assert input_schema == {"type": "object", "properties": {}}
+
+
+def test_translate_anthropic_tools_to_openai_accepts_null_input_schema():
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    tools: list[AllAnthropicToolsValues] = [{"type": "custom", "name": "nullable_schema", "input_schema": None}]
+
+    new_tools, _ = adapter.translate_anthropic_tools_to_openai(tools=tools)
+
+    assert new_tools == [{"type": "function", "function": {"name": "nullable_schema", "parameters": {}}}]
