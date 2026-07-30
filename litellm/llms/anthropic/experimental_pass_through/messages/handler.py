@@ -30,7 +30,7 @@ from litellm.types.llms.anthropic_messages.anthropic_response import (
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
 from litellm.router_protocol import get_deployment_protocol_context
-from litellm.utils import ProviderConfigManager, client
+from litellm.utils import ProviderConfigManager, client, log_tool_request_shape
 
 from ..adapters.handler import LiteLLMMessagesToCompletionTransformationHandler
 from ..responses_adapters.handler import LiteLLMMessagesToResponsesAPIHandler
@@ -283,6 +283,18 @@ async def anthropic_messages(
     request_kwargs.pop("litellm_params", None)
     # Merge back any other modifications
     kwargs.update(request_kwargs)
+
+    tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
+    tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
+    log_tool_request_shape(
+        tools=tools,
+        tool_choice=tool_choice,
+        endpoint="/v1/messages",
+        model=model,
+        custom_llm_provider=custom_llm_provider,
+        phase="normalized",
+        call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+    )
 
     # Short-circuit web-search-only requests: detect the pattern, execute
     # search directly via Tavily/Perplexity, and return a synthetic response

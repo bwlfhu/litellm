@@ -443,6 +443,84 @@ async def test_async_anthropic_messages_handler_extra_headers():
 
 
 @pytest.mark.asyncio
+async def test_async_anthropic_messages_handler_logs_provider_dispatch_tool_shape():
+    handler = BaseLLMHTTPHandler()
+    dispatched_tools = [{"name": "search", "input_schema": {"type": "object"}}]
+    mock_config = Mock()
+    mock_config.validate_anthropic_messages_environment = Mock(return_value=({}, "https://api.anthropic.com"))
+    mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
+    mock_config.transform_anthropic_messages_request = Mock(
+        return_value={"model": "claude-test", "messages": [], "tools": dispatched_tools}
+    )
+    mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
+    mock_config.sign_request = Mock(return_value=({}, None))
+    mock_logging_obj = Mock()
+    mock_logging_obj.model_call_details = {}
+    mock_logging_obj.litellm_call_id = "call-2"
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=RuntimeError("stop after dispatch"))
+
+    with patch("litellm.llms.custom_httpx.llm_http_handler.log_tool_request_shape") as shape_log:
+        with pytest.raises(Exception):
+            await handler.async_anthropic_messages_handler(
+                model="claude-test",
+                messages=[{"role": "user", "content": "hello"}],
+                anthropic_messages_provider_config=mock_config,
+                anthropic_messages_optional_request_params={"tools": dispatched_tools},
+                custom_llm_provider="anthropic",
+                litellm_params=GenericLiteLLMParams(),
+                logging_obj=mock_logging_obj,
+                client=mock_client,
+                kwargs={"litellm_call_id": "call-2"},
+            )
+
+    shape_log.assert_called_once()
+    assert shape_log.call_args.kwargs["tools"] == dispatched_tools
+    assert shape_log.call_args.kwargs["phase"] == "provider_dispatch"
+    assert shape_log.call_args.kwargs["call_id"] == "call-2"
+
+
+def test_completion_logs_extra_body_tool_shape_at_provider_dispatch():
+    handler = BaseLLMHTTPHandler()
+    extra_body_tools = [
+        {
+            "type": "function",
+            "function": {"name": "tool", "parameters": {"type": "function"}},
+        }
+    ]
+    mock_config = Mock()
+    mock_config.should_fake_stream = Mock(return_value=False)
+    mock_config.validate_environment = Mock(return_value={})
+    mock_config.get_complete_url = Mock(return_value="https://api.openai.com/v1/chat/completions")
+    mock_config.transform_request = Mock(return_value={"model": "gpt-test", "messages": []})
+    mock_config.sign_request = Mock(side_effect=RuntimeError("stop after dispatch"))
+    mock_logging_obj = Mock()
+    mock_logging_obj.litellm_call_id = "call-3"
+
+    with patch("litellm.llms.custom_httpx.llm_http_handler.log_tool_request_shape") as shape_log:
+        with pytest.raises(RuntimeError, match="stop after dispatch"):
+            handler.completion(
+                model="gpt-test",
+                messages=[{"role": "user", "content": "hello"}],
+                api_base="https://api.openai.com/v1",
+                custom_llm_provider="openai",
+                model_response=Mock(),
+                encoding=None,
+                logging_obj=mock_logging_obj,
+                optional_params={"extra_body": {"tools": extra_body_tools}},
+                timeout=10,
+                litellm_params={},
+                acompletion=False,
+                provider_config=mock_config,
+            )
+
+    shape_log.assert_called_once()
+    assert shape_log.call_args.kwargs["tools"] == extra_body_tools
+    assert shape_log.call_args.kwargs["phase"] == "provider_dispatch"
+    assert shape_log.call_args.kwargs["call_id"] == "call-3"
+
+
+@pytest.mark.asyncio
 async def test_async_anthropic_messages_handler_streaming_forwards_provider_response_headers():
     """
     Regression test for LIT-3724 (issue 2): streaming /v1/messages responses
@@ -1095,9 +1173,7 @@ def test_sync_delete_responses_sets_json_content_type():
         ({}, True, None, None),
     ],
 )
-def test_resolve_anthropic_messages_timeout(
-    monkeypatch, litellm_params_kwargs, stream, global_timeout, expected
-):
+def test_resolve_anthropic_messages_timeout(monkeypatch, litellm_params_kwargs, stream, global_timeout, expected):
     from litellm.constants import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
     if global_timeout is None:
@@ -1113,9 +1189,7 @@ def test_resolve_anthropic_messages_timeout(
         )
     else:
         monkeypatch.setattr("litellm.request_timeout", global_timeout, raising=False)
-        monkeypatch.setattr(
-            "litellm.request_timeout_explicitly_set", True, raising=False
-        )
+        monkeypatch.setattr("litellm.request_timeout_explicitly_set", True, raising=False)
 
     resolved = BaseLLMHTTPHandler._resolve_anthropic_messages_timeout(
         litellm_params=GenericLiteLLMParams(**litellm_params_kwargs),
@@ -1140,9 +1214,7 @@ async def test_async_anthropic_messages_handler_forwards_request_timeout(monkeyp
         return_value=({"x-api-key": "k"}, "https://api.anthropic.com")
     )
     mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
-    mock_config.transform_anthropic_messages_request = Mock(
-        return_value={"model": "claude", "messages": []}
-    )
+    mock_config.transform_anthropic_messages_request = Mock(return_value={"model": "claude", "messages": []})
     mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
     mock_config.sign_request = Mock(return_value=({"x-api-key": "k"}, None))
     mock_config.max_retry_on_anthropic_messages_http_error = 1
@@ -1188,9 +1260,7 @@ async def test_async_anthropic_messages_handler_forwards_stream_timeout(monkeypa
         return_value=({"x-api-key": "k"}, "https://api.anthropic.com")
     )
     mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
-    mock_config.transform_anthropic_messages_request = Mock(
-        return_value={"model": "claude", "messages": []}
-    )
+    mock_config.transform_anthropic_messages_request = Mock(return_value={"model": "claude", "messages": []})
     mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
     mock_config.sign_request = Mock(return_value=({"x-api-key": "k"}, None))
     mock_config.max_retry_on_anthropic_messages_http_error = 1
@@ -1600,7 +1670,13 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
     )
     mock_config.sign_request = Mock(return_value=({}, None))
 
-    fake_raw_response = {"id": "msg_1", "type": "message", "role": "assistant", "content": [], "stop_reason": "end_turn"}
+    fake_raw_response = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "stop_reason": "end_turn",
+    }
     mock_config.transform_anthropic_messages_response = Mock(return_value=fake_raw_response)
 
     mock_logging_obj = Mock()
@@ -1620,10 +1696,17 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
     mock_httpx_response.status_code = 200
 
     with (
-        patch.object(handler, "_async_post_anthropic_messages_with_http_error_retry", new=AsyncMock(return_value=mock_httpx_response)),
+        patch.object(
+            handler,
+            "_async_post_anthropic_messages_with_http_error_retry",
+            new=AsyncMock(return_value=mock_httpx_response),
+        ),
         patch.object(handler, "_call_agentic_completion_hooks", side_effect=fake_agentic_hooks),
         patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client"),
-        patch("litellm.litellm_core_utils.get_provider_specific_headers.ProviderSpecificHeaderUtils.get_provider_specific_headers", return_value=None),
+        patch(
+            "litellm.litellm_core_utils.get_provider_specific_headers.ProviderSpecificHeaderUtils.get_provider_specific_headers",
+            return_value=None,
+        ),
     ):
         result = await handler.async_anthropic_messages_handler(
             model="claude-haiku",
@@ -1797,7 +1880,9 @@ def test_audio_transcriptions_sends_dict_data_as_json_body():
     form-encodes it and silently ignores json=; JSON-body providers (e.g.
     Google Speech-to-Text) need an application/json body."""
     captured = {}
-    client = HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(_capture_json_transcription_request(captured))))
+    client = HTTPHandler(
+        client=httpx.Client(transport=httpx.MockTransport(_capture_json_transcription_request(captured)))
+    )
 
     response = BaseLLMHTTPHandler().audio_transcriptions(
         client=client,
@@ -2033,9 +2118,7 @@ async def test_anthropic_invalid_thinking_signature_retry_resigns_bedrock_reques
     ok_response = httpx.Response(200, json={"id": "msg_1"}, request=httpx.Request("POST", request_url))
 
     class FakeAsyncClient:
-        async def post(
-            self, url, headers, data, stream=False, logging_obj=None, timeout=None
-        ):
+        async def post(self, url, headers, data, stream=False, logging_obj=None, timeout=None):
             posts.append({"headers": dict(headers), "data": data})
             return invalid_signature_response if len(posts) == 1 else ok_response
 

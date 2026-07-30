@@ -7540,6 +7540,8 @@ def log_tool_request_shape(
     model: Optional[str],
     custom_llm_provider: Optional[str],
     phase: str,
+    call_id: str | None = None,
+    warn_when_missing: bool = False,
 ) -> None:
     """Log a redacted structural summary when a tool declaration may be missing."""
     tools_present = tools is not None
@@ -7547,17 +7549,25 @@ def log_tool_request_shape(
     tool_types: frozenset[str] = frozenset()
 
     if isinstance(tools, _ToolShapeMapping):
-        tool_count = 0 if isinstance(tools, _SizedToolCollection) and len(tools) == 0 else 1
-        tool_type = tools.get("type")
+        try:
+            tool_count = 0 if isinstance(tools, _SizedToolCollection) and len(tools) == 0 else 1
+        except Exception:
+            tool_count = None
+        tool_type = _tool_shape_get(tools, "type")
         if isinstance(tool_type, str):
             tool_types = frozenset((tool_type,))
     elif isinstance(tools, (list, tuple, set, frozenset)) and isinstance(tools, _SizedToolCollection):
-        tool_count = len(tools)
-        tool_types = frozenset(
-            tool_type for tool in tools for tool_type in (_tool_type_from_shape(tool),) if tool_type is not None
-        )
+        try:
+            tool_count = len(tools)
+            tool_types = frozenset(
+                tool_type for tool in tools for tool_type in (_tool_type_from_shape(tool),) if tool_type is not None
+            )
+        except Exception:
+            tool_count = None
+            tool_types = frozenset()
 
     summary = {
+        "call_id": call_id,
         "endpoint": endpoint,
         "phase": phase,
         "model": model,
@@ -7567,8 +7577,20 @@ def log_tool_request_shape(
         "tool_count": tool_count,
         "tool_types": tuple(sorted(tool_types)),
     }
-    if tool_choice is not None and (not tools_present or tool_count == 0):
-        verbose_logger.warning("Tool request shape indicates tool_choice without tools: %s", summary)
+    try:
+        malformed_tool_schemas = _malformed_tool_schema_shapes(tools)
+    except Exception:
+        malformed_tool_schemas = ()
+    if malformed_tool_schemas:
+        verbose_logger.warning(
+            "Tool request shape contains malformed schemas: %s",
+            {**summary, "malformed_tool_schemas": malformed_tool_schemas},
+        )
+    elif not tools_present or tool_count == 0:
+        if tool_choice is not None:
+            verbose_logger.warning("Tool request shape indicates tool_choice without tools: %s", summary)
+        elif warn_when_missing:
+            verbose_logger.warning("Tool request shape contains no tools: %s", summary)
     elif tools_present:
         verbose_logger.debug("Tool request shape: %s", summary)
 
@@ -7576,8 +7598,66 @@ def log_tool_request_shape(
 def _tool_type_from_shape(tool: object) -> Optional[str]:
     if not isinstance(tool, _ToolShapeMapping):
         return None
-    tool_type = tool.get("type")
+    tool_type = _tool_shape_get(tool, "type")
     return tool_type if isinstance(tool_type, str) else None
+
+
+def _tool_shape_get(tool: _ToolShapeMapping, key: str) -> object:
+    try:
+        return tool.get(key)
+    except Exception:
+        return None
+
+
+def _malformed_tool_schema_shapes(tools: object) -> tuple[dict[str, str | int], ...]:
+    if not isinstance(tools, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(
+        summary
+        for tool_index, tool in enumerate(tools)
+        for summary in (_malformed_tool_schema_shape(tool=tool, tool_index=tool_index),)
+        if summary is not None
+    )
+
+
+def _malformed_tool_schema_shape(tool: object, tool_index: int) -> dict[str, str | int] | None:
+    if not isinstance(tool, _ToolShapeMapping):
+        return None
+    tool_type = _tool_shape_get(tool, "type")
+    function = _tool_shape_get(tool, "function")
+    if tool_type == "function" and isinstance(function, _ToolShapeMapping):
+        parameters = _tool_shape_get(function, "parameters")
+        schema_key = "parameters"
+    elif tool_type == "function":
+        parameters = _tool_shape_get(tool, "parameters")
+        schema_key = "parameters"
+    else:
+        parameters = _tool_shape_get(tool, "input_schema")
+        schema_key = "input_schema"
+    if not isinstance(parameters, _ToolShapeMapping):
+        return None
+    root_type = _tool_shape_get(parameters, "type")
+    if root_type is None or root_type == "object":
+        return None
+    return {
+        "tool_index": tool_index,
+        "schema_key": schema_key,
+        "root_type_kind": _tool_schema_root_type_kind(root_type),
+    }
+
+
+def _tool_schema_root_type_kind(root_type: object) -> str:
+    if isinstance(root_type, str):
+        return "string"
+    if isinstance(root_type, bool):
+        return "boolean"
+    if isinstance(root_type, (int, float)):
+        return "number"
+    if isinstance(root_type, list):
+        return "array"
+    if isinstance(root_type, dict):
+        return "object"
+    return "other"
 
 
 def validate_and_fix_thinking_param(

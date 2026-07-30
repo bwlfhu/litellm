@@ -134,6 +134,7 @@ from litellm.utils import (
     ModelResponse,
     ProviderConfigManager,
     async_pre_call_deployment_hook,
+    log_tool_request_shape,
 )
 
 
@@ -477,6 +478,17 @@ class BaseLLMHTTPHandler:
 
         if extra_body is not None:
             data = {**data, **extra_body}
+
+        tool_shape_call_id = getattr(logging_obj, "litellm_call_id", None)
+        log_tool_request_shape(
+            tools=data.get("tools"),
+            tool_choice=data.get("tool_choice"),
+            endpoint="/v1/chat/completions",
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            phase="provider_dispatch",
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        )
 
         headers, signed_json_body = provider_config.sign_request(
             headers=headers,
@@ -2055,6 +2067,16 @@ class BaseLLMHTTPHandler:
             anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
             litellm_params=litellm_params,
             headers=headers,
+        )
+        tool_shape_call_id = getattr(logging_obj, "litellm_call_id", None)
+        log_tool_request_shape(
+            tools=request_body.get("tools"),
+            tool_choice=request_body.get("tool_choice"),
+            endpoint="/v1/messages",
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            phase="provider_dispatch",
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
         )
         logging_obj.stream = stream
         logging_obj.model_call_details.update(request_body)
