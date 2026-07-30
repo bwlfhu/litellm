@@ -99,6 +99,10 @@ class ChatCompletionSession(TypedDict, total=False):
 
 class LiteLLMCompletionResponsesConfig:
     @staticmethod
+    def _tool_call_cache_key(response_id: str, call_id: str) -> str:
+        return json.dumps((response_id, call_id), separators=(",", ":"))
+
+    @staticmethod
     def get_supported_openai_params(model: str) -> list:
         """
         LiteLLM Adapter from OpenAI Responses API to Chat Completion API supports a subset of OpenAI Responses API params
@@ -285,7 +289,7 @@ class LiteLLMCompletionResponsesConfig:
     @staticmethod
     def transform_responses_api_input_to_messages(
         input: str | ResponseInputParam,
-        responses_api_request: ResponsesAPIOptionalRequestParams | dict,
+        responses_api_request: ResponsesAPIOptionalRequestParams | dict[str, object],
     ) -> list[
         AllMessageValues
         | GenericChatCompletionMessage
@@ -303,16 +307,19 @@ class LiteLLMCompletionResponsesConfig:
             | ChatCompletionResponseMessage
             | Message
         ] = []
-        if responses_api_request.get("instructions"):
+        instructions = responses_api_request.get("instructions")
+        previous_response_id = (
+            responses_api_request["previous_response_id"] if "previous_response_id" in responses_api_request else None
+        )
+        if isinstance(instructions, str) and instructions:
             messages.append(
-                LiteLLMCompletionResponsesConfig.transform_instructions_to_system_message(
-                    responses_api_request.get("instructions")
-                )
+                LiteLLMCompletionResponsesConfig.transform_instructions_to_system_message(instructions)
             )
 
         messages.extend(
             LiteLLMCompletionResponsesConfig._transform_response_input_param_to_chat_completion_message(
                 input=input,
+                previous_response_id=previous_response_id if isinstance(previous_response_id, str) else None,
             )
         )
 
@@ -347,7 +354,9 @@ class LiteLLMCompletionResponsesConfig:
         # Pass tools parameter to help reconstruct tool_calls if not in cache
         tools = litellm_completion_request.get("tools") or []
         combined_messages = LiteLLMCompletionResponsesConfig._ensure_tool_results_have_corresponding_tool_calls(
-            messages=combined_messages, tools=tools
+            messages=combined_messages,
+            tools=tools,
+            previous_response_id=previous_response_id,
         )
 
         # Safety check: Ensure we don't end up with empty messages
@@ -389,6 +398,7 @@ class LiteLLMCompletionResponsesConfig:
     @staticmethod
     def _transform_response_input_param_to_chat_completion_message(
         input: str | ResponseInputParam,
+        previous_response_id: str | None = None,
     ) -> list[
         AllMessageValues | GenericChatCompletionMessage | ChatCompletionMessageToolCall | ChatCompletionResponseMessage
     ]:
@@ -409,7 +419,8 @@ class LiteLLMCompletionResponsesConfig:
             for _input in input:
                 chat_completion_messages = (
                     LiteLLMCompletionResponsesConfig._transform_responses_api_input_item_to_chat_completion_message(
-                        input_item=_input
+                        input_item=_input,
+                        previous_response_id=previous_response_id,
                     )
                 )
 
@@ -806,6 +817,7 @@ class LiteLLMCompletionResponsesConfig:
             | Message
         ],
         tools: list[Any] | None = None,
+        previous_response_id: str | None = None,
     ) -> list[
         AllMessageValues
         | GenericChatCompletionMessage
@@ -894,7 +906,16 @@ class LiteLLMCompletionResponsesConfig:
                 tool_calls = LiteLLMCompletionResponsesConfig._get_tool_calls_list(prev_assistant)
 
                 if not LiteLLMCompletionResponsesConfig._check_tool_call_exists(tool_calls, tool_call_id):
-                    _tool_use_definition = TOOL_CALLS_CACHE.get_cache(key=tool_call_id)
+                    _tool_use_definition = (
+                        TOOL_CALLS_CACHE.get_cache(
+                            key=LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+                                response_id=previous_response_id,
+                                call_id=tool_call_id,
+                            )
+                        )
+                        if previous_response_id
+                        else None
+                    )
 
                     if not _tool_use_definition and tools:
                         _tool_use_definition = LiteLLMCompletionResponsesConfig._reconstruct_tool_call_from_tools(
@@ -922,6 +943,7 @@ class LiteLLMCompletionResponsesConfig:
     @staticmethod
     def _transform_responses_api_input_item_to_chat_completion_message(
         input_item: Any,
+        previous_response_id: str | None = None,
     ) -> list[AllMessageValues | GenericChatCompletionMessage | ChatCompletionResponseMessage]:
         """
         Transform a Responses API input item into a Chat Completion message
@@ -942,7 +964,8 @@ class LiteLLMCompletionResponsesConfig:
             # handle executed tool call results
             return (
                 LiteLLMCompletionResponsesConfig._transform_responses_api_tool_call_output_to_chat_completion_message(
-                    tool_call_output=input_item
+                    tool_call_output=input_item,
+                    previous_response_id=previous_response_id,
                 )
             )
         elif LiteLLMCompletionResponsesConfig._is_input_item_function_call(input_item):
@@ -990,6 +1013,7 @@ class LiteLLMCompletionResponsesConfig:
     @staticmethod
     def _transform_responses_api_tool_call_output_to_chat_completion_message(
         tool_call_output: dict[str, Any],
+        previous_response_id: str | None = None,
     ) -> list[AllMessageValues | GenericChatCompletionMessage | ChatCompletionResponseMessage]:
         """
         ChatCompletionToolMessage is used to indicate the output from a tool call
@@ -997,7 +1021,7 @@ class LiteLLMCompletionResponsesConfig:
         call_id = tool_call_output.get("call_id")
         # If call_id is missing or empty, skip this message
         # Empty call_id means we can't create a valid tool message
-        if not call_id:
+        if not isinstance(call_id, str) or not call_id:
             return []
 
         def _normalize_function_call_output_to_tool_content(
@@ -1074,11 +1098,18 @@ class LiteLLMCompletionResponsesConfig:
         tool_output_message = ChatCompletionToolMessage(
             role="tool",
             content=_normalize_function_call_output_to_tool_content(tool_call_output.get("output")),
-            tool_call_id=str(call_id),
+            tool_call_id=call_id,
         )
 
-        _tool_use_definition = TOOL_CALLS_CACHE.get_cache(
-            key=tool_call_output.get("call_id") or "",
+        _tool_use_definition = (
+            TOOL_CALLS_CACHE.get_cache(
+                key=LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+                    response_id=previous_response_id,
+                    call_id=call_id,
+                )
+            )
+            if previous_response_id
+            else None
         )
         if _tool_use_definition:
             """
@@ -1687,7 +1718,10 @@ class LiteLLMCompletionResponsesConfig:
                     all_chat_completion_tools.extend(choice.message.tool_calls)
                     for tool_call in choice.message.tool_calls:
                         TOOL_CALLS_CACHE.set_cache(
-                            key=tool_call.id,
+                            key=LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+                                response_id=chat_completion_response.id,
+                                call_id=tool_call.id,
+                            ),
                             value=tool_call,
                         )
 

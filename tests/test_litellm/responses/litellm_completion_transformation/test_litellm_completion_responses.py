@@ -773,8 +773,12 @@ class TestFunctionCallTransformation:
         Test cached ChatCompletionMessageToolCall objects are normalized correctly.
         """
         tool_call_id = "call_cached_openai_object"
+        previous_response_id = "resp_cached_openai_object"
         TOOL_CALLS_CACHE.set_cache(
-            key=tool_call_id,
+            key=LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+                response_id=previous_response_id,
+                call_id=tool_call_id,
+            ),
             value=ChatCompletionMessageToolCall(
                 id=tool_call_id,
                 type="function",
@@ -799,9 +803,15 @@ class TestFunctionCallTransformation:
             fixed_messages = LiteLLMCompletionResponsesConfig._ensure_tool_results_have_corresponding_tool_calls(
                 messages=messages_missing_tool_calls,
                 tools=None,
+                previous_response_id=previous_response_id,
             )
         finally:
-            TOOL_CALLS_CACHE.delete_cache(key=tool_call_id)
+            TOOL_CALLS_CACHE.delete_cache(
+                key=LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+                    response_id=previous_response_id,
+                    call_id=tool_call_id,
+                )
+            )
 
         assistant_msg = fixed_messages[1]
         tool_calls = assistant_msg.get("tool_calls", [])
@@ -829,8 +839,12 @@ class TestFunctionCallTransformation:
                 self.function = function
 
         tool_call_id = "call_cached_attr_object"
+        previous_response_id = "resp_cached_attr_object"
         TOOL_CALLS_CACHE.set_cache(
-            key=tool_call_id,
+            key=LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+                response_id=previous_response_id,
+                call_id=tool_call_id,
+            ),
             value=AttrOnlyToolCall(
                 id=tool_call_id,
                 type="function",
@@ -855,9 +869,15 @@ class TestFunctionCallTransformation:
             fixed_messages = LiteLLMCompletionResponsesConfig._ensure_tool_results_have_corresponding_tool_calls(
                 messages=messages_missing_tool_calls,
                 tools=None,
+                previous_response_id=previous_response_id,
             )
         finally:
-            TOOL_CALLS_CACHE.delete_cache(key=tool_call_id)
+            TOOL_CALLS_CACHE.delete_cache(
+                key=LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+                    response_id=previous_response_id,
+                    call_id=tool_call_id,
+                )
+            )
 
         assistant_msg = fixed_messages[1]
         tool_calls = assistant_msg.get("tool_calls", [])

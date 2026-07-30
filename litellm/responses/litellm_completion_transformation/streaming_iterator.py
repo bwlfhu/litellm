@@ -1271,11 +1271,17 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
                         self.litellm_logging_obj._response_cost_calculator(result=litellm_model_response),
                     )
 
+            response_for_transformation = (
+                litellm_model_response.model_copy(update={"id": self._cached_response_id})
+                if self._cached_response_id
+                else litellm_model_response
+            )
+
             # Transform the response
             responses_api_response = (
                 LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response(
                     request_input=self.request_input,
-                    chat_completion_response=litellm_model_response,
+                    chat_completion_response=response_for_transformation,
                     responses_api_request=self.responses_api_request,
                 )
             )

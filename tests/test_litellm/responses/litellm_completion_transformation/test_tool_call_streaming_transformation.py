@@ -10,6 +10,10 @@ before response.completed.
 
 from unittest.mock import AsyncMock
 
+from litellm.responses.litellm_completion_transformation.transformation import (
+    TOOL_CALLS_CACHE,
+    LiteLLMCompletionResponsesConfig,
+)
 from litellm.responses.litellm_completion_transformation.streaming_iterator import (
     LiteLLMCompletionStreamingIterator,
 )
@@ -136,6 +140,60 @@ def test_tool_calls_present_only_in_final_response_are_emitted_before_completed(
     evt_final = iterator.common_done_event_logic(sync_mode=True)
     assert evt_final.type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE
     assert evt_final.output_index == 1
+
+
+def test_completed_stream_caches_tool_call_under_client_response_id():
+    iterator = LiteLLMCompletionStreamingIterator(
+        model="test-model",
+        litellm_custom_stream_wrapper=AsyncMock(),
+        request_input="Test input",
+        responses_api_request={},
+    )
+    iterator._cached_response_id = "resp_client_visible"
+    upstream_response_id = "chatcmpl_upstream"
+    call_id = "call_streamed"
+    response = ModelResponse(
+        id=upstream_response_id,
+        created=123,
+        model="test-model",
+        object="chat.completion",
+        choices=[
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": "do_thing", "arguments": '{"value":1}'},
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    client_cache_key = LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+        response_id=iterator._cached_response_id,
+        call_id=call_id,
+    )
+    upstream_cache_key = LiteLLMCompletionResponsesConfig._tool_call_cache_key(
+        response_id=upstream_response_id,
+        call_id=call_id,
+    )
+
+    try:
+        completed_event = iterator._emit_response_completed_event(response)
+
+        assert completed_event is not None
+        assert TOOL_CALLS_CACHE.get_cache(key=client_cache_key) is not None
+        assert TOOL_CALLS_CACHE.get_cache(key=upstream_cache_key) is None
+        assert response.id == upstream_response_id
+    finally:
+        TOOL_CALLS_CACHE.delete_cache(key=client_cache_key)
+        TOOL_CALLS_CACHE.delete_cache(key=upstream_cache_key)
 
 
 def test_tool_call_arguments_are_chunked_to_match_openai_behavior():
