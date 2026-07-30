@@ -976,6 +976,8 @@ def responses(
         #########################################################
         # Update input and tools with provider-specific file IDs if managed files are used
         #########################################################
+        tools = cast(Iterable[ToolParam] | None, local_vars.get("tools", tools))
+        tool_choice = cast(ToolChoice | None, local_vars.get("tool_choice", tool_choice))
         input, tools = _apply_managed_file_id_mapping(input=input, tools=tools, kwargs=kwargs, local_vars=local_vars)
 
         log_tool_request_shape(

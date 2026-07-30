@@ -54,18 +54,15 @@ def _patch_responses_dispatch():
             return_value=("gpt-4o", "openai", None, None),
         ),
         patch(
-            "litellm.responses.mcp.litellm_proxy_mcp_handler."
-            "LiteLLM_Proxy_MCP_Handler._should_use_litellm_mcp_gateway",
+            "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._should_use_litellm_mcp_gateway",
             return_value=False,
         ),
         patch(
-            "litellm.responses.main.ProviderConfigManager"
-            ".get_provider_responses_api_config",
+            "litellm.responses.main.ProviderConfigManager.get_provider_responses_api_config",
             return_value=None,
         ),
         patch(
-            "litellm.responses.main.litellm_completion_transformation_handler"
-            ".response_api_handler",
+            "litellm.responses.main.litellm_completion_transformation_handler.response_api_handler",
             return_value=MagicMock(),
         ),
     ]
@@ -77,7 +74,6 @@ def _patch_responses_dispatch():
 
 
 class TestResponsesAPIPromptManagement:
-
     def test_str_input_coerced_and_merged(self):
         """[A] str input is wrapped into a message list before being passed to the hook."""
         template_messages: List[AllMessageValues] = [
@@ -108,9 +104,7 @@ class TestResponsesAPIPromptManagement:
         logging_obj.get_chat_completion_prompt.assert_called_once()
         call_kwargs = logging_obj.get_chat_completion_prompt.call_args.kwargs
         # str was coerced to a single user message before being passed to the hook
-        assert call_kwargs["messages"] == [
-            {"role": "user", "content": "Tell me about AI."}
-        ]
+        assert call_kwargs["messages"] == [{"role": "user", "content": "Tell me about AI."}]
         assert call_kwargs["prompt_id"] == "summariser-prompt"
 
     def test_list_input_merged_with_template(self):
@@ -197,6 +191,40 @@ class TestResponsesAPIPromptManagement:
         handler_call_kwargs = mock_handler.call_args.kwargs
         request_params = handler_call_kwargs.get("responses_api_request", {})
         assert request_params.get("temperature") == 0.2
+
+    def test_prompt_hook_tools_are_used_and_logged(self):
+        logging_obj = _make_logging_obj(
+            merged_model="openai/gpt-4o",
+            merged_messages=[{"role": "user", "content": "Hello"}],  # type: ignore[list-item]
+            merged_optional_params={"tools": []},
+        )
+        original_tools = [{"type": "function", "name": "lookup"}]
+
+        patches = _patch_responses_dispatch()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as mock_handler,
+            patch("litellm.responses.main.log_tool_request_shape") as shape_log,
+        ):
+            import litellm
+
+            litellm.responses(
+                input="Hello",
+                model="gpt-4o",
+                tools=original_tools,  # type: ignore[arg-type]
+                tool_choice="auto",
+                prompt_id="tool-filter",
+                litellm_logging_obj=logging_obj,
+            )
+
+        assert [call.kwargs["phase"] for call in shape_log.call_args_list] == ["received", "normalized"]
+        assert shape_log.call_args_list[0].kwargs["tools"] == original_tools
+        assert shape_log.call_args_list[1].kwargs["tools"] == []
+        request_params = mock_handler.call_args.kwargs["responses_api_request"]
+        assert request_params["tools"] == []
+        assert request_params["tool_choice"] == "auto"
 
     def test_model_override_from_template(self):
         """[D] Model returned by the prompt hook overrides the original request model."""
@@ -360,6 +388,41 @@ class TestAsyncResponsesAPIPromptManagement:
         handler_call_kwargs = mock_handler.call_args.kwargs
         request_params = handler_call_kwargs.get("responses_api_request", {})
         assert request_params.get("temperature") == 0.7
+
+    @pytest.mark.asyncio
+    async def test_async_prompt_hook_tools_are_used_and_logged(self):
+        logging_obj = _make_logging_obj(
+            merged_model="openai/gpt-4o",
+            merged_messages=[{"role": "user", "content": "Hello"}],  # type: ignore[list-item]
+            merged_optional_params={"tools": []},
+        )
+        original_tools = [{"type": "function", "name": "lookup"}]
+
+        patches = _patch_responses_dispatch()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as mock_handler,
+            patch("litellm.responses.main.log_tool_request_shape") as shape_log,
+        ):
+            import litellm
+
+            await litellm.aresponses(
+                input="Hello",
+                model="gpt-4o",
+                tools=original_tools,  # type: ignore[arg-type]
+                tool_choice="auto",
+                prompt_id="tool-filter",
+                litellm_logging_obj=logging_obj,
+            )
+
+        assert [call.kwargs["phase"] for call in shape_log.call_args_list] == ["received", "normalized"]
+        assert shape_log.call_args_list[0].kwargs["tools"] == original_tools
+        assert shape_log.call_args_list[1].kwargs["tools"] == []
+        request_params = mock_handler.call_args.kwargs["responses_api_request"]
+        assert request_params["tools"] == []
+        assert request_params["tool_choice"] == "auto"
 
     @pytest.mark.asyncio
     async def test_async_non_message_items_filtered(self):
