@@ -29,6 +29,7 @@ import textwrap
 import threading
 import time
 import traceback
+from collections.abc import Iterator as IteratorABC
 from dataclasses import dataclass, field
 from functools import lru_cache, wraps
 from importlib import resources
@@ -248,6 +249,7 @@ from typing import (
     Protocol,
     Tuple,
     Type,
+    TypeVar,
     Union,
     cast,
     get_args,
@@ -1276,6 +1278,17 @@ def post_call_processing(
         raise e
 
 
+_SinglePassItemT = TypeVar("_SinglePassItemT")
+
+
+def materialize_single_pass_iterable(
+    values: Iterable[_SinglePassItemT] | None,
+) -> Iterable[_SinglePassItemT] | None:
+    if isinstance(values, IteratorABC):
+        return list(values)
+    return values
+
+
 def client(original_function):
     Rules = getattr(sys.modules[__name__], "Rules")
     rules_obj = Rules()
@@ -1285,6 +1298,8 @@ def client(original_function):
         # DO NOT MOVE THIS. It always needs to run first
         # Check if this is an async function. If so only execute the async function
         call_type = original_function.__name__
+        if call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
+            kwargs["tools"] = materialize_single_pass_iterable(kwargs["tools"])
         if _is_async_request(kwargs):
             # [OPTIONAL] CHECK MAX RETRIES / REQUEST
             if litellm.num_retries_per_request is not None:
@@ -1582,6 +1597,9 @@ def client(original_function):
 
     @wraps(original_function)
     async def wrapper_async(*args, **kwargs):
+        call_type = original_function.__name__
+        if call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
+            kwargs["tools"] = materialize_single_pass_iterable(kwargs["tools"])
         print_args_passed_to_litellm(original_function, args, kwargs)
         start_time = datetime.datetime.now()
         result = None
@@ -1594,7 +1612,6 @@ def client(original_function):
             start_time=start_time,
         )
         # only set litellm_call_id if its not in kwargs
-        call_type = original_function.__name__
         if "litellm_call_id" not in kwargs:
             kwargs["litellm_call_id"] = str(uuid.uuid4())
 

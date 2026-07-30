@@ -226,6 +226,37 @@ class TestResponsesAPIPromptManagement:
         assert request_params["tools"] == []
         assert request_params["tool_choice"] == "auto"
 
+    def test_prompt_hook_tool_iterator_is_materialized(self):
+        merged_tools = [{"type": "function", "name": "lookup"}]
+        logging_obj = _make_logging_obj(
+            merged_model="openai/gpt-4o",
+            merged_messages=[{"role": "user", "content": "Hello"}],  # type: ignore[list-item]
+            merged_optional_params={"tools": (tool for tool in merged_tools)},
+        )
+
+        patches = _patch_responses_dispatch()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as mock_handler,
+            patch("litellm.responses.main.log_tool_request_shape") as shape_log,
+        ):
+            import litellm
+
+            litellm.responses(
+                input="Hello",
+                model="gpt-4o",
+                tools=[],
+                tool_choice="auto",
+                prompt_id="tool-generator",
+                litellm_logging_obj=logging_obj,
+            )
+
+        assert shape_log.call_args_list[1].kwargs["tools"] == merged_tools
+        request_params = mock_handler.call_args.kwargs["responses_api_request"]
+        assert request_params["tools"] == merged_tools
+
     def test_model_override_from_template(self):
         """[D] Model returned by the prompt hook overrides the original request model."""
         template_messages: List[AllMessageValues] = [
@@ -423,6 +454,38 @@ class TestAsyncResponsesAPIPromptManagement:
         request_params = mock_handler.call_args.kwargs["responses_api_request"]
         assert request_params["tools"] == []
         assert request_params["tool_choice"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_async_prompt_hook_tool_iterator_is_materialized(self):
+        merged_tools = [{"type": "function", "name": "lookup"}]
+        logging_obj = _make_logging_obj(
+            merged_model="openai/gpt-4o",
+            merged_messages=[{"role": "user", "content": "Hello"}],  # type: ignore[list-item]
+            merged_optional_params={"tools": (tool for tool in merged_tools)},
+        )
+
+        patches = _patch_responses_dispatch()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as mock_handler,
+            patch("litellm.responses.main.log_tool_request_shape") as shape_log,
+        ):
+            import litellm
+
+            await litellm.aresponses(
+                input="Hello",
+                model="gpt-4o",
+                tools=[],
+                tool_choice="auto",
+                prompt_id="tool-generator",
+                litellm_logging_obj=logging_obj,
+            )
+
+        assert shape_log.call_args_list[1].kwargs["tools"] == merged_tools
+        request_params = mock_handler.call_args.kwargs["responses_api_request"]
+        assert request_params["tools"] == merged_tools
 
     @pytest.mark.asyncio
     async def test_async_non_message_items_filtered(self):
