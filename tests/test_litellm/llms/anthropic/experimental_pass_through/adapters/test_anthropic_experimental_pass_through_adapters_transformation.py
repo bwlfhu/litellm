@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -3068,3 +3068,43 @@ def test_translate_anthropic_tools_to_openai_accepts_null_input_schema():
     new_tools, _ = adapter.translate_anthropic_tools_to_openai(tools=tools)
 
     assert new_tools == [{"type": "function", "function": {"name": "nullable_schema", "parameters": {}}}]
+
+
+@pytest.mark.parametrize("tool_type", ["function", "custom"])
+def test_translate_anthropic_tools_to_openai_repairs_leaked_tool_type_in_schema(
+    tool_type: Literal["function", "custom"],
+):
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    input_schema: AnthropicInputSchema = {
+        "type": tool_type,
+        "properties": {"name": {"type": "string"}},
+    }
+    tools: list[AllAnthropicToolsValues] = [
+        cast(
+            AllAnthropicToolsValues,
+            {
+                "type": tool_type,
+                "name": "list_published_schemas",
+                "input_schema": input_schema,
+            },
+        )
+    ]
+
+    new_tools, _ = adapter.translate_anthropic_tools_to_openai(tools=tools)
+
+    assert new_tools == [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_published_schemas",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    assert input_schema == {
+        "type": tool_type,
+        "properties": {"name": {"type": "string"}},
+    }

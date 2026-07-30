@@ -768,7 +768,10 @@ class LiteLLMAnthropicMessagesAdapter:
                 name=truncated_name,
             )
             if "input_schema" in tool:
-                function_chunk["parameters"] = dict(tool["input_schema"] or {})  # type: ignore
+                input_schema = dict(tool["input_schema"] or {})
+                if tool_type in {"function", "custom"} and input_schema.get("type") == tool_type:
+                    input_schema["type"] = "object"
+                function_chunk["parameters"] = input_schema  # type: ignore
             if "description" in tool:
                 function_chunk["description"] = tool["description"]  # type: ignore
 
