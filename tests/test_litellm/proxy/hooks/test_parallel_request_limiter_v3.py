@@ -3165,6 +3165,138 @@ async def test_pre_call_hook_does_not_leak_internal_stash_to_request_body():
     assert isinstance(metadata.get(RATE_LIMIT_DESCRIPTORS_KEY), list)
 
 
+@pytest.mark.parametrize("provider_metadata", [None, {"trace_id": "trace-1"}])
+def test_responses_stash_does_not_mutate_provider_metadata(
+    provider_metadata: Optional[Dict[str, str]],
+) -> None:
+    """A caller's valid Responses ``metadata`` must pass through unchanged."""
+    from litellm.proxy.hooks.parallel_request_limiter_v3 import RATE_LIMIT_RESPONSE_KEY
+
+    data: Dict[str, Any] = {"litellm_metadata": {}}
+    if provider_metadata is not None:
+        data["metadata"] = dict(provider_metadata)
+    _PROXY_MaxParallelRequestsHandler._stash_value_in_metadata_channel(
+        data=data,
+        key=RATE_LIMIT_RESPONSE_KEY,
+        value={"overall_code": "OK"},
+    )
+
+    if provider_metadata is None:
+        assert "metadata" not in data
+    else:
+        assert data["metadata"] == provider_metadata
+    assert data["litellm_metadata"][RATE_LIMIT_RESPONSE_KEY]["overall_code"] == "OK"
+
+
+def test_responses_release_markers_use_internal_metadata_only() -> None:
+    from litellm.proxy.hooks.parallel_request_limiter_v3 import (
+        MAX_PARALLEL_SLOT_ACQUIRED_KEY,
+        TPM_RESERVATION_RELEASED_KEY,
+    )
+
+    direct_internal = {
+        MAX_PARALLEL_SLOT_ACQUIRED_KEY: {
+            "slot_id": "slot-1",
+            "counter_keys": ["counter-1"],
+        }
+    }
+    nested_internal = {}
+    data: Dict[str, Any] = {
+        "metadata": {"trace_id": "trace-1"},
+        "litellm_metadata": direct_internal,
+        "litellm_params": {
+            "metadata": {"trace_id": "trace-1"},
+            "litellm_metadata": nested_internal,
+        },
+    }
+
+    _PROXY_MaxParallelRequestsHandler._clear_parallel_slot_marker(data)
+    _PROXY_MaxParallelRequestsHandler._mark_reservation_released(data)
+
+    assert data["metadata"] == {"trace_id": "trace-1"}
+    assert data["litellm_params"]["metadata"] == {"trace_id": "trace-1"}
+    assert MAX_PARALLEL_SLOT_ACQUIRED_KEY not in direct_internal
+    assert direct_internal[TPM_RESERVATION_RELEASED_KEY] is True
+    assert nested_internal[TPM_RESERVATION_RELEASED_KEY] is True
+    assert _PROXY_MaxParallelRequestsHandler._is_reservation_released(data)
+
+    legacy_metadata = {
+        MAX_PARALLEL_SLOT_ACQUIRED_KEY: {
+            "slot_id": "slot-legacy",
+            "counter_keys": ["counter-legacy"],
+        }
+    }
+    legacy_data = {
+        "litellm_params": {
+            "metadata": legacy_metadata,
+            "litellm_metadata": None,
+        }
+    }
+    _PROXY_MaxParallelRequestsHandler._clear_parallel_slot_marker(legacy_data)
+    _PROXY_MaxParallelRequestsHandler._mark_reservation_released(legacy_data)
+
+    assert MAX_PARALLEL_SLOT_ACQUIRED_KEY not in legacy_metadata
+    assert legacy_metadata[TPM_RESERVATION_RELEASED_KEY] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_internal_metadata", [True, False])
+async def test_failure_refunds_reservation_once_across_metadata_channels(
+    monkeypatch,
+    use_internal_metadata: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from litellm.proxy.hooks.parallel_request_limiter_v3 import (
+        TPM_RESERVATION_RELEASED_KEY,
+        TPM_RESERVED_SCOPES_KEY,
+        TPM_RESERVED_TOKENS_KEY,
+    )
+
+    handler = _PROXY_MaxParallelRequestsHandler(internal_usage_cache=InternalUsageCache(DualCache()))
+    increment_pipeline = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        handler.internal_usage_cache.dual_cache,
+        "async_increment_cache_pipeline",
+        increment_pipeline,
+    )
+    provider_metadata: Dict[str, Any] = {"trace_id": "trace-1"}
+    reservation_metadata = {
+        TPM_RESERVED_TOKENS_KEY: 10,
+        TPM_RESERVED_SCOPES_KEY: [["api_key", "hashed-key"]],
+    }
+    litellm_params = (
+        {
+            "metadata": provider_metadata,
+            "litellm_metadata": reservation_metadata,
+        }
+        if use_internal_metadata
+        else {
+            "metadata": reservation_metadata,
+            "litellm_metadata": None,
+        }
+    )
+    kwargs: Dict[str, Any] = {
+        "litellm_params": litellm_params,
+        "standard_logging_object": {"metadata": {}},
+    }
+
+    for _ in range(2):
+        await handler.async_log_failure_event(
+            kwargs=kwargs,
+            response_obj=None,
+            start_time=None,
+            end_time=None,
+        )
+
+    increment_pipeline.assert_awaited_once()
+    assert reservation_metadata[TPM_RESERVATION_RELEASED_KEY] is True
+    if use_internal_metadata:
+        assert provider_metadata == {"trace_id": "trace-1"}
+    else:
+        assert litellm_params["litellm_metadata"] is None
+
+
 @pytest.mark.asyncio
 async def test_pre_call_hook_rejects_caller_supplied_stash_values():
     """Caller cannot pre-populate stash keys in body metadata to drive a
@@ -4333,6 +4465,17 @@ async def test_streaming_end_to_end_populates_slp_ratelimit_headers(monkeypatch)
     ``kwargs["standard_logging_object"]["hidden_params"]["additional_headers"]``.
     """
     monkeypatch.setenv("LITELLM_RATE_LIMIT_WINDOW_SIZE", "60")
+    from litellm.proxy.auth import auth_utils
+    from litellm.proxy.hooks.parallel_request_limiter_v3 import (
+        RATE_LIMIT_DESCRIPTORS_KEY,
+        RATE_LIMIT_RESPONSE_KEY,
+        TPM_RESERVED_MODEL_KEY,
+        TPM_RESERVED_SCOPES_KEY,
+        TPM_RESERVED_TOKENS_KEY,
+    )
+
+    monkeypatch.setattr(auth_utils, "get_key_model_tpm_limit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(auth_utils, "get_key_model_rpm_limit", lambda *_args, **_kwargs: None)
     _api_key = hash_token("sk-stream-e2e")
     user_api_key_dict = UserAPIKeyAuth(
         api_key=_api_key,
@@ -4340,15 +4483,14 @@ async def test_streaming_end_to_end_populates_slp_ratelimit_headers(monkeypatch)
         tpm_limit=10000,
     )
     local_cache = DualCache()
-    handler = _PROXY_MaxParallelRequestsHandler(
-        internal_usage_cache=InternalUsageCache(local_cache)
-    )
+    handler = _PROXY_MaxParallelRequestsHandler(internal_usage_cache=InternalUsageCache(local_cache))
 
-    # Real pre-call: populates data and stashes the response into metadata
-    # so the success callback can find it via litellm_params.metadata.
+    # Real pre-call: stashes the response in LiteLLM's internal metadata so
+    # the success callback can find it without changing provider metadata.
     data: Dict[str, Any] = {
         "model": "gpt-4o-mini",
-        "metadata": {},
+        "metadata": {"trace_id": "trace-1"},
+        "litellm_metadata": {},
         "stream": True,
     }
     await handler.async_pre_call_hook(
@@ -4358,9 +4500,17 @@ async def test_streaming_end_to_end_populates_slp_ratelimit_headers(monkeypatch)
         call_type="",
     )
 
-    # Simulate the wrapper handing the pre-call metadata dict to the
-    # completion() call: it becomes kwargs["litellm_params"]["metadata"] by
-    # the time the success callback fires.
+    assert data["metadata"] == {"trace_id": "trace-1"}
+    assert {
+        RATE_LIMIT_DESCRIPTORS_KEY,
+        RATE_LIMIT_RESPONSE_KEY,
+        TPM_RESERVED_MODEL_KEY,
+        TPM_RESERVED_SCOPES_KEY,
+        TPM_RESERVED_TOKENS_KEY,
+    }.issubset(data["litellm_metadata"])
+
+    # Simulate the wrapper handing the internal metadata dict to the
+    # completion() call by the time the success callback fires.
     mock_response = ModelResponse(
         id="mock-stream-e2e",
         object="chat.completion",
@@ -4378,7 +4528,7 @@ async def test_streaming_end_to_end_populates_slp_ratelimit_headers(monkeypatch)
                 "user_api_key_end_user_id": None,
             }
         },
-        "litellm_params": {"metadata": data["metadata"]},
+        "litellm_params": {"litellm_metadata": data["litellm_metadata"]},
         "model": "gpt-4o-mini",
     }
 

@@ -325,9 +325,9 @@ MAX_PARALLEL_SLOT_ACQUIRED_KEY = "_litellm_max_parallel_slot_acquired"
 # pruned. Also the longest request duration the gauge can track: a request
 # running longer than this stops occupying its slot.
 PARALLEL_REQUEST_SLOT_TTL_SECONDS = 3600
-# Stash keys live ONLY in metadata channels — never at the top level of the
-# request body. Top-level keys are forwarded as body params to upstream
-# providers, which reject unknown fields with 400/429 errors.
+# Stash keys live only in the endpoint-appropriate metadata channel, never as
+# top-level provider body fields. Responses requests pre-seed the private
+# ``litellm_metadata`` channel so provider-visible ``metadata`` stays clean.
 _LITELLM_STASH_KEYS: Tuple[str, ...] = (
     TPM_RESERVED_TOKENS_KEY,
     TPM_RESERVED_MODEL_KEY,
@@ -2435,15 +2435,15 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
             else:
                 # add descriptors to request headers
                 data["litellm_proxy_rate_limit_response"] = response
-                # Mirror into metadata so streaming success logging can find
-                # it via ``kwargs["litellm_params"]["metadata"]``.
-                self._stash_value_in_metadata_channels(
+                # Keep a private copy so streaming success logging can find it
+                # without adding anything to provider-visible ``metadata``.
+                self._stash_value_in_metadata_channel(
                     data=data,
                     key=RATE_LIMIT_RESPONSE_KEY,
                     value=response,
                 )
                 if parallel_slot_id is not None:
-                    self._stash_value_in_metadata_channels(
+                    self._stash_value_in_metadata_channel(
                         data=data,
                         key=MAX_PARALLEL_SLOT_ACQUIRED_KEY,
                         value={
@@ -2523,7 +2523,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
                         requested_model=requested_model,
                     )
                 else:
-                    self._stash_value_in_metadata_channels(
+                    self._stash_value_in_metadata_channel(
                         data=data,
                         key=RATE_LIMIT_DESCRIPTORS_KEY,
                         value=descriptors,
@@ -2556,7 +2556,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
                         data["litellm_proxy_rate_limit_response"] = tpm_response
                         # Keep the metadata stash in sync when this is the
                         # first snapshot written.
-                        self._stash_value_in_metadata_channels(
+                        self._stash_value_in_metadata_channel(
                             data=data,
                             key=RATE_LIMIT_RESPONSE_KEY,
                             value=tpm_response,
@@ -2764,19 +2764,21 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         return merged
 
     @staticmethod
-    def _stash_value_in_metadata_channels(
+    def _stash_value_in_metadata_channel(
         data: Dict[str, Any],
         key: str,
         value: Any,
     ) -> None:
-        for channel in ("metadata", "litellm_metadata"):
-            existing = data.get(channel)
-            if isinstance(existing, dict):
-                existing[key] = value
-            elif channel == "metadata":
-                # ``litellm_metadata`` is owned by the router; don't conjure
-                # it here.
-                data[channel] = {key: value}
+        # Responses requests pre-seed ``litellm_metadata`` during proxy setup.
+        # Prefer it whenever present so their provider-visible ``metadata``
+        # parameter is never created or mutated by the limiter. Keep the
+        # legacy channel for endpoints that do not yet use the private one.
+        channel = "litellm_metadata" if isinstance(data.get("litellm_metadata"), dict) else "metadata"
+        existing = data.get(channel)
+        if isinstance(existing, dict):
+            existing[key] = value
+        else:
+            data[channel] = {key: value}
 
     @classmethod
     def _stash_reservation_in_data(
@@ -2792,11 +2794,11 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         """
         scopes_payload: Optional[List[List[str]]] = [[k, v] for k, v in reserved_scopes] if reserved_scopes else None
 
-        cls._stash_value_in_metadata_channels(data=data, key=TPM_RESERVED_TOKENS_KEY, value=estimated_tokens)
+        cls._stash_value_in_metadata_channel(data=data, key=TPM_RESERVED_TOKENS_KEY, value=estimated_tokens)
         if reserved_model:
-            cls._stash_value_in_metadata_channels(data=data, key=TPM_RESERVED_MODEL_KEY, value=reserved_model)
+            cls._stash_value_in_metadata_channel(data=data, key=TPM_RESERVED_MODEL_KEY, value=reserved_model)
         if scopes_payload is not None:
-            cls._stash_value_in_metadata_channels(data=data, key=TPM_RESERVED_SCOPES_KEY, value=scopes_payload)
+            cls._stash_value_in_metadata_channel(data=data, key=TPM_RESERVED_SCOPES_KEY, value=scopes_payload)
 
     @staticmethod
     def _lookup_stashed_value(
@@ -2819,9 +2821,12 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
                         return candidate
             litellm_params = kwargs.get("litellm_params")
             if isinstance(litellm_params, dict):
-                lp_metadata = litellm_params.get("metadata")
-                if isinstance(lp_metadata, dict):
-                    candidate = lp_metadata.get(key)
+                for metadata_key in ("litellm_metadata", "metadata"):
+                    lp_metadata = litellm_params.get(metadata_key)
+                    if isinstance(lp_metadata, dict):
+                        candidate = lp_metadata.get(key)
+                        if candidate is not None:
+                            return candidate
         if candidate is None and isinstance(standard_logging_metadata, dict):
             candidate = standard_logging_metadata.get(key)
         return candidate
@@ -2918,13 +2923,16 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         """
         if not isinstance(data, dict):
             return
-        for channel in ("metadata", "litellm_metadata"):
-            channel_dict = data.get(channel)
-            if isinstance(channel_dict, dict):
-                channel_dict.pop(MAX_PARALLEL_SLOT_ACQUIRED_KEY, None)
+        channel = "litellm_metadata" if isinstance(data.get("litellm_metadata"), dict) else "metadata"
+        channel_dict = data.get(channel)
+        if isinstance(channel_dict, dict):
+            channel_dict.pop(MAX_PARALLEL_SLOT_ACQUIRED_KEY, None)
         litellm_params = data.get("litellm_params")
         if isinstance(litellm_params, dict):
-            lp_metadata = litellm_params.get("metadata")
+            metadata_key = (
+                "litellm_metadata" if isinstance(litellm_params.get("litellm_metadata"), dict) else "metadata"
+            )
+            lp_metadata = litellm_params.get(metadata_key)
             if isinstance(lp_metadata, dict):
                 lp_metadata.pop(MAX_PARALLEL_SLOT_ACQUIRED_KEY, None)
         slo = data.get("standard_logging_object")
@@ -2936,22 +2944,23 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
     @staticmethod
     def _mark_reservation_released(data: Any) -> None:
         """
-        Stamp the released flag into every metadata channel a sibling
-        callback might read from. async_post_call_failure_hook receives the
-        request data dict; async_log_failure_event reads kwargs +
-        standard_logging_object.metadata. Same dict identity across
-        ``request_data["metadata"]`` and ``kwargs["litellm_params"]["metadata"]``
-        means writes here propagate to the other hook.
+        Stamp the released flag into the endpoint-appropriate metadata
+        channel a sibling callback reads. Responses requests prefer private
+        ``litellm_metadata`` so provider-visible ``metadata`` stays untouched.
+        The standard logging object is always internal and remains a fallback.
         """
         if not isinstance(data, dict):
             return
-        for channel in ("metadata", "litellm_metadata"):
-            existing = data.get(channel)
-            if isinstance(existing, dict):
-                existing[TPM_RESERVATION_RELEASED_KEY] = True
+        channel = "litellm_metadata" if isinstance(data.get("litellm_metadata"), dict) else "metadata"
+        existing = data.get(channel)
+        if isinstance(existing, dict):
+            existing[TPM_RESERVATION_RELEASED_KEY] = True
         litellm_params = data.get("litellm_params")
         if isinstance(litellm_params, dict):
-            lp_metadata = litellm_params.get("metadata")
+            metadata_key = (
+                "litellm_metadata" if isinstance(litellm_params.get("litellm_metadata"), dict) else "metadata"
+            )
+            lp_metadata = litellm_params.get(metadata_key)
             if isinstance(lp_metadata, dict):
                 lp_metadata[TPM_RESERVATION_RELEASED_KEY] = True
         slo = data.get("standard_logging_object")
@@ -3475,7 +3484,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
                 return
 
             # Refund directly against the descriptors we reserved against —
-            # the pre-call hook stashes them in the request-data metadata
+            # the pre-call hook stashes them in internal request metadata
             # channels before success/failure callbacks run.
             stashed = self._lookup_stashed_value(
                 kwargs=request_data,

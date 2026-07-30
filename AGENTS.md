@@ -19,10 +19,13 @@
 
 - LiteLLM #34754 / PR #34759：Responses 流式终态响应为 `dict` 时，安全读取 `usage`，覆盖 Router 和 logging 路径。
 - PR #35018：Responses 流式 bridge 正确初始化 iterator 状态并保留中途错误/fallback 能力。
+- LiteLLM #35197 / PR #35200：Responses 速率限制器状态只写入 `litellm_metadata`，避免内部字段泄漏为 provider 可见的 `metadata`。
 - 相关官方链接：
   - `https://github.com/BerriAI/litellm/issues/34754`
   - `https://github.com/BerriAI/litellm/pull/34759`
   - `https://github.com/BerriAI/litellm/pull/35018`
+  - `https://github.com/BerriAI/litellm/issues/35197`
+  - `https://github.com/BerriAI/litellm/pull/35200`
 
 移植前必须检查 PR 是否依赖比当前基线更新的代码；不要无条件合并整个 PR 分支。优先提取最小源码改动，并保留回归测试。
 
