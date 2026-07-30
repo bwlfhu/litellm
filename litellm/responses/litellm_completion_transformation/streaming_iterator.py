@@ -169,6 +169,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         return self._tool_fields_by_call_id.get(call_id, ("", None, None))
 
     def _is_reasoning_end(self, chunk):
+        if not chunk.choices:
+            return False
         delta = chunk.choices[0].delta
 
         # if this indicates reasoning content, don't consider reasoning ended
@@ -821,7 +823,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
 
     def _ensure_output_item_for_chunk(self, chunk: ModelResponseStream) -> None:
         # Change: Never return a value, just enqueue output item events
-        if self.sent_output_item_added_event:
+        if self.sent_output_item_added_event or not chunk.choices:
             return
         delta = chunk.choices[0].delta
 
@@ -886,6 +888,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         return
 
     def _prepare_output_step_for_chunk(self, chunk: ModelResponseStream) -> None:
+        if not chunk.choices:
+            return
         chunk_id = chunk.id
         delta_role = chunk.choices[0].delta.role if chunk.choices else None
         starts_new_step = bool(
@@ -1120,6 +1124,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         and the ReasoningSummaryTextDeltaEvent, which is used by the responses API to emit reasoning content.
         It also handles emitting annotation.added events when annotations are detected in the chunk.
         """
+        if not chunk.choices:
+            return None
         if self._cached_item_id is None and chunk.id:
             self._cached_item_id = chunk.id
         item_id = self._cached_item_id or chunk.id
@@ -1207,6 +1213,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
 
         It's unclear how users expect litellm to translate multiple-choices-per-chunk to the responses API output.
         """
+        if not choices:
+            return ""
         choice = choices[0]
         chat_completion_delta: ChatCompletionDelta = choice.delta
         return chat_completion_delta.content or ""

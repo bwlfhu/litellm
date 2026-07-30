@@ -2885,6 +2885,146 @@ class TestCompletedResponseLatchedOnStreamEnd:
         assert iterator.completed_response.type == "response.completed"
 
 
+class TestUsageOnlyStreamingChunk:
+    def _stream_chunks(self):
+        from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+        return [
+            ModelResponseStream(
+                id="chatcmpl-usage",
+                model="test-model",
+                choices=[
+                    StreamingChoices(
+                        index=0,
+                        delta=Delta(role="assistant", content="hello"),
+                        finish_reason=None,
+                    )
+                ],
+            ),
+            ModelResponseStream(
+                id="chatcmpl-usage",
+                model="test-model",
+                choices=[
+                    StreamingChoices(
+                        index=0,
+                        delta=Delta(content=""),
+                        finish_reason="stop",
+                    )
+                ],
+            ),
+            ModelResponseStream(
+                id="chatcmpl-usage-only",
+                model="test-model",
+                choices=[],
+                usage=Usage(prompt_tokens=7, completion_tokens=3, total_tokens=10),
+            ),
+        ]
+
+    def _make_iterator(self, wrapper):
+        from unittest.mock import Mock
+
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+
+        wrapper.logging_obj = Mock()
+        wrapper.logging_obj._response_cost_calculator.return_value = 0
+        return LiteLLMCompletionStreamingIterator(
+            model="test-model",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="test",
+            responses_api_request={},
+        )
+
+    def _assert_events(self, events):
+        event_types = [event.type for event in events]
+        assert event_types.count("response.output_item.added") == 1
+        assert event_types.count("response.output_text.done") == 1
+        assert event_types.count("response.content_part.done") == 1
+        assert event_types.count("response.output_item.done") == 1
+        assert event_types[-1] == "response.completed"
+        message_item_ids = {
+            event.item.id
+            for event in events
+            if event.type in {"response.output_item.added", "response.output_item.done"}
+        } | {
+            event.item_id
+            for event in events
+            if event.type
+            in {
+                "response.content_part.added",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.content_part.done",
+            }
+        }
+        assert len(message_item_ids) == 1
+        usage = events[-1].response.usage
+        assert usage.input_tokens == 7
+        assert usage.output_tokens == 3
+        assert usage.total_tokens == 10
+
+    def test_empty_choices_helpers_are_noops(self):
+        from unittest.mock import MagicMock
+
+        import litellm
+
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        iterator = self._make_iterator(wrapper)
+        usage_chunk = self._stream_chunks()[-1]
+        iterator._active_upstream_chunk_id = "chatcmpl-content"
+        iterator._upstream_step_finished = True
+        iterator._cached_item_id = "msg_content"
+
+        iterator._prepare_output_step_for_chunk(usage_chunk)
+        iterator._ensure_output_item_for_chunk(usage_chunk)
+
+        assert iterator.sent_output_item_added_event is False
+        assert iterator._pending_response_events == []
+        assert iterator._active_upstream_chunk_id == "chatcmpl-content"
+        assert iterator._upstream_step_finished is True
+        assert iterator._cached_item_id == "msg_content"
+        assert iterator._is_reasoning_end(usage_chunk) is False
+        assert iterator._transform_chat_completion_chunk_to_response_api_chunk(usage_chunk) is None
+        assert iterator._cached_item_id == "msg_content"
+        assert iterator._get_delta_string_from_streaming_choices(usage_chunk.choices) == ""
+
+        fresh_iterator = self._make_iterator(MagicMock(spec=litellm.CustomStreamWrapper))
+        assert fresh_iterator._transform_chat_completion_chunk_to_response_api_chunk(usage_chunk) is None
+        assert fresh_iterator._cached_item_id is None
+
+    def test_sync_iterator_preserves_usage_only_chunk(self):
+        from unittest.mock import MagicMock
+
+        import litellm
+
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        wrapper.__next__.side_effect = [*self._stream_chunks(), StopIteration]
+        iterator = self._make_iterator(wrapper)
+
+        events = []
+        while not events or events[-1].type != "response.completed":
+            events.append(next(iterator))
+
+        self._assert_events(events)
+
+    @pytest.mark.asyncio
+    async def test_async_iterator_preserves_usage_only_chunk(self):
+        from unittest.mock import MagicMock
+
+        import litellm
+
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        wrapper.__anext__.side_effect = [*self._stream_chunks(), StopAsyncIteration]
+        iterator = self._make_iterator(wrapper)
+
+        events = []
+        while not events or events[-1].type != "response.completed":
+            events.append(await iterator.__anext__())
+
+        self._assert_events(events)
+
+
 class TestFallbackWrapperStopAsyncIterationFallback:
     """Regression: FallbackResponsesStreamWrapper.__anext__ only sniffed
     terminal events off forwarded chunks. When the inner generator raises
