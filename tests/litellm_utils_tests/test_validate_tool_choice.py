@@ -98,6 +98,81 @@ def test_log_tool_request_shape_does_not_warn_for_normal_no_tool_request(caplog)
     assert "tool_choice without tools" not in caplog.text
 
 
+def test_log_tool_request_shape_warns_for_malformed_function_schema(caplog):
+    log_tool_request_shape(
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_published_schemas",
+                    "parameters": {"type": "function"},
+                },
+            }
+        ],
+        tool_choice="auto",
+        endpoint="/v1/chat/completions",
+        model="gpt-5.5",
+        custom_llm_provider="openai",
+        phase="received",
+        call_id="req-1",
+    )
+
+    assert "malformed schemas" in caplog.text
+    assert "list_published_schemas" not in caplog.text
+    assert "req-1" in caplog.text
+    assert "properties" not in caplog.text
+    assert "'tool_index': 0" in caplog.text
+    assert "'root_type_kind': 'string'" in caplog.text
+
+
+def test_log_tool_request_shape_warns_for_malformed_flat_responses_function_schema(caplog):
+    log_tool_request_shape(
+        tools=[{"type": "function", "name": "flat_tool", "parameters": {"type": "function"}}],
+        tool_choice="auto",
+        endpoint="/v1/responses",
+        model="gpt-test",
+        custom_llm_provider="openai",
+        phase="normalized",
+    )
+
+    assert "malformed schemas" in caplog.text
+    assert "flat_tool" not in caplog.text
+
+
+def test_log_tool_request_shape_does_not_raise_for_broken_mapping(caplog):
+    class BrokenMapping(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("no access")
+
+        def __len__(self):
+            raise RuntimeError("no length")
+
+    log_tool_request_shape(
+        tools=[BrokenMapping()],
+        tool_choice="auto",
+        endpoint="/v1/messages",
+        model="claude-test",
+        custom_llm_provider="anthropic",
+        phase="received",
+    )
+
+    assert "malformed schemas" not in caplog.text
+
+
+def test_log_tool_request_shape_can_warn_for_missing_tools_without_tool_choice(caplog):
+    log_tool_request_shape(
+        tools=None,
+        tool_choice=None,
+        endpoint="/v1/messages",
+        model="claude-sonnet-5",
+        custom_llm_provider="anthropic",
+        phase="received",
+        warn_when_missing=True,
+    )
+
+    assert "contains no tools" in caplog.text
+
+
 def test_log_tool_request_shape_does_not_consume_unknown_iterable(caplog):
     consumed = False
 
