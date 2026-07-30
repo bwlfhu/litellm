@@ -93,6 +93,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         self.final_text: str = ""
         self._cached_item_id: str | None = None
         self._current_step_text = ""
+        self._current_step_annotations: list[BaseLiteLLMOpenAIResponseObject] = []
         self._active_upstream_chunk_id: str | None = None
         self._upstream_step_finished = False
         self._cached_response_id: str | None = None
@@ -799,6 +800,22 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             if self._pending_tool_events:
                 return self._pending_tool_events.pop(0)
 
+            if (
+                self._cached_item_id
+                and self.sent_content_part_added_event
+                and self.sent_output_text_done_event is False
+            ):
+                self._queue_message_step_done_events(
+                    self._cached_item_id,
+                    self._current_step_text,
+                    self._current_step_annotations,
+                )
+                self.sent_output_text_done_event = True
+                self.sent_output_content_part_done_event = True
+                self.sent_output_item_done_event = True
+            if self._pending_response_events:
+                return self._pending_response_events.pop(0)
+
             done_event = self.return_default_done_events(self.litellm_model_response)
             if done_event:
                 return done_event
@@ -900,12 +917,17 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         )
         if starts_new_step:
             if self._cached_item_id and self.sent_content_part_added_event:
-                self._queue_message_step_done_events(self._cached_item_id, self._current_step_text)
+                self._queue_message_step_done_events(
+                    self._cached_item_id,
+                    self._current_step_text,
+                    self._current_step_annotations,
+                )
             self.sent_output_item_added_event = False
             self.sent_content_part_added_event = False
             self.sent_annotation_events = False
             self._cached_item_id = None
             self._current_step_text = ""
+            self._current_step_annotations = []
             self._cached_reasoning_item_id = None
             self._reasoning_item_id = None
             self._reasoning_done_emitted = False
@@ -921,7 +943,13 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         if chunk.choices and chunk.choices[0].finish_reason is not None:
             self._upstream_step_finished = True
 
-    def _queue_message_step_done_events(self, item_id: str, text: str) -> None:
+    def _queue_message_step_done_events(
+        self,
+        item_id: str,
+        text: str,
+        annotations: list[BaseLiteLLMOpenAIResponseObject] | None = None,
+    ) -> None:
+        response_annotations = annotations if annotations is not None else []
         self._sequence_number += 1
         self._pending_response_events.append(
             OutputTextDoneEvent(
@@ -939,7 +967,12 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
                 item_id=item_id,
                 output_index=0,
                 content_index=0,
-                part=ContentPartDonePartOutputText(type="output_text", text=text, annotations=[], logprobs=None),
+                part=ContentPartDonePartOutputText(
+                    type="output_text",
+                    text=text,
+                    annotations=response_annotations,
+                    logprobs=None,
+                ),
             )
         )
         self._sequence_number += 1
@@ -954,7 +987,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
                         "status": "completed",
                         "type": "message",
                         "role": "assistant",
-                        "content": [{"type": "output_text", "text": text, "annotations": []}],
+                        "content": [{"type": "output_text", "text": text, "annotations": response_annotations}],
                     }
                 ),
             )
@@ -977,6 +1010,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
                 # Emit any pending tool events before reading a new chunk
                 if self._pending_tool_events:
                     return self._pending_tool_events.pop(0)
+                if hasattr(self, "_pending_annotation_events") and self._pending_annotation_events:
+                    return self._pending_annotation_events.pop(0)
 
                 try:
                     chunk = await self.litellm_custom_stream_wrapper.__anext__()
@@ -1079,6 +1114,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
                 # Emit any pending tool events before reading a new chunk
                 if self._pending_tool_events:
                     return self._pending_tool_events.pop(0)
+                if hasattr(self, "_pending_annotation_events") and self._pending_annotation_events:
+                    return self._pending_annotation_events.pop(0)
                 try:
                     chunk = self.litellm_custom_stream_wrapper.__next__()
                     self._prepare_output_step_for_chunk(chunk)
@@ -1134,27 +1171,30 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         # This ensures we detect and queue annotation events from the annotation chunk
         if chunk.choices and hasattr(chunk.choices[0].delta, "annotations"):
             annotations = chunk.choices[0].delta.annotations
-            if annotations and self.sent_annotation_events is False:
+            if annotations:
                 self.sent_annotation_events = True
-                # Store annotation events to emit them one by one
-                if not hasattr(self, "_pending_annotation_events"):
-                    response_annotations = LiteLLMCompletionResponsesConfig._transform_chat_completion_annotations_to_response_output_annotations(
-                        annotations=annotations
-                    )
-                    self._pending_annotation_events = []
-                    for idx, annotation in enumerate(response_annotations):
-                        annotation_dict = (
-                            annotation.model_dump() if hasattr(annotation, "model_dump") else dict(annotation)
-                        )
-                        event = OutputTextAnnotationAddedEvent(
+                response_annotations = LiteLLMCompletionResponsesConfig._transform_chat_completion_annotations_to_response_output_annotations(
+                    annotations=annotations
+                )
+                annotation_start_index = len(self._current_step_annotations)
+                self._current_step_annotations.extend(response_annotations)
+                pending_annotation_events = getattr(self, "_pending_annotation_events", [])
+                self._pending_annotation_events = [
+                    *pending_annotation_events,
+                    *[
+                        OutputTextAnnotationAddedEvent(
                             type=ResponsesAPIStreamEvents.OUTPUT_TEXT_ANNOTATION_ADDED,
                             item_id=item_id,
                             output_index=0,
                             content_index=0,
-                            annotation_index=idx,
-                            annotation=annotation_dict,
+                            annotation_index=annotation_start_index + idx,
+                            annotation=(
+                                annotation.model_dump() if hasattr(annotation, "model_dump") else dict(annotation)
+                            ),
                         )
-                        self._pending_annotation_events.append(event)
+                        for idx, annotation in enumerate(response_annotations)
+                    ],
+                ]
         # Priority 1: Handle reasoning content (highest priority)
         if (
             chunk.choices

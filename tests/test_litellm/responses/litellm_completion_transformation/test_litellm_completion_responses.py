@@ -10,10 +10,6 @@ from litellm.responses.litellm_completion_transformation.transformation import (
     TOOL_CALLS_CACHE,
     LiteLLMCompletionResponsesConfig,
 )
-from litellm.types.llms.openai import (
-    ChatCompletionResponseMessage,
-    ChatCompletionToolMessage,
-)
 from litellm.types.utils import (
     ChatCompletionMessageToolCall,
     Choices,
@@ -2559,7 +2555,7 @@ class TestStreamingIDConsistency:
         # Transform chunks to response API events
         event1 = iterator._transform_chat_completion_chunk_to_response_api_chunk(chunk1)
         event2 = iterator._transform_chat_completion_chunk_to_response_api_chunk(chunk2)
-        event3 = iterator._transform_chat_completion_chunk_to_response_api_chunk(chunk3)
+        iterator._transform_chat_completion_chunk_to_response_api_chunk(chunk3)
 
         # Assert: All events should use the same item_id (from the first chunk)
         assert event1 is not None, "First event should not be None"
@@ -3110,6 +3106,7 @@ class TestEnsureOutputItemContentPartAdded:
         iterator._sequence_number = 0
         iterator._cached_item_id = None
         iterator._current_step_text = ""
+        iterator._current_step_annotations = []
         iterator._cached_reasoning_item_id = None
         iterator._reasoning_active = False
         iterator._pending_response_events = []
@@ -3366,6 +3363,227 @@ class TestEnsureOutputItemContentPartAdded:
 
         events = iterator._pending_response_events
         assert len(events) == 2
+
+
+class TestMixedStepAnnotations:
+    def test_message_step_done_events_preserve_stream_annotations(self):
+        from unittest.mock import Mock
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+        from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+        wrapper = Mock(spec=litellm.CustomStreamWrapper)
+        wrapper.logging_obj = Mock()
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="test-model",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="test",
+            responses_api_request={},
+        )
+
+        first = ModelResponseStream(
+            id="chatcmpl-step-1",
+            choices=[StreamingChoices(index=0, delta=Delta(role="assistant", content="before"))],
+        )
+        annotation_delta = Delta(content="")
+        annotation_delta.annotations = [
+            {
+                "type": "url_citation",
+                "url_citation": {
+                    "start_index": 0,
+                    "end_index": 6,
+                    "url": "https://example.com",
+                    "title": "Example",
+                },
+            }
+        ]
+        annotation_chunk = ModelResponseStream(
+            id="chatcmpl-step-1",
+            choices=[StreamingChoices(index=0, delta=annotation_delta)],
+        )
+        second_annotation_delta = Delta(content="")
+        second_annotation_delta.annotations = [
+            {
+                "type": "url_citation",
+                "url_citation": {
+                    "start_index": 7,
+                    "end_index": 12,
+                    "url": "https://example.org",
+                    "title": "Example Org",
+                },
+            }
+        ]
+        second_annotation_chunk = ModelResponseStream(
+            id="chatcmpl-step-1",
+            choices=[StreamingChoices(index=0, delta=second_annotation_delta)],
+        )
+        finish = ModelResponseStream(
+            id="chatcmpl-step-1",
+            choices=[StreamingChoices(index=0, delta=Delta(content=""), finish_reason="tool_calls")],
+        )
+        second = ModelResponseStream(
+            id="chatcmpl-step-2",
+            choices=[StreamingChoices(index=0, delta=Delta(role="assistant", content="after"))],
+        )
+
+        iterator._prepare_output_step_for_chunk(first)
+        iterator._ensure_output_item_for_chunk(first)
+        iterator._transform_chat_completion_chunk_to_response_api_chunk(first)
+        iterator._pending_response_events.clear()
+        annotation_event = iterator._transform_chat_completion_chunk_to_response_api_chunk(annotation_chunk)
+        second_annotation_event = iterator._transform_chat_completion_chunk_to_response_api_chunk(
+            second_annotation_chunk
+        )
+        iterator._pending_response_events.clear()
+        assert annotation_event.annotation_index == 0
+        assert second_annotation_event.annotation_index == 1
+        assert len(iterator._current_step_annotations) == 2
+        iterator._prepare_output_step_for_chunk(finish)
+        iterator._prepare_output_step_for_chunk(second)
+
+        done_events = iterator._pending_response_events
+        assert len(done_events) == 3
+        content_done = done_events[1]
+        item_done = done_events[2]
+        assert len(content_done.part.annotations) == 2
+        assert content_done.part.annotations[0].url == "https://example.com"
+        assert content_done.part.annotations[1].url == "https://example.org"
+        assert len(item_done.item.content[0]["annotations"]) == 2
+        assert item_done.item.content[0]["annotations"][0].url == "https://example.com"
+        assert item_done.item.content[0]["annotations"][1].url == "https://example.org"
+
+    def test_sync_iterator_drains_pending_annotation_before_reading(self):
+        from unittest.mock import MagicMock
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+        from litellm.types.llms.openai import OutputTextAnnotationAddedEvent, ResponsesAPIStreamEvents
+
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        wrapper.logging_obj = MagicMock()
+        wrapper.__next__.side_effect = AssertionError("the upstream iterator must not be read")
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="test-model",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="test",
+            responses_api_request={},
+        )
+        annotation_event = OutputTextAnnotationAddedEvent(
+            type=ResponsesAPIStreamEvents.OUTPUT_TEXT_ANNOTATION_ADDED,
+            item_id="msg_test",
+            output_index=0,
+            content_index=0,
+            annotation_index=1,
+            annotation={"type": "url_citation"},
+        )
+        iterator.sent_response_created_event = True
+        iterator.sent_response_in_progress_event = True
+        iterator._pending_annotation_events = [annotation_event]
+
+        assert next(iterator) is annotation_event
+
+    @pytest.mark.asyncio
+    async def test_async_iterator_drains_pending_annotation_before_reading(self):
+        from unittest.mock import MagicMock
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+        from litellm.types.llms.openai import OutputTextAnnotationAddedEvent, ResponsesAPIStreamEvents
+
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        wrapper.logging_obj = MagicMock()
+        wrapper.__anext__.side_effect = AssertionError("the upstream iterator must not be read")
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="test-model",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="test",
+            responses_api_request={},
+        )
+        annotation_event = OutputTextAnnotationAddedEvent(
+            type=ResponsesAPIStreamEvents.OUTPUT_TEXT_ANNOTATION_ADDED,
+            item_id="msg_test",
+            output_index=0,
+            content_index=0,
+            annotation_index=1,
+            annotation={"type": "url_citation"},
+        )
+        iterator.sent_response_created_event = True
+        iterator.sent_response_in_progress_event = True
+        iterator._pending_annotation_events = [annotation_event]
+
+        assert await iterator.__anext__() is annotation_event
+
+    def test_final_message_done_events_use_current_step_state(self):
+        from unittest.mock import MagicMock
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+        from litellm.types.responses.main import GenericResponseOutputItemContentAnnotation
+        from litellm.types.utils import Choices, Message, ModelResponse
+
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        wrapper.logging_obj = MagicMock()
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="test-model",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="test",
+            responses_api_request={},
+        )
+        iterator._cached_item_id = "msg-step-2"
+        iterator.sent_content_part_added_event = True
+        iterator._current_step_text = "after"
+        iterator._current_step_annotations = [
+            GenericResponseOutputItemContentAnnotation(
+                type="url_citation",
+                start_index=7,
+                end_index=12,
+                url="https://example.org",
+                title="Example Org",
+            )
+        ]
+        iterator.litellm_model_response = ModelResponse(
+            id="chatcmpl-aggregate",
+            model="test-model",
+            choices=[
+                Choices(
+                    index=0,
+                    finish_reason="stop",
+                    message=Message(
+                        role="assistant",
+                        content="beforeafter",
+                        annotations=[
+                            {
+                                "type": "url_citation",
+                                "url_citation": {
+                                    "start_index": 0,
+                                    "end_index": 6,
+                                    "url": "https://example.com",
+                                    "title": "Example",
+                                },
+                            }
+                        ],
+                    ),
+                )
+            ],
+        )
+
+        text_done = iterator.common_done_event_logic()
+        content_done = iterator.common_done_event_logic()
+        item_done = iterator.common_done_event_logic()
+
+        assert text_done.text == "after"
+        assert content_done.part.annotations[0].url == "https://example.org"
+        assert item_done.item.content[0]["text"] == "after"
+        assert item_done.item.content[0]["annotations"][0].url == "https://example.org"
 
 
 class TestCacheControlPreservation:
