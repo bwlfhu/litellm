@@ -1323,11 +1323,7 @@ class LiteLLMCompletionResponsesConfig:
     ) -> ChatCompletionToolParam | None:
         tool_type = ns_tool.get("type")
         tool_name = str(ns_tool.get("name") or "")
-        chat_tool_name = (
-            LiteLLMCompletionResponsesConfig._namespace_wire_name(ns, tool_name)
-            if nested
-            else tool_name
-        )
+        chat_tool_name = LiteLLMCompletionResponsesConfig._namespace_wire_name(ns, tool_name) if nested else tool_name
         if nested and tool_type == "custom":
             converted = convert_custom_tool_to_function_tool(ns_tool)
             if converted is None:
@@ -1376,9 +1372,7 @@ class LiteLLMCompletionResponsesConfig:
         top_level_names = {
             str(tool.get("name"))
             for tool in tools or []
-            if isinstance(tool, dict)
-            and tool.get("type") in ("function", "custom")
-            and tool.get("name")
+            if isinstance(tool, dict) and tool.get("type") in ("function", "custom") and tool.get("name")
         }
         namespace_chat_names: set[str] = set()
         for tool in tools or []:
@@ -1632,10 +1626,7 @@ class LiteLLMCompletionResponsesConfig:
             and tool.get("name")
             and (
                 tool.get("type") != "namespace"
-                or (
-                    not isinstance(tool.get("tools"), list)
-                    and isinstance(tool.get("parameters"), dict)
-                )
+                or (not isinstance(tool.get("tools"), list) and isinstance(tool.get("parameters"), dict))
             )
         }
         for tool in tools or []:
@@ -1657,11 +1648,7 @@ class LiteLLMCompletionResponsesConfig:
 
         namespace_tool_names = dict(canonical_names)
         for alias, candidates in alias_candidates.items():
-            if (
-                len(candidates) == 1
-                and alias not in top_level_names
-                and alias not in canonical_names
-            ):
+            if len(candidates) == 1 and alias not in top_level_names and alias not in canonical_names:
                 namespace_tool_names[alias] = candidates[0]
         return namespace_tool_names
 

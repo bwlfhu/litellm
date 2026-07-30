@@ -1073,7 +1073,7 @@ class ResponseAPILoggingUtils:
                 if input_tokens is not None and output_tokens is not None:
                     normalized_usage["total_tokens"] = input_tokens + output_tokens
             return ResponseAPIUsage(**normalized_usage)
-        except Exception:
+        except Exception:  # noqa: BLE001  # malformed provider usage must not break response logging
             return None
 
     @staticmethod

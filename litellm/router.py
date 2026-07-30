@@ -2293,7 +2293,7 @@ class Router:
                 response["usage"] = combined_usage.model_dump()
             else:
                 response.usage = combined_usage
-        except Exception:
+        except Exception:  # noqa: BLE001  # best-effort usage merge must not replace the fallback result
             return
 
     @staticmethod
@@ -2508,7 +2508,7 @@ class Router:
             except MidStreamFallbackError as e:
                 try:
                     partial_usage = Router._extract_partial_responses_usage(source_iterator)
-                except Exception:
+                except Exception:  # noqa: BLE001  # custom stream wrappers may fail while exposing partial usage
                     partial_usage = None
                 try:
                     model_group = cast(str, initial_kwargs.get("model"))

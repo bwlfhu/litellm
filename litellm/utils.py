@@ -7446,13 +7446,13 @@ def log_tool_request_shape(
     tools: object,
     tool_choice: object,
     endpoint: str,
-    model: Optional[str],
-    custom_llm_provider: Optional[str],
+    model: str | None,
+    custom_llm_provider: str | None,
     phase: str,
 ) -> None:
     """Log a redacted structural summary when a tool declaration may be missing."""
     tools_present = tools is not None
-    tool_count: Optional[int] = 0 if tools is None else None
+    tool_count: int | None = 0 if tools is None else None
     tool_types: frozenset[str] = frozenset()
 
     if isinstance(tools, _ToolShapeMapping):
@@ -7482,7 +7482,7 @@ def log_tool_request_shape(
         verbose_logger.debug("Tool request shape: %s", summary)
 
 
-def _tool_type_from_shape(tool: object) -> Optional[str]:
+def _tool_type_from_shape(tool: object) -> str | None:
     if not isinstance(tool, _ToolShapeMapping):
         return None
     tool_type = tool.get("type")

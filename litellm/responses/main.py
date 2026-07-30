@@ -60,8 +60,8 @@ from litellm.types.responses.main import *
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import (
     ProviderConfigManager,
-    log_tool_request_shape,
     client,
+    log_tool_request_shape,
 )
 
 if TYPE_CHECKING:

@@ -18,26 +18,18 @@ from litellm.types.utils import ModelResponse
 def test_is_preformatted_cached_chat_stream_true():
     stream = MagicMock(spec=CustomStreamWrapper)
     stream.custom_llm_provider = "cached_response"
-    assert (
-        ResponsesToCompletionBridgeHandler._is_preformatted_cached_chat_stream(stream)
-        is True
-    )
+    assert ResponsesToCompletionBridgeHandler._is_preformatted_cached_chat_stream(stream) is True
 
 
 def test_is_preformatted_cached_chat_stream_false_wrong_provider():
     stream = MagicMock(spec=CustomStreamWrapper)
     stream.custom_llm_provider = "openai"
-    assert (
-        ResponsesToCompletionBridgeHandler._is_preformatted_cached_chat_stream(stream)
-        is False
-    )
+    assert ResponsesToCompletionBridgeHandler._is_preformatted_cached_chat_stream(stream) is False
 
 
 def test_is_preformatted_cached_chat_stream_false_wrong_type():
     assert (
-        ResponsesToCompletionBridgeHandler._is_preformatted_cached_chat_stream(
-            {"object": "chat.completion.chunk"}
-        )
+        ResponsesToCompletionBridgeHandler._is_preformatted_cached_chat_stream({"object": "chat.completion.chunk"})
         is False
     )
 

@@ -467,7 +467,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
         return request_data
 
     @staticmethod
-    def _convert_response_output_to_choices(
+    def _convert_response_output_to_choices(  # noqa: C901  # ordered handling of the OpenAI output item union
         output_items: Optional[List[Any]],
         handle_raw_dict_callback: Optional[Callable] = None,
     ) -> List[Any]:
@@ -515,9 +515,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                 )
                 pending_reasoning_items.append(reasoning_item)
                 reasoning_parts.extend(
-                    str(summary.get("text") or "")
-                    for summary in reasoning_item["summary"]
-                    if summary.get("text")
+                    str(summary.get("text") or "") for summary in reasoning_item["summary"] if summary.get("text")
                 )
 
             elif isinstance(item, ResponseOutputMessage):
@@ -585,9 +583,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                     )
                     pending_reasoning_items.append(reasoning_item)
                     reasoning_parts.extend(
-                        str(summary.get("text") or "")
-                        for summary in reasoning_item["summary"]
-                        if summary.get("text")
+                        str(summary.get("text") or "") for summary in reasoning_item["summary"] if summary.get("text")
                     )
                     continue
                 choice, next_index = handle_raw_dict_callback(item=item, index=index)
@@ -601,9 +597,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                             existing_reasoning = getattr(choice.message, "reasoning_content", None)
                             pending_reasoning = " ".join(reasoning_parts)
                             choice.message.reasoning_content = (
-                                f"{existing_reasoning} {pending_reasoning}"
-                                if existing_reasoning
-                                else pending_reasoning
+                                f"{existing_reasoning} {pending_reasoning}" if existing_reasoning else pending_reasoning
                             )
                         if pending_reasoning_items:
                             existing_items = list(getattr(choice.message, "reasoning_items", None) or [])
@@ -627,8 +621,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                 (
                     choice
                     for choice in reversed(choices)
-                    if getattr(choice, "message", None) is not None
-                    and not getattr(choice.message, "tool_calls", None)
+                    if getattr(choice, "message", None) is not None and not getattr(choice.message, "tool_calls", None)
                 ),
                 None,
             )

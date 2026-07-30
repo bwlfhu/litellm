@@ -99,9 +99,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         self._pending_tool_events: list[BaseLiteLLMOpenAIResponseObject] = []
         self._tool_output_index_by_call_id: dict[str, int] = {}
         self._tool_args_by_call_id: dict[str, str] = {}
-        self._tool_fields_by_call_id: dict[
-            str, tuple[str, str | None, str | None]
-        ] = {}
+        self._tool_fields_by_call_id: dict[str, tuple[str, str | None, str | None]] = {}
         self._tool_call_id_by_index: dict[int, str] = {}
         self._ambiguous_tool_call_indexes: set[int] = set()
         self._next_tool_output_index: int = 1  # output_index=0 reserved for the message item
@@ -141,9 +139,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         except (TypeError, ValueError):
             return None
 
-    def _responses_namespace_tool_call_fields(
-        self, function_name: str
-    ) -> tuple[str, str | None, str | None]:
+    def _responses_namespace_tool_call_fields(self, function_name: str) -> tuple[str, str | None, str | None]:
         return LiteLLMCompletionResponsesConfig._restore_namespace_tool_name(
             function_name,
             self._namespace_tool_names,
@@ -230,9 +226,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             else:
                 fn_name = str(getattr(fn, "name", "") or "")
                 fn_args_delta = str(getattr(fn, "arguments", "") or "")
-            tool_name, tool_namespace, namespace_tool_type = (
-                self._resolve_tool_call_fields(call_id, fn_name)
-            )
+            tool_name, tool_namespace, namespace_tool_type = self._resolve_tool_call_fields(call_id, fn_name)
             custom_tool_names = self._custom_names_for_tool_call(
                 tool_name,
                 tool_namespace,
@@ -315,9 +309,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             else:
                 fn_name = str(getattr(fn, "name", "") or "")
                 fn_args = str(getattr(fn, "arguments", "") or "")
-            tool_name, tool_namespace, namespace_tool_type = (
-                self._resolve_tool_call_fields(call_id, fn_name)
-            )
+            tool_name, tool_namespace, namespace_tool_type = self._resolve_tool_call_fields(call_id, fn_name)
             custom_tool_names = self._custom_names_for_tool_call(
                 tool_name,
                 tool_namespace,
@@ -384,14 +376,12 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
                     )
                     self._pending_tool_events.append(custom_delta_event)
                     self._sequence_number += 1
-                done_event: BaseLiteLLMOpenAIResponseObject = (
-                    CustomToolCallInputDoneEvent(
-                        type=ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DONE,
-                        item_id=call_id,
-                        output_index=output_index,
-                        input=custom_input,
-                        sequence_number=self._sequence_number,
-                    )
+                done_event: BaseLiteLLMOpenAIResponseObject = CustomToolCallInputDoneEvent(
+                    type=ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DONE,
+                    item_id=call_id,
+                    output_index=output_index,
+                    input=custom_input,
+                    sequence_number=self._sequence_number,
                 )
             else:
                 done_event = FunctionCallArgumentsDoneEvent(

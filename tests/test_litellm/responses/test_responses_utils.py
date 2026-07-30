@@ -7,9 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-sys.path.insert(
-    0, os.path.abspath("../../..")
-)  # Adds the parent directory to the system path
+sys.path.insert(0, os.path.abspath("../../.."))  # Adds the parent directory to the system path
 
 import litellm
 from litellm.llms.base_llm.responses.transformation import BaseResponsesAPIConfig
@@ -54,9 +52,7 @@ class TestResponsesAPIRequestUtils:
         # Setup
         model = "gpt-4o"
         config = OpenAIResponsesAPIConfig()
-        optional_params = ResponsesAPIOptionalRequestParams(
-            {"temperature": 0.7, "unsupported_param": "value"}
-        )
+        optional_params = ResponsesAPIOptionalRequestParams({"temperature": 0.7, "unsupported_param": "value"})
 
         # Execute and Assert
         with pytest.raises(litellm.UnsupportedParamsError) as excinfo:
@@ -81,9 +77,7 @@ class TestResponsesAPIRequestUtils:
         }
 
         # Execute
-        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(
-            params
-        )
+        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(params)
 
         # Assert
         assert "temperature" in result
@@ -109,39 +103,30 @@ class TestResponsesAPIRequestUtils:
         )
 
         # Execute
-        result = ResponsesAPIRequestUtils.decode_previous_response_id_to_original_previous_response_id(
-            encoded_id
-        )
+        result = ResponsesAPIRequestUtils.decode_previous_response_id_to_original_previous_response_id(encoded_id)
 
         # Assert
         assert result == original_response_id
 
         # Test with a non-encoded ID
         plain_id = "resp_xyz789"
-        result_plain = ResponsesAPIRequestUtils.decode_previous_response_id_to_original_previous_response_id(
-            plain_id
-        )
+        result_plain = ResponsesAPIRequestUtils.decode_previous_response_id_to_original_previous_response_id(plain_id)
         assert result_plain == plain_id
 
     def test_update_responses_api_response_id_with_model_id_handles_dict(self):
         """Ensure _update_responses_api_response_id_with_model_id works with dict input"""
         responses_api_response = {"id": "resp_abc123"}
         litellm_metadata = {"model_info": {"id": "gpt-4o"}}
-        updated = (
-            ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id(
-                responses_api_response=responses_api_response,
-                custom_llm_provider="openai",
-                litellm_metadata=litellm_metadata,
-            )
+        updated = ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id(
+            responses_api_response=responses_api_response,
+            custom_llm_provider="openai",
+            litellm_metadata=litellm_metadata,
         )
         assert updated["id"] != "resp_abc123"
-        decoded = ResponsesAPIRequestUtils._decode_responses_api_response_id(
-            updated["id"]
-        )
+        decoded = ResponsesAPIRequestUtils._decode_responses_api_response_id(updated["id"])
         assert decoded.get("response_id") == "resp_abc123"
         assert decoded.get("model_id") == "gpt-4o"
         assert decoded.get("custom_llm_provider") == "openai"
-
 
     def test_update_responses_api_response_id_with_model_id_is_idempotent_for_litellm_ids(self):
         raw = "resp_" + "a" * 48
@@ -169,9 +154,7 @@ class TestResponsesAPIRequestUtils:
             model_id=None,
             container_id="cntr_upstream_abc",
         )
-        assert "None" not in base64.b64decode(
-            encoded.replace("cntr_", "").encode("utf-8")
-        ).decode("utf-8")
+        assert "None" not in base64.b64decode(encoded.replace("cntr_", "").encode("utf-8")).decode("utf-8")
         decoded = ResponsesAPIRequestUtils._decode_container_id(encoded)
         assert decoded.get("custom_llm_provider") == "azure"
         assert decoded.get("model_id") is None
@@ -179,12 +162,8 @@ class TestResponsesAPIRequestUtils:
 
     def test_decode_container_id_legacy_literal_none_model_id(self):
         """IDs encoded before the None fix should decode without a bogus model_id."""
-        legacy_inner = (
-            "litellm:custom_llm_provider:azure;model_id:None;container_id:cntr_x"
-        )
-        legacy_id = "cntr_" + base64.b64encode(legacy_inner.encode("utf-8")).decode(
-            "utf-8"
-        )
+        legacy_inner = "litellm:custom_llm_provider:azure;model_id:None;container_id:cntr_x"
+        legacy_id = "cntr_" + base64.b64encode(legacy_inner.encode("utf-8")).decode("utf-8")
         decoded = ResponsesAPIRequestUtils._decode_container_id(legacy_id)
         assert decoded.get("model_id") is None
         assert decoded.get("custom_llm_provider") == "azure"
@@ -200,21 +179,30 @@ class TestResponsesAPIRequestUtils:
         ],
     )
     def test_openai_responses_adapters_normalize_foreign_function_call_item_ids(self, provider, model):
-        assert ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
-            item_id="call_abc123",
-            model=model,
-            custom_llm_provider=provider,
-        ) == "fc_abc123"
-        assert ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
-            item_id="tooluse_abc123",
-            model=model,
-            custom_llm_provider=provider,
-        ) == "fc_abc123"
-        assert ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
-            item_id="toolu_vrtx_abc123",
-            model=model,
-            custom_llm_provider=provider,
-        ) == "fc_abc123"
+        assert (
+            ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+                item_id="call_abc123",
+                model=model,
+                custom_llm_provider=provider,
+            )
+            == "fc_abc123"
+        )
+        assert (
+            ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+                item_id="tooluse_abc123",
+                model=model,
+                custom_llm_provider=provider,
+            )
+            == "fc_abc123"
+        )
+        assert (
+            ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+                item_id="toolu_vrtx_abc123",
+                model=model,
+                custom_llm_provider=provider,
+            )
+            == "fc_abc123"
+        )
 
     def test_replayed_item_ids_are_normalized_by_item_type_for_openai(self):
         from litellm.litellm_core_utils.prompt_templates.factory import (
@@ -407,19 +395,14 @@ class TestResponseAPILoggingUtils:
         }
 
         # Execute
-        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            usage
-        )
+        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(usage)
 
         # Assert
         assert isinstance(result, Usage)
         assert result.prompt_tokens == 10
         assert result.completion_tokens == 20
         assert result.total_tokens == 30
-        assert (
-            result.prompt_tokens_details
-            and result.prompt_tokens_details.cached_tokens == 2
-        )
+        assert result.prompt_tokens_details and result.prompt_tokens_details.cached_tokens == 2
 
     def test_transform_response_api_usage_with_none_values(self):
         """Test transformation handles None values properly"""
@@ -432,9 +415,7 @@ class TestResponseAPILoggingUtils:
         }
 
         # Execute
-        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            usage
-        )
+        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(usage)
 
         # Assert
         assert result.prompt_tokens == 0
@@ -453,9 +434,7 @@ class TestResponseAPILoggingUtils:
         }
 
         # Execute
-        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            usage
-        )
+        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(usage)
 
         # Assert
         assert result.prompt_tokens == 15
@@ -492,9 +471,7 @@ class TestResponseAPILoggingUtils:
         }
 
         # Execute
-        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            usage
-        )
+        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(usage)
 
         # Assert - verify basic token counts
         assert isinstance(result, Usage)
@@ -534,9 +511,7 @@ class TestResponseAPILoggingUtils:
         }
 
         # Execute
-        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            usage
-        )
+        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(usage)
 
         # Assert - all token detail types should be preserved
         assert result.prompt_tokens_details is not None
@@ -568,9 +543,7 @@ class TestResponseAPILoggingUtils:
             },
         }
 
-        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            usage
-        )
+        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(usage)
 
         assert result.prompt_tokens_details is not None
         assert result.prompt_tokens_details.text_tokens == 8
@@ -592,9 +565,7 @@ class TestResponseAPILoggingUtils:
             "output_token_details": {"text_tokens": 2, "audio_tokens": 98},
         }
 
-        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            usage
-        )
+        result = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(usage)
 
         assert result.prompt_tokens_details is not None
         assert result.prompt_tokens_details.text_tokens == 10
@@ -620,9 +591,7 @@ class TestResponsesAPIProviderSpecificParams:
         }
 
         # Should not raise any exception
-        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(
-            params
-        )
+        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(params)
         assert "temperature" in result
 
     def test_provider_specific_params_no_crash_with_openai(self):
@@ -634,9 +603,7 @@ class TestResponsesAPIProviderSpecificParams:
         }
 
         # Should not raise any exception
-        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(
-            params
-        )
+        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(params)
         assert "temperature" in result
 
     def test_provider_specific_params_no_crash_with_vertex_ai(self):
@@ -648,9 +615,7 @@ class TestResponsesAPIProviderSpecificParams:
         }
 
         # Should not raise any exception
-        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(
-            params
-        )
+        result = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(params)
         assert "temperature" in result
 
 
