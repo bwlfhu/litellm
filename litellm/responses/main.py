@@ -60,6 +60,7 @@ from litellm.types.responses.main import *
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import (
     ProviderConfigManager,
+    log_tool_request_shape,
     client,
 )
 
@@ -438,6 +439,14 @@ async def aresponses(
     """
     Async: Handles responses API requests by reusing the synchronous function
     """
+    log_tool_request_shape(
+        tools=tools,
+        tool_choice=tool_choice,
+        endpoint="/v1/responses",
+        model=model,
+        custom_llm_provider=custom_llm_provider,
+        phase="received",
+    )
     local_vars = locals()
     try:
         loop = asyncio.get_event_loop()
@@ -905,6 +914,15 @@ def responses(
     Synchronous version of the Responses API.
     Uses the synchronous HTTP handler to make requests.
     """
+    if "aresponses" not in kwargs:
+        log_tool_request_shape(
+            tools=tools,
+            tool_choice=tool_choice,
+            endpoint="/v1/responses",
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            phase="received",
+        )
     local_vars = locals()
 
     try:
@@ -959,6 +977,15 @@ def responses(
         # Update input and tools with provider-specific file IDs if managed files are used
         #########################################################
         input, tools = _apply_managed_file_id_mapping(input=input, tools=tools, kwargs=kwargs, local_vars=local_vars)
+
+        log_tool_request_shape(
+            tools=tools,
+            tool_choice=tool_choice,
+            endpoint="/v1/responses",
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            phase="normalized",
+        )
 
         #########################################################
         # Native MCP Responses API
