@@ -8,9 +8,7 @@ import sys
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../.."))
-)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../..")))
 
 from litellm.llms.anthropic.experimental_pass_through.responses_adapters.streaming_iterator import (
     AnthropicResponsesStreamWrapper,
@@ -39,9 +37,7 @@ class _FakeResponsesStream:
 
 
 async def _drain(events: list) -> list:
-    wrapper = AnthropicResponsesStreamWrapper(
-        responses_stream=_FakeResponsesStream(events), model="m"
-    )
+    wrapper = AnthropicResponsesStreamWrapper(responses_stream=_FakeResponsesStream(events), model="m")
     return [chunk async for chunk in wrapper]
 
 
@@ -179,13 +175,102 @@ class TestReasoningContentIsNotStreamedIntoTextBlock:
         chunks = await _drain(_reasoning_first_bridge_events())
 
         text_block_indexes = {
-            c["index"]
-            for c in chunks
-            if c["type"] == "content_block_start" and c["content_block"]["type"] == "text"
+            c["index"] for c in chunks if c["type"] == "content_block_start" and c["content_block"]["type"] == "text"
         }
         thinking_delta_indexes = {
-            c["index"]
-            for c in chunks
-            if c["type"] == "content_block_delta" and c["delta"]["type"] == "thinking_delta"
+            c["index"] for c in chunks if c["type"] == "content_block_delta" and c["delta"]["type"] == "thinking_delta"
         }
         assert text_block_indexes.isdisjoint(thinking_delta_indexes)
+
+
+class TestToolBlockIdentityAndTerminalEvents:
+    def test_distinct_text_items_do_not_share_a_content_block(self):
+        chunks = _process_all(
+            [
+                {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "one"},
+                {"type": "response.output_text.delta", "item_id": "msg_2", "delta": "two"},
+            ]
+        )
+
+        assert [chunk["type"] for chunk in chunks] == [
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "content_block_start",
+            "content_block_delta",
+        ]
+        assert [chunk["index"] for chunk in chunks] == [0, 0, 0, 1, 1]
+
+    def test_orphan_function_arguments_open_a_valid_tool_block(self):
+        chunks = _process_all(
+            [
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "fc_orphan",
+                    "delta": '{"x":1}',
+                }
+            ]
+        )
+
+        assert [chunk["type"] for chunk in chunks] == [
+            "content_block_start",
+            "content_block_delta",
+        ]
+        assert chunks[0]["index"] == chunks[1]["index"] == 0
+        assert chunks[0]["content_block"]["type"] == "tool_use"
+        assert chunks[0]["content_block"]["id"] == "fc_orphan"
+        assert chunks[1]["delta"] == {"type": "input_json_delta", "partial_json": '{"x":1}'}
+
+    def test_unknown_done_item_does_not_close_current_block(self):
+        chunks = _process_all(
+            [
+                {"type": "response.output_item.added", "item": {"type": "reasoning", "id": "rs_1"}},
+                {"type": "response.output_item.done", "item": {"type": "message", "id": "msg_other"}},
+                {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "delta": "still thinking"},
+            ]
+        )
+
+        assert [chunk["type"] for chunk in chunks] == [
+            "content_block_start",
+            "content_block_delta",
+        ]
+        assert chunks[1]["index"] == 0
+
+    def test_unknown_tool_item_does_not_reuse_another_tool_block(self):
+        chunks = _process_all(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "item": {"type": "function_call", "id": "item_a", "call_id": "call_a", "name": "a"},
+                },
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "item_b",
+                    "delta": "{}",
+                },
+            ]
+        )
+
+        assert [chunk["type"] for chunk in chunks] == [
+            "content_block_start",
+            "content_block_stop",
+            "content_block_start",
+            "content_block_delta",
+        ]
+        assert chunks[0]["index"] == chunks[1]["index"] == 0
+        assert chunks[2]["index"] == chunks[3]["index"] == 1
+        assert chunks[2]["content_block"]["id"] == "item_b"
+
+    @pytest.mark.asyncio
+    async def test_terminal_events_are_idempotent(self):
+        chunks = await _drain(
+            [
+                {"type": "response.completed"},
+                {"type": "response.completed"},
+                {"type": "response.failed"},
+            ]
+        )
+
+        assert [chunk["type"] for chunk in chunks].count("message_start") == 1
+        assert [chunk["type"] for chunk in chunks].count("message_delta") == 1
+        assert [chunk["type"] for chunk in chunks].count("message_stop") == 1

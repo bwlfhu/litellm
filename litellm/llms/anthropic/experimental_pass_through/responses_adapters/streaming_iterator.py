@@ -36,9 +36,11 @@ class AnthropicResponsesStreamWrapper:
         self._item_id_to_block_index: Dict[str, int] = {}
         # Track open function_call items by item_id so we can emit tool_use start
         self._pending_tool_ids: Dict[str, str] = {}  # item_id -> call_id / name accumulator
+        self._pending_tool_names: Dict[str, str] = {}
         self._sent_message_start = False
         self._sent_message_stop = False
         self._open_block_type: Optional[str] = None
+        self._open_block_item_id: Optional[str] = None
         self._chunk_queue: deque = deque()
 
     def _make_message_start(self) -> Dict[str, Any]:
@@ -74,12 +76,19 @@ class AnthropicResponsesStreamWrapper:
                 }
             )
             self._open_block_type = None
+            self._open_block_item_id = None
+
+    def _close_block_for_item(self, item_id: Optional[str]) -> None:
+        """Close a block only when a terminal event identifies that block."""
+        if item_id is not None and item_id == self._open_block_item_id:
+            self._close_open_block()
 
     def _open_content_block(self, content_block: Dict[str, Any], item_id: Optional[str] = None) -> int:
         block_idx = self._next_block_index()
         if item_id:
             self._item_id_to_block_index[item_id] = block_idx
         self._open_block_type = content_block["type"]
+        self._open_block_item_id = item_id
         self._chunk_queue.append(
             {
                 "type": "content_block_start",
@@ -90,9 +99,15 @@ class AnthropicResponsesStreamWrapper:
         return block_idx
 
     def _ensure_block_of_type(
-        self, block_type: str, content_block: Dict[str, Any], item_id: Optional[str] = None
+        self,
+        block_type: str,
+        content_block: Dict[str, Any],
+        item_id: Optional[str] = None,
+        require_item_match: bool = False,
     ) -> int:
-        if self._open_block_type != block_type:
+        if self._open_block_type != block_type or (
+            require_item_match and item_id is not None and item_id != self._open_block_item_id
+        ):
             self._close_open_block()
             return self._open_content_block(content_block, item_id)
         return self._current_block_index
@@ -131,6 +146,7 @@ class AnthropicResponsesStreamWrapper:
                 name = getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else None) or ""
                 if item_id:
                     self._pending_tool_ids[item_id] = call_id
+                    self._pending_tool_names[item_id] = name
                 self._close_open_block()
                 self._open_content_block(
                     {"type": "tool_use", "id": call_id, "name": name, "input": {}},
@@ -145,7 +161,12 @@ class AnthropicResponsesStreamWrapper:
         if event_type == "response.output_text.delta":
             item_id = getattr(event, "item_id", None) or (event.get("item_id") if isinstance(event, dict) else None)
             delta = getattr(event, "delta", "") or (event.get("delta", "") if isinstance(event, dict) else "")
-            block_idx = self._ensure_block_of_type("text", {"type": "text", "text": ""}, item_id)
+            block_idx = self._ensure_block_of_type(
+                "text",
+                {"type": "text", "text": ""},
+                item_id,
+                require_item_match=item_id is not None,
+            )
             self._chunk_queue.append(
                 {
                     "type": "content_block_delta",
@@ -173,11 +194,17 @@ class AnthropicResponsesStreamWrapper:
         if event_type == "response.function_call_arguments.delta":
             item_id = getattr(event, "item_id", None) or (event.get("item_id") if isinstance(event, dict) else None)
             delta = getattr(event, "delta", "") or (event.get("delta", "") if isinstance(event, dict) else "")
-            block_idx = (
-                self._item_id_to_block_index.get(item_id, self._current_block_index)
-                if item_id
-                else self._current_block_index
-            )
+            if self._open_block_type == "tool_use" and (item_id is None or item_id == self._open_block_item_id):
+                block_idx = self._current_block_index
+            else:
+                call_id = self._pending_tool_ids.get(item_id or "", item_id or f"call_{uuid.uuid4()}")
+                name = self._pending_tool_names.get(item_id or "", "")
+                block_idx = self._ensure_block_of_type(
+                    "tool_use",
+                    {"type": "tool_use", "id": call_id, "name": name, "input": {}},
+                    item_id,
+                    require_item_match=True,
+                )
             self._chunk_queue.append(
                 {
                     "type": "content_block_delta",
@@ -189,7 +216,9 @@ class AnthropicResponsesStreamWrapper:
 
         # ---- output item done -> content_block_stop ----
         if event_type == "response.output_item.done":
-            self._close_open_block()
+            item = getattr(event, "item", None) or (event.get("item") if isinstance(event, dict) else None)
+            item_id = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
+            self._close_block_for_item(item_id)
             return
 
         # ---- response completed -> message_delta + message_stop ----
@@ -198,6 +227,8 @@ class AnthropicResponsesStreamWrapper:
             "response.failed",
             "response.incomplete",
         ):
+            if self._sent_message_stop:
+                return
             response_obj = getattr(event, "response", None) or (
                 event.get("response") if isinstance(event, dict) else None
             )
