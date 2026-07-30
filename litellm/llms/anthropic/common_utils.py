@@ -6,7 +6,7 @@ import copy
 import re
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 import httpx
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
@@ -1016,23 +1016,53 @@ def normalize_anthropic_tool_use_id(raw_id: str) -> str:
     return sanitized or "tool_use_id"
 
 
-def _sanitize_tool_use_id_content_block(block: Any) -> Any:
+def _sanitize_tool_use_id_content_block(block: object) -> tuple[object, bool, bool]:
     if not isinstance(block, dict):
-        return block
-    block_type: Final = block.get("type")
+        return block, False, False
+    block_dict = cast(dict[str, object], block)  # cast-ok: guarded dict from an untyped request payload
+    block_type = block_dict.get("type")
     if block_type in ("tool_use", "server_tool_use"):
-        raw_id = block.get("id")
+        raw_id = block_dict.get("id")
         if isinstance(raw_id, str):
             normalized = normalize_anthropic_tool_use_id(raw_id)
             if normalized != raw_id:
-                return {**block, "id": normalized}
+                return {**block_dict, "id": normalized}, True, True
+            return block_dict, True, False
     elif block_type == "tool_result":
-        raw_id = block.get("tool_use_id")
+        raw_id = block_dict.get("tool_use_id")
         if isinstance(raw_id, str):
             normalized = normalize_anthropic_tool_use_id(raw_id)
             if normalized != raw_id:
-                return {**block, "tool_use_id": normalized}
-    return block
+                return {**block_dict, "tool_use_id": normalized}, True, True
+            return block_dict, True, False
+    return block_dict, False, False
+
+
+def _sanitize_tool_use_ids_in_anthropic_message(message: object) -> tuple[object, int, int]:
+    if not isinstance(message, dict):
+        return message, 0, 0
+    message_dict = cast(dict[str, object], message)  # cast-ok: guarded dict from an untyped message payload
+    content_value = message_dict.get("content")
+    if not isinstance(content_value, list):
+        return message_dict, 0, 0
+    content = cast(list[object], content_value)  # cast-ok: guarded list from an untyped message payload
+    sanitized_blocks = tuple(_sanitize_tool_use_id_content_block(block) for block in content)
+    new_content = [block for block, _, _ in sanitized_blocks]
+    scanned_id_count = sum(scanned for _, scanned, _ in sanitized_blocks)
+    rewritten_id_count = sum(rewritten for _, _, rewritten in sanitized_blocks)
+    sanitized_message = message_dict if rewritten_id_count == 0 else {**message_dict, "content": new_content}
+    return sanitized_message, scanned_id_count, rewritten_id_count
+
+
+def sanitize_tool_use_ids_in_anthropic_messages_with_stats(
+    messages: list[object],
+) -> tuple[list[object], int, int]:
+    sanitized_messages = tuple(_sanitize_tool_use_ids_in_anthropic_message(message) for message in messages)
+    return (
+        [message for message, _, _ in sanitized_messages],
+        sum(scanned_id_count for _, scanned_id_count, _ in sanitized_messages),
+        sum(rewritten_id_count for _, _, rewritten_id_count in sanitized_messages),
+    )
 
 
 def sanitize_tool_use_ids_in_anthropic_messages(messages: list[Any]) -> list[Any]:
@@ -1046,18 +1076,10 @@ def sanitize_tool_use_ids_in_anthropic_messages(messages: list[Any]) -> list[Any
     and ``:`` — valid on the upstream provider but rejected by Anthropic when
     the session is switched to a native Anthropic deployment.
     """
-    out: Final[list[Any]] = []
-    for m in messages:
-        if not isinstance(m, dict) or not isinstance(m.get("content"), list):
-            out.append(m)
-            continue
-        content = m["content"]
-        new_content = [_sanitize_tool_use_id_content_block(b) for b in content]
-        if new_content == content:
-            out.append(m)
-        else:
-            out.append({**m, "content": new_content})
-    return out
+    sanitized_messages, _, _ = sanitize_tool_use_ids_in_anthropic_messages_with_stats(
+        cast(list[object], messages)  # cast-ok: preserve the legacy list[Any] sanitizer interface
+    )
+    return cast(list[Any], sanitized_messages)  # cast-ok: preserve the legacy list[Any] sanitizer interface
 
 
 class _ReplayedSearchQuery(BaseModel):

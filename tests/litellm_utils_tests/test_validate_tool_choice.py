@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.abspath("../.."))
 
-from litellm.utils import log_tool_request_shape, validate_chat_completion_tool_choice
+from litellm.utils import (
+    log_anthropic_response_shape,
+    log_tool_request_shape,
+    validate_chat_completion_tool_choice,
+)
 
 
 def test_log_tool_request_shape_warns_without_tools(caplog):
@@ -83,6 +87,153 @@ def test_log_tool_request_shape_debugs_redacted_summary(monkeypatch):
     assert "secret_tool" not in debug_message
     assert "secret description" not in debug_message
     assert "token" not in debug_message
+
+
+def test_log_tool_request_shape_infos_stable_redacted_hash(caplog, monkeypatch):
+    monkeypatch.setenv("LITELLM_TOOL_DIAGNOSTICS", "true")
+    caplog.set_level("INFO")
+    first_tools = [
+        {
+            "name": "private_tool_name",
+            "input_schema": {
+                "properties": {"secret_argument": {"type": "string"}},
+                "type": "object",
+            },
+        }
+    ]
+    second_tools = [
+        {
+            "input_schema": {
+                "type": "object",
+                "properties": {"secret_argument": {"type": "string"}},
+            },
+            "name": "private_tool_name",
+        }
+    ]
+
+    log_tool_request_shape(
+        tools=first_tools,
+        tool_choice=None,
+        endpoint="/v1/messages",
+        model="claude-test",
+        custom_llm_provider="anthropic",
+        phase="received",
+        call_id="call-1",
+        log_when_present=True,
+    )
+    first_log = caplog.text
+    caplog.clear()
+    log_tool_request_shape(
+        tools=second_tools,
+        tool_choice=None,
+        endpoint="/v1/messages",
+        model="claude-test",
+        custom_llm_provider="anthropic",
+        phase="provider_dispatch",
+        call_id="call-1",
+        log_when_present=True,
+    )
+    second_log = caplog.text
+
+    first_hash = first_log.split("'tool_schema_hash': '", 1)[1].split("'", 1)[0]
+    second_hash = second_log.split("'tool_schema_hash': '", 1)[1].split("'", 1)[0]
+    assert first_hash == second_hash
+    assert len(first_hash) == 16
+    assert "private_tool_name" not in first_log
+    assert "secret_argument" not in first_log
+
+
+def test_log_anthropic_response_shape_is_redacted(caplog, monkeypatch):
+    monkeypatch.setenv("LITELLM_TOOL_DIAGNOSTICS", "true")
+    caplog.set_level("INFO")
+    log_anthropic_response_shape(
+        content=(
+            {"type": "thinking", "thinking": "private reasoning"},
+            {"type": "tool_use", "name": "private_tool", "input": {"secret": "value"}},
+            {"type": "text", "text": "private response"},
+        ),
+        stop_reason="tool_use",
+        model="claude-test",
+        custom_llm_provider="anthropic",
+        call_id="call-2",
+        stream=True,
+    )
+
+    assert "'content_block_count': 3" in caplog.text
+    assert "'tool_use_count': 1" in caplog.text
+    assert "'stop_reason': 'tool_use'" in caplog.text
+    assert "private reasoning" not in caplog.text
+    assert "private_tool" not in caplog.text
+    assert "private response" not in caplog.text
+
+
+def test_tool_diagnostics_redacts_untrusted_enum_values(caplog, monkeypatch):
+    monkeypatch.setenv("LITELLM_TOOL_DIAGNOSTICS", "true")
+    caplog.set_level("INFO")
+
+    log_tool_request_shape(
+        tools={"type": "PRIVATE_PROMPT_FRAGMENT", "name": "private_tool"},
+        tool_choice=None,
+        endpoint="/v1/messages",
+        model="claude-test",
+        custom_llm_provider="anthropic",
+        phase="received",
+        log_when_present=True,
+    )
+    log_anthropic_response_shape(
+        content=({"type": "PRIVATE_RESPONSE_FRAGMENT", "text": "private response"},),
+        stop_reason="PRIVATE_STOP_FRAGMENT",
+        model="claude-test",
+        custom_llm_provider="anthropic",
+        call_id="call-redacted",
+        stream=True,
+    )
+
+    assert "PRIVATE_" not in caplog.text
+    assert "private_tool" not in caplog.text
+    assert "private response" not in caplog.text
+    assert "'tool_types': ('other',)" in caplog.text
+    assert "'content_block_types': ('other',)" in caplog.text
+    assert "'stop_reason': 'other'" in caplog.text
+
+
+def test_disabled_tool_diagnostics_skip_schema_hash(caplog):
+    with patch("litellm.utils._tool_schema_hash", side_effect=AssertionError("hash must not run")):
+        log_tool_request_shape(
+            tools=[{"type": "function"}],
+            tool_choice=None,
+            endpoint="/v1/messages",
+            model="claude-test",
+            custom_llm_provider="anthropic",
+            phase="received",
+            log_when_present=True,
+        )
+
+    assert "Tool request shape" not in caplog.text
+
+
+def test_tool_diagnostic_hash_failure_does_not_interrupt_request(caplog, monkeypatch):
+    from pydantic import BaseModel
+
+    class BrokenTool(BaseModel):
+        def model_dump(self, *args, **kwargs):
+            raise RuntimeError("PRIVATE_SERIALIZATION_FRAGMENT")
+
+    monkeypatch.setenv("LITELLM_TOOL_DIAGNOSTICS", "true")
+    caplog.set_level("INFO")
+
+    log_tool_request_shape(
+        tools=[BrokenTool()],
+        tool_choice=None,
+        endpoint="/v1/messages",
+        model="claude-test",
+        custom_llm_provider="anthropic",
+        phase="received",
+        log_when_present=True,
+    )
+
+    assert "'tool_schema_hash': None" in caplog.text
+    assert "PRIVATE_SERIALIZATION_FRAGMENT" not in caplog.text
 
 
 def test_log_tool_request_shape_does_not_warn_for_normal_no_tool_request(caplog):

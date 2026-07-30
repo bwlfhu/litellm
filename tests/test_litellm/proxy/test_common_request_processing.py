@@ -4466,16 +4466,14 @@ class TestResponseCostHeaderForTypedDictResponses:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("headers", "warn_when_missing"),
+        "headers",
         [
-            ({"user-agent": "python-httpx", "x-litellm-call-id": "call-gate"}, False),
-            ({"user-agent": "claude-cli/2.1", "x-litellm-call-id": "call-gate"}, True),
-            ({"anthropic-beta": "claude-code-20250219", "x-litellm-call-id": "call-gate"}, True),
+            {"user-agent": "python-httpx", "x-litellm-call-id": "call-gate"},
+            {"user-agent": "claude-cli/2.1", "x-litellm-call-id": "call-gate"},
+            {"anthropic-beta": "claude-code-20250219", "x-litellm-call-id": "call-gate"},
         ],
     )
-    async def test_anthropic_received_tool_shape_logging_is_gated_and_correlated(
-        self, monkeypatch, headers, warn_when_missing
-    ):
+    async def test_anthropic_received_tool_shape_logging_is_always_enabled_and_correlated(self, monkeypatch, headers):
         import litellm.proxy.common_request_processing as crp
         from litellm.proxy._types import UserAPIKeyAuth as RealUserAPIKeyAuth
 
@@ -4511,7 +4509,8 @@ class TestResponseCostHeaderForTypedDictResponses:
         shape_log.assert_called_once()
         assert shape_log.call_args.kwargs["phase"] == "received"
         assert shape_log.call_args.kwargs["call_id"] == "call-gate"
-        assert shape_log.call_args.kwargs["warn_when_missing"] is warn_when_missing
+        assert shape_log.call_args.kwargs["warn_when_missing"] is False
+        assert shape_log.call_args.kwargs["log_when_present"] is True
 
     @pytest.mark.asyncio
     async def test_messages_typeddict_emits_cost_header_from_stored_cost(self, monkeypatch):

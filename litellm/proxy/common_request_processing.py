@@ -1618,8 +1618,6 @@ class ProxyBaseLLMRequestProcessing:
         if route_type == "anthropic_messages":
             request_model = self.data.get("model")
             request_call_id = self.data.get("litellm_call_id")
-            request_user_agent = request.headers.get("user-agent", "").lower()
-            request_anthropic_beta = request.headers.get("anthropic-beta", "").lower()
             litellm.utils.log_tool_request_shape(
                 tools=self.data.get("tools"),
                 tool_choice=self.data.get("tool_choice"),
@@ -1628,7 +1626,8 @@ class ProxyBaseLLMRequestProcessing:
                 custom_llm_provider=None,
                 phase="received",
                 call_id=request_call_id if isinstance(request_call_id, str) else None,
-                warn_when_missing="claude" in request_user_agent or "claude-code" in request_anthropic_beta,
+                warn_when_missing=False,
+                log_when_present=True,
             )
         DDSpanTagger.tag_call_id(self.data.get("litellm_call_id"))
         DDSpanTagger.tag_request(

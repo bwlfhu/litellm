@@ -495,6 +495,8 @@ async def test_async_anthropic_messages_handler_logs_provider_dispatch_tool_shap
     assert shape_log.call_args.kwargs["tools"] == dispatched_tools
     assert shape_log.call_args.kwargs["phase"] == "provider_dispatch"
     assert shape_log.call_args.kwargs["call_id"] == "call-2"
+    assert shape_log.call_args.kwargs["warn_when_missing"] is False
+    assert shape_log.call_args.kwargs["log_when_present"] is True
 
 
 def test_completion_logs_extra_body_tool_shape_at_provider_dispatch():
@@ -1247,20 +1249,66 @@ async def test_async_anthropic_messages_handler_forwards_request_timeout(monkeyp
     logging_obj.model_call_details = {}
     logging_obj.dynamic_success_callbacks = []
 
-    result = await handler.async_anthropic_messages_handler(
-        model="claude",
-        messages=[{"role": "user", "content": "hi"}],
-        anthropic_messages_provider_config=mock_config,
-        anthropic_messages_optional_request_params={},
-        custom_llm_provider="anthropic",
-        litellm_params=GenericLiteLLMParams(request_timeout=0.3),
-        logging_obj=logging_obj,
-        client=mock_client,
-        kwargs={},
-    )
+    with patch("litellm.llms.custom_httpx.llm_http_handler.log_anthropic_response_shape") as response_shape_log:
+        result = await handler.async_anthropic_messages_handler(
+            model="claude",
+            messages=[{"role": "user", "content": "hi"}],
+            anthropic_messages_provider_config=mock_config,
+            anthropic_messages_optional_request_params={},
+            custom_llm_provider="anthropic",
+            litellm_params=GenericLiteLLMParams(request_timeout=0.3),
+            logging_obj=logging_obj,
+            client=mock_client,
+            kwargs={},
+        )
 
     assert result is expected_response
     assert mock_client.post.await_args.kwargs["timeout"] == 0.3
+    response_shape_log.assert_called_once()
+    assert response_shape_log.call_args.kwargs["content"] == []
+    assert response_shape_log.call_args.kwargs["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_async_anthropic_messages_handler_logs_rust_provider_response(monkeypatch):
+    monkeypatch.setattr(litellm, "callbacks", [])
+    handler = BaseLLMHTTPHandler()
+    mock_config = Mock()
+    mock_config.validate_anthropic_messages_environment = Mock(
+        return_value=({"x-api-key": "k"}, "https://api.anthropic.com")
+    )
+    mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
+    mock_config.transform_anthropic_messages_request = Mock(return_value={"model": "claude", "messages": []})
+    mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
+    mock_config.sign_request = Mock(return_value=({"x-api-key": "k"}, None))
+    rust_response = {"id": "msg_rust", "content": [{"type": "tool_use"}], "stop_reason": "tool_use"}
+    logging_obj = Mock()
+    logging_obj.model_call_details = {}
+    logging_obj.dynamic_success_callbacks = []
+    logging_obj.litellm_call_id = "call-rust"
+
+    with (
+        patch.object(handler, "_maybe_rust_anthropic_messages", AsyncMock(return_value=rust_response)),
+        patch.object(handler, "_finalize_anthropic_messages_response", AsyncMock(return_value=rust_response)),
+        patch("litellm.llms.custom_httpx.llm_http_handler.log_anthropic_response_shape") as response_shape_log,
+    ):
+        result = await handler.async_anthropic_messages_handler(
+            model="claude",
+            messages=[{"role": "user", "content": "hi"}],
+            anthropic_messages_provider_config=mock_config,
+            anthropic_messages_optional_request_params={},
+            custom_llm_provider="anthropic",
+            litellm_params=GenericLiteLLMParams(),
+            logging_obj=logging_obj,
+            client=AsyncMock(spec=AsyncHTTPHandler),
+            kwargs={"litellm_call_id": "call-rust"},
+        )
+
+    assert result is rust_response
+    response_shape_log.assert_called_once()
+    assert response_shape_log.call_args.kwargs["content"] == [{"type": "tool_use"}]
+    assert response_shape_log.call_args.kwargs["call_id"] == "call-rust"
+    assert response_shape_log.call_args.kwargs["stream"] is False
 
 
 @pytest.mark.asyncio

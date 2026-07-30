@@ -12,10 +12,11 @@ from functools import partial
 from typing import Any, Final, cast
 
 import litellm
+from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.anthropic.common_utils import (
     flatten_unencrypted_web_search_results_in_anthropic_messages,
-    sanitize_tool_use_ids_in_anthropic_messages,
+    sanitize_tool_use_ids_in_anthropic_messages_with_stats,
     strip_empty_text_blocks_from_anthropic_messages,
 )
 from litellm.llms.base_llm.anthropic_messages.transformation import (
@@ -30,7 +31,7 @@ from litellm.types.llms.anthropic_messages.anthropic_response import (
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
-from litellm.utils import ProviderConfigManager, client, log_tool_request_shape
+from litellm.utils import ProviderConfigManager, client, is_tool_diagnostics_enabled, log_tool_request_shape
 
 from ..adapters.handler import LiteLLMMessagesToCompletionTransformationHandler
 from ..responses_adapters.handler import LiteLLMMessagesToResponsesAPIHandler
@@ -45,6 +46,30 @@ _RESPONSES_API_PROVIDERS: Final = frozenset({"openai"})
 
 def _has_deepseek_anthropic_protocol_context(kwargs: dict) -> bool:
     return get_deployment_protocol_context(kwargs) is not None
+
+
+def _sanitize_anthropic_tool_history_with_diagnostics(
+    *,
+    messages: list[object],
+    model: str,
+    call_id: str | None,
+) -> list[object]:
+    sanitized_messages, scanned_id_count, rewritten_id_count = sanitize_tool_use_ids_in_anthropic_messages_with_stats(
+        messages
+    )
+    if is_tool_diagnostics_enabled():
+        verbose_logger.info(
+            "Anthropic tool history ID shape: %s",
+            {
+                "call_id": call_id,
+                "endpoint": "/v1/messages",
+                "phase": "normalized_history",
+                "model": model,
+                "scanned_tool_id_count": scanned_id_count,
+                "rewritten_tool_id_count": rewritten_id_count,
+            },
+        )
+    return sanitized_messages
 
 
 def _should_route_to_responses_api(custom_llm_provider: str | None) -> bool:
@@ -228,7 +253,13 @@ async def anthropic_messages(
     # Replay of cross-provider tool history (e.g. kimi -> Anthropic) may carry
     # ids like ``functions.Bash:0`` that violate Anthropic's id pattern.
     if not _has_deepseek_anthropic_protocol_context(kwargs):
-        messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
+        tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
+        tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
+        messages = _sanitize_anthropic_tool_history_with_diagnostics(
+            messages=messages,
+            model=model,
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        )
     messages = flatten_unencrypted_web_search_results_in_anthropic_messages(messages)
 
     from litellm.integrations.anthropic_cache_control_hook import (
@@ -284,8 +315,6 @@ async def anthropic_messages(
     # Merge back any other modifications
     kwargs.update(request_kwargs)
 
-    tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
-    tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
     log_tool_request_shape(
         tools=tools,
         tool_choice=tool_choice,
@@ -294,6 +323,8 @@ async def anthropic_messages(
         custom_llm_provider=custom_llm_provider,
         phase="normalized",
         call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        warn_when_missing=False,
+        log_when_present=True,
     )
 
     # Short-circuit web-search-only requests: detect the pattern, execute
@@ -433,7 +464,13 @@ def anthropic_messages_handler(
     if not kwargs.pop("_litellm_messages_presanitized", False):
         messages = strip_empty_text_blocks_from_anthropic_messages(messages)
         if not _has_deepseek_anthropic_protocol_context(kwargs):
-            messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
+            tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
+            tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
+            messages = _sanitize_anthropic_tool_history_with_diagnostics(
+                messages=messages,
+                model=model,
+                call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+            )
         messages = flatten_unencrypted_web_search_results_in_anthropic_messages(messages)
 
     from litellm.integrations.anthropic_cache_control_hook import (

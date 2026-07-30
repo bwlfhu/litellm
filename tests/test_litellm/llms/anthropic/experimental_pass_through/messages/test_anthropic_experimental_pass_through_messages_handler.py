@@ -242,6 +242,8 @@ async def test_anthropic_messages_logs_normalized_tool_shape_after_hooks():
     assert shape_log.call_args.kwargs["tools"] == rewritten_tools
     assert shape_log.call_args.kwargs["phase"] == "normalized"
     assert shape_log.call_args.kwargs["call_id"] == "call-1"
+    assert shape_log.call_args.kwargs["warn_when_missing"] is False
+    assert shape_log.call_args.kwargs["log_when_present"] is True
 
 
 async def _async_return(value):

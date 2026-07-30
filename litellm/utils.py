@@ -7549,6 +7549,53 @@ class _SizedToolCollection(Protocol):
     def __iter__(self) -> Iterator[object]: ...
 
 
+_TOOL_DIAGNOSTICS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_TOOL_TYPE_PREFIX_LABELS = (
+    ("function", "function"),
+    ("custom", "custom"),
+    ("computer", "computer"),
+    ("bash", "bash"),
+    ("text_editor", "text_editor"),
+    ("web_search", "web_search"),
+    ("web_fetch", "web_fetch"),
+    ("code_execution", "code_execution"),
+    ("tool_search", "tool_search"),
+    ("mcp", "mcp"),
+    ("memory", "memory"),
+)
+_ANTHROPIC_CONTENT_BLOCK_TYPES = frozenset(
+    {
+        "text",
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+        "server_tool_use",
+        "web_search_tool_result",
+        "web_fetch_tool_result",
+        "code_execution_tool_result",
+        "mcp_tool_use",
+        "mcp_tool_result",
+    }
+)
+_ANTHROPIC_STOP_REASONS = frozenset(
+    {
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "tool_use",
+        "pause_turn",
+        "refusal",
+        "model_context_window_exceeded",
+    }
+)
+
+
+def is_tool_diagnostics_enabled() -> bool:
+    """Return whether redacted tool lifecycle diagnostics should run."""
+    value = os.getenv("LITELLM_TOOL_DIAGNOSTICS", "")
+    return value.strip().lower() in _TOOL_DIAGNOSTICS_TRUE_VALUES and verbose_logger.isEnabledFor(logging.INFO)
+
+
 def log_tool_request_shape(
     *,
     tools: object,
@@ -7559,8 +7606,11 @@ def log_tool_request_shape(
     phase: str,
     call_id: str | None = None,
     warn_when_missing: bool = False,
+    log_when_present: bool = False,
 ) -> None:
     """Log a redacted structural summary when a tool declaration may be missing."""
+    diagnostics_enabled = log_when_present and is_tool_diagnostics_enabled()
+    tools_for_diagnostics: object = tools
     tools_present = tools is not None
     tool_count: Optional[int] = 0 if tools is None else None
     tool_types: frozenset[str] = frozenset()
@@ -7572,12 +7622,18 @@ def log_tool_request_shape(
             tool_count = None
         tool_type = _tool_shape_get(tools, "type")
         if isinstance(tool_type, str):
-            tool_types = frozenset((tool_type,))
-    elif isinstance(tools, (list, tuple, set, frozenset)) and isinstance(tools, _SizedToolCollection):
+            tool_types = frozenset((_safe_tool_type_label(tool_type),))
+    elif isinstance(tools, (list, tuple, set, frozenset)):
         try:
-            tool_count = len(tools)
+            tool_collection = cast(  # cast-ok: concrete containers above implement the sized iterable protocol
+                _SizedToolCollection, tools
+            )
+            tool_count = len(tool_collection)
             tool_types = frozenset(
-                tool_type for tool in tools for tool_type in (_tool_type_from_shape(tool),) if tool_type is not None
+                tool_type
+                for tool in tool_collection
+                for tool_type in (_tool_type_from_shape(tool),)
+                if tool_type is not None
             )
         except Exception:
             tool_count = None
@@ -7593,9 +7649,10 @@ def log_tool_request_shape(
         "tools_present": tools_present,
         "tool_count": tool_count,
         "tool_types": tuple(sorted(tool_types)),
+        "tool_schema_hash": _tool_schema_hash(tools_for_diagnostics) if diagnostics_enabled else None,
     }
     try:
-        malformed_tool_schemas = _malformed_tool_schema_shapes(tools)
+        malformed_tool_schemas = _malformed_tool_schema_shapes(tools_for_diagnostics)
     except Exception:
         malformed_tool_schemas = ()
     if malformed_tool_schemas:
@@ -7608,15 +7665,99 @@ def log_tool_request_shape(
             verbose_logger.warning("Tool request shape indicates tool_choice without tools: %s", summary)
         elif warn_when_missing:
             verbose_logger.warning("Tool request shape contains no tools: %s", summary)
+        elif diagnostics_enabled:
+            verbose_logger.info("Tool request shape: %s", summary)
+    elif diagnostics_enabled:
+        verbose_logger.info("Tool request shape: %s", summary)
     elif tools_present:
         verbose_logger.debug("Tool request shape: %s", summary)
+
+def _tool_schema_hash(tools: object) -> str | None:
+    try:
+        if isinstance(tools, BaseModel):
+            serializable_tools: object = tools.model_dump()
+        elif isinstance(tools, (list, tuple)):
+            tool_collection = cast(Iterable[object], tools)  # cast-ok: guarded untyped request collection
+            serializable_tools = tuple(
+                tool.model_dump() if isinstance(tool, BaseModel) else tool for tool in tool_collection
+            )
+        elif isinstance(tools, dict):
+            serializable_tools = cast(  # cast-ok: guarded dict from an untyped tool request
+                dict[str, object], tools
+            )
+        else:
+            return None
+        encoded_tools = json.dumps(
+            serializable_tools,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except Exception:  # noqa: BLE001  # diagnostics must never interrupt a model request
+        return None
+    return hashlib.sha256(encoded_tools).hexdigest()[:16]
+
+
+def log_anthropic_response_shape(
+    *,
+    content: object,
+    stop_reason: object,
+    model: str | None,
+    custom_llm_provider: str | None,
+    call_id: str | None,
+    stream: bool,
+) -> None:
+    if not is_tool_diagnostics_enabled():
+        return
+    content_blocks = (
+        tuple(
+            cast(Iterable[object], content)  # cast-ok: guarded list or tuple from an untyped provider response
+        )
+        if isinstance(content, (list, tuple))
+        else ()
+    )
+    content_block_types = tuple(
+        block_type
+        for block in content_blocks
+        for raw_block_type in (_tool_shape_get(block, "type") if isinstance(block, _ToolShapeMapping) else None,)
+        if isinstance(raw_block_type, str)
+        for block_type in (_safe_enum_label(raw_block_type, _ANTHROPIC_CONTENT_BLOCK_TYPES),)
+    )
+    verbose_logger.info(
+        "Anthropic tool response shape: %s",
+        {
+            "call_id": call_id,
+            "endpoint": "/v1/messages",
+            "phase": "provider_response",
+            "model": model,
+            "provider": custom_llm_provider,
+            "stream": stream,
+            "stop_reason": (
+                _safe_enum_label(stop_reason, _ANTHROPIC_STOP_REASONS) if isinstance(stop_reason, str) else None
+            ),
+            "content_block_count": len(content_blocks),
+            "content_block_types": tuple(sorted(frozenset(content_block_types))),
+            "tool_use_count": sum(block_type in ("tool_use", "server_tool_use") for block_type in content_block_types),
+        },
+    )
 
 
 def _tool_type_from_shape(tool: object) -> Optional[str]:
     if not isinstance(tool, _ToolShapeMapping):
         return None
     tool_type = _tool_shape_get(tool, "type")
-    return tool_type if isinstance(tool_type, str) else None
+    return _safe_tool_type_label(tool_type) if isinstance(tool_type, str) else None
+
+
+def _safe_tool_type_label(value: str) -> str:
+    for prefix, label in _TOOL_TYPE_PREFIX_LABELS:
+        if value == prefix or value.startswith(f"{prefix}_"):
+            return label
+    return "other"
+
+
+def _safe_enum_label(value: str, allowed_values: frozenset[str]) -> str:
+    return value if value in allowed_values else "other"
 
 
 def _tool_shape_get(tool: _ToolShapeMapping, key: str) -> object:

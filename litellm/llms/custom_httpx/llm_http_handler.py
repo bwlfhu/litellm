@@ -135,6 +135,7 @@ from litellm.utils import (
     ModelResponse,
     ProviderConfigManager,
     async_pre_call_deployment_hook,
+    log_anthropic_response_shape,
     log_tool_request_shape,
 )
 
@@ -2126,6 +2127,8 @@ class BaseLLMHTTPHandler:
             custom_llm_provider=custom_llm_provider,
             phase="provider_dispatch",
             call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+            warn_when_missing=False,
+            log_when_present=True,
         )
         logging_obj.stream = stream
         logging_obj.model_call_details.update(request_body)
@@ -2189,6 +2192,14 @@ class BaseLLMHTTPHandler:
             ),
         )
         if rust_messages_response is not None:
+            log_anthropic_response_shape(
+                content=rust_messages_response.get("content"),
+                stop_reason=rust_messages_response.get("stop_reason"),
+                model=model,
+                custom_llm_provider=custom_llm_provider,
+                call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+                stream=bool(stream),
+            )
             if stream:
                 return self._rust_anthropic_messages_fake_stream(rust_messages_response)
             return await self._finalize_anthropic_messages_response(
@@ -2275,6 +2286,14 @@ class BaseLLMHTTPHandler:
                 model=model,
                 raw_response=response,
                 logging_obj=logging_obj,
+            )
+            log_anthropic_response_shape(
+                content=initial_response.get("content"),
+                stop_reason=initial_response.get("stop_reason"),
+                model=model,
+                custom_llm_provider=custom_llm_provider,
+                call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+                stream=False,
             )
 
         return await self._finalize_anthropic_messages_response(

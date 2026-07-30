@@ -33,6 +33,7 @@ from litellm.types.utils import (
     ModelResponse,
     TextCompletionResponse,
 )
+from litellm.utils import is_tool_diagnostics_enabled, log_anthropic_response_shape
 
 if TYPE_CHECKING:
     from litellm.types.passthrough_endpoints.pass_through_endpoints import EndpointType
@@ -338,6 +339,21 @@ class AnthropicPassthroughLoggingHandler:
             if chunk_model:
                 model = chunk_model
 
+        if is_tool_diagnostics_enabled():
+            response_content, response_stop_reason = (
+                AnthropicPassthroughLoggingHandler._extract_response_shape_from_sse(all_chunks)
+            )
+            response_call_id = getattr(litellm_logging_obj, "litellm_call_id", None)
+            response_provider = litellm_logging_obj.model_call_details.get("custom_llm_provider")
+            log_anthropic_response_shape(
+                content=response_content,
+                stop_reason=response_stop_reason,
+                model=model if isinstance(model, str) else None,
+                custom_llm_provider=response_provider if isinstance(response_provider, str) else None,
+                call_id=response_call_id if isinstance(response_call_id, str) else None,
+                stream=True,
+            )
+
         try:
             complete_streaming_response = AnthropicPassthroughLoggingHandler._build_complete_streaming_response(
                 all_chunks=all_chunks,
@@ -398,6 +414,65 @@ class AnthropicPassthroughLoggingHandler:
             "result": complete_streaming_response,
             "kwargs": kwargs,
         }
+
+    @staticmethod
+    def _extract_response_shape_from_sse(
+        all_chunks: Sequence[Union[str, bytes]],
+    ) -> tuple[tuple[dict[str, str], ...], str | None]:
+        relevant_events = tuple(
+            data
+            for chunk in all_chunks
+            for event in AnthropicPassthroughLoggingHandler._split_sse_chunk_into_events(chunk)
+            if '"content_block_start"' in event or '"message_delta"' in event
+            for data in (AnthropicPassthroughLoggingHandler._extract_response_shape_sse_data(event),)
+            if data is not None
+        )
+        content = tuple(
+            {"type": block_type}
+            for event in relevant_events
+            for content_block in (event.get("content_block"),)
+            if event.get("type") == "content_block_start" and isinstance(content_block, dict)
+            for block_type in (
+                cast(  # cast-ok: guarded SSE content-block dict
+                    dict[str, object], content_block
+                ).get("type"),
+            )
+            if isinstance(block_type, str)
+        )
+        stop_reasons = tuple(
+            stop_reason
+            for event in relevant_events
+            for delta in (event.get("delta"),)
+            if event.get("type") == "message_delta" and isinstance(delta, dict)
+            for stop_reason in (
+                cast(dict[str, object], delta).get(  # cast-ok: guarded SSE message-delta dict
+                    "stop_reason"
+                ),
+            )
+            if isinstance(stop_reason, str)
+        )
+        return content, stop_reasons[-1] if stop_reasons else None
+
+    @staticmethod
+    def _extract_response_shape_sse_data(event_str: str) -> dict[str, object] | None:
+        """Parse one SSE object for redacted response-shape diagnostics."""
+        for line in event_str.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("data:"):
+                continue
+            payload = stripped[len("data:") :].strip()
+            if not payload or payload == "[DONE]":
+                return None
+            try:
+                decoded = cast(object, json.loads(payload))  # cast-ok: JSON is validated below before field access
+            except (ValueError, TypeError):
+                return None
+            return (
+                cast(dict[str, object], decoded)  # cast-ok: guarded JSON object from an untyped SSE payload
+                if isinstance(decoded, dict)
+                else None
+            )
+        return None
 
     @staticmethod
     def _split_sse_chunk_into_events(chunk: str | bytes) -> list[str]:
