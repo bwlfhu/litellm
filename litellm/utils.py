@@ -235,7 +235,19 @@ except (ImportError, AttributeError, TypeError):
 claude_json_str = json.dumps(json_data)
 import importlib.metadata
 from collections.abc import Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Final, Literal, Optional, Union, cast, get_args
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    Iterator,
+    Literal,
+    Optional,
+    Protocol,
+    Union,
+    cast,
+    get_args,
+    runtime_checkable,
+)
 
 # These are lazy loaded via __getattr__
 from litellm.llms.base_llm.base_utils import (
@@ -7506,6 +7518,66 @@ def validate_and_fix_openai_tools(tools: list | None) -> list[dict] | None:
         elif isinstance(tool, dict):
             new_tools.append(tool)
     return new_tools
+
+
+@runtime_checkable
+class _ToolShapeMapping(Protocol):
+    def get(self, key: str, default: object = None, /) -> object: ...
+
+
+@runtime_checkable
+class _SizedToolCollection(Protocol):
+    def __len__(self) -> int: ...
+
+    def __iter__(self) -> Iterator[object]: ...
+
+
+def log_tool_request_shape(
+    *,
+    tools: object,
+    tool_choice: object,
+    endpoint: str,
+    model: Optional[str],
+    custom_llm_provider: Optional[str],
+    phase: str,
+) -> None:
+    """Log a redacted structural summary when a tool declaration may be missing."""
+    tools_present = tools is not None
+    tool_count: Optional[int] = 0 if tools is None else None
+    tool_types: frozenset[str] = frozenset()
+
+    if isinstance(tools, _ToolShapeMapping):
+        tool_count = 0 if isinstance(tools, _SizedToolCollection) and len(tools) == 0 else 1
+        tool_type = tools.get("type")
+        if isinstance(tool_type, str):
+            tool_types = frozenset((tool_type,))
+    elif isinstance(tools, (list, tuple, set, frozenset)) and isinstance(tools, _SizedToolCollection):
+        tool_count = len(tools)
+        tool_types = frozenset(
+            tool_type for tool in tools for tool_type in (_tool_type_from_shape(tool),) if tool_type is not None
+        )
+
+    summary = {
+        "endpoint": endpoint,
+        "phase": phase,
+        "model": model,
+        "provider": custom_llm_provider,
+        "tool_choice_present": tool_choice is not None,
+        "tools_present": tools_present,
+        "tool_count": tool_count,
+        "tool_types": tuple(sorted(tool_types)),
+    }
+    if tool_choice is not None and (not tools_present or tool_count == 0):
+        verbose_logger.warning("Tool request shape indicates tool_choice without tools: %s", summary)
+    elif tools_present:
+        verbose_logger.debug("Tool request shape: %s", summary)
+
+
+def _tool_type_from_shape(tool: object) -> Optional[str]:
+    if not isinstance(tool, _ToolShapeMapping):
+        return None
+    tool_type = tool.get("type")
+    return tool_type if isinstance(tool_type, str) else None
 
 
 def validate_and_fix_thinking_param(
