@@ -94,6 +94,43 @@ class TestAnthropicLoggingHandlerModelFallback:
             call_args[1]["model"] == "claude-3-sonnet-20240229"
         )  # Should use request_body model
 
+    @patch.object(AnthropicPassthroughLoggingHandler, "_build_complete_streaming_response")
+    @patch.object(AnthropicPassthroughLoggingHandler, "_create_anthropic_response_logging_payload")
+    @patch.object(AnthropicPassthroughLoggingHandler, "_recover_interrupted_stream_output_tokens")
+    @patch(
+        "litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler."
+        "AnthropicPassthroughLoggingHandler._extract_response_shape_from_sse"
+    )
+    @patch(
+        "litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler."
+        "is_tool_diagnostics_enabled",
+        return_value=False,
+    )
+    def test_disabled_tool_diagnostics_do_not_parse_stream(
+        self,
+        _diagnostics_enabled,
+        extract_response_shape,
+        _recover_output_tokens,
+        mock_create_payload,
+        mock_build_response,
+    ):
+        logging_obj = self._create_mock_logging_obj(model_in_details="claude-test")
+        mock_build_response.return_value = MagicMock()
+        mock_create_payload.return_value = {"test": "payload"}
+
+        AnthropicPassthroughLoggingHandler._handle_logging_anthropic_collected_chunks(
+            litellm_logging_obj=logging_obj,
+            passthrough_success_handler_obj=self._create_mock_passthrough_handler(),
+            url_route="/anthropic/v1/messages",
+            request_body={"model": "claude-test"},
+            endpoint_type="messages",
+            start_time=self.start_time,
+            all_chunks=self.mock_chunks,
+            end_time=self.end_time,
+        )
+
+        extract_response_shape.assert_not_called()
+
     def test_model_fallback_logic_isolated(self):
         """Test just the model fallback logic in isolation"""
         # Test case 1: Model from request body
@@ -1011,6 +1048,21 @@ class TestBuildCompleteStreamingResponseRobustness:
         result = self._build(chunks)
         assert result is not None
         assert result.choices[0].message.content == "Hi"
+
+    def test_extract_response_shape_from_sse(self):
+        chunks = [
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private reasoning"}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_private","name":"private_tool","input":{}}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"secret\\":\\"value\\"}"}}',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}',
+        ]
+
+        content, stop_reason = AnthropicPassthroughLoggingHandler._extract_response_shape_from_sse(chunks)
+
+        assert content == ({"type": "thinking"}, {"type": "tool_use"})
+        assert stop_reason == "tool_use"
+        assert "private" not in str(content)
 
     def test_non_json_sse_line_is_skipped(self):
         """Non-JSON SSE lines (comments, keep-alive pings) must be skipped."""

@@ -21,9 +21,10 @@ from typing import (
 )
 
 import litellm
+from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.anthropic.common_utils import (
-    sanitize_tool_use_ids_in_anthropic_messages,
+    sanitize_tool_use_ids_in_anthropic_messages_with_stats,
     strip_empty_text_blocks_from_anthropic_messages,
 )
 from litellm.llms.base_llm.anthropic_messages.transformation import (
@@ -37,7 +38,7 @@ from litellm.types.llms.anthropic_messages.anthropic_response import (
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
-from litellm.utils import ProviderConfigManager, client, log_tool_request_shape
+from litellm.utils import ProviderConfigManager, client, is_tool_diagnostics_enabled, log_tool_request_shape
 
 from ..utils import is_reasoning_auto_summary_enabled
 
@@ -49,6 +50,30 @@ from .utils import AnthropicMessagesRequestUtils, mock_response
 # Providers that are routed directly to the OpenAI Responses API instead of
 # going through chat/completions.
 _RESPONSES_API_PROVIDERS = frozenset({"openai"})
+
+
+def _sanitize_anthropic_tool_history_with_diagnostics(
+    *,
+    messages: list[object],
+    model: str,
+    call_id: str | None,
+) -> list[object]:
+    sanitized_messages, scanned_id_count, rewritten_id_count = sanitize_tool_use_ids_in_anthropic_messages_with_stats(
+        messages
+    )
+    if is_tool_diagnostics_enabled():
+        verbose_logger.info(
+            "Anthropic tool history ID shape: %s",
+            {
+                "call_id": call_id,
+                "endpoint": "/v1/messages",
+                "phase": "normalized_history",
+                "model": model,
+                "scanned_tool_id_count": scanned_id_count,
+                "rewritten_tool_id_count": rewritten_id_count,
+            },
+        )
+    return sanitized_messages
 
 
 def _should_route_to_responses_api(custom_llm_provider: Optional[str]) -> bool:
@@ -231,7 +256,13 @@ async def anthropic_messages(
     messages = strip_empty_text_blocks_from_anthropic_messages(messages)
     # Replay of cross-provider tool history (e.g. kimi -> Anthropic) may carry
     # ids like ``functions.Bash:0`` that violate Anthropic's id pattern.
-    messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
+    tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
+    tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
+    messages = _sanitize_anthropic_tool_history_with_diagnostics(
+        messages=messages,
+        model=model,
+        call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+    )
 
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
@@ -286,8 +317,6 @@ async def anthropic_messages(
     # Merge back any other modifications
     kwargs.update(request_kwargs)
 
-    tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
-    tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
     log_tool_request_shape(
         tools=tools,
         tool_choice=tool_choice,
@@ -296,6 +325,8 @@ async def anthropic_messages(
         custom_llm_provider=custom_llm_provider,
         phase="normalized",
         call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        warn_when_missing=False,
+        log_when_present=True,
     )
 
     # Short-circuit web-search-only requests: detect the pattern, execute
@@ -434,7 +465,13 @@ def anthropic_messages_handler(
     # full-messages scan. Pop it so it never leaks into provider params.
     if not kwargs.pop("_litellm_messages_presanitized", False):
         messages = strip_empty_text_blocks_from_anthropic_messages(messages)
-        messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
+        tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
+        tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
+        messages = _sanitize_anthropic_tool_history_with_diagnostics(
+            messages=messages,
+            model=model,
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        )
 
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
