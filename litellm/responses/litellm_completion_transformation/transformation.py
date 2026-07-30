@@ -494,8 +494,56 @@ class LiteLLMCompletionResponsesConfig:
                     messages.extend(deduped_in_place)
                     continue
 
-                messages.extend(chat_completion_messages)
+                messages.extend(
+                    message
+                    for message in chat_completion_messages
+                    if not LiteLLMCompletionResponsesConfig._is_blank_assistant_message(message)
+                )
         return messages
+
+    @staticmethod
+    def _is_blank_assistant_message(
+        message: AllMessageValues
+        | GenericChatCompletionMessage
+        | ChatCompletionMessageToolCall
+        | ChatCompletionResponseMessage,
+    ) -> bool:
+        get = LiteLLMCompletionResponsesConfig._get_mapping_or_attr_value
+        if get(message, "role") != "assistant" or get(message, "tool_calls"):
+            return False
+        if any(
+            get(message, key)
+            for key in (
+                "function_call",
+                "reasoning_content",
+                "reasoning_items",
+                "thinking_blocks",
+                "provider_specific_fields",
+                "audio",
+                "images",
+            )
+        ):
+            return False
+        content = get(message, "content")
+        if content is None:
+            return True
+        if isinstance(content, str):
+            return not content.strip()
+        if isinstance(content, list):
+            return all(LiteLLMCompletionResponsesConfig._is_empty_text_part(part) for part in content)
+        return False
+
+    @staticmethod
+    def _is_empty_text_part(part: object) -> bool:
+        if isinstance(part, str):
+            return not part.strip()
+        if not isinstance(part, dict):
+            return False
+        part_type = part.get("type")
+        if part_type not in (None, "text", "output_text"):
+            return False
+        text = part.get("text")
+        return not isinstance(text, str) or not text.strip()
 
     @staticmethod
     def _deduplicate_tool_call_output_messages(

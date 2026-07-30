@@ -1667,6 +1667,61 @@ class TestToolTransformation:
         assert not any(name.startswith("litellm_unnamed_tool_") for name in names)
 
 
+def test_empty_assistant_message_between_tool_call_and_result_is_dropped():
+    test_input = [
+        {
+            "type": "function_call",
+            "arguments": '{"command":"ls"}',
+            "call_id": "call_1",
+            "name": "shell_command",
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": ""}],
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "file1",
+        },
+    ]
+
+    messages = LiteLLMCompletionResponsesConfig._transform_response_input_param_to_chat_completion_message(
+        input=test_input
+    )
+
+    assert [message.get("role") for message in messages] == ["assistant", "tool"]
+    assert messages[0].get("tool_calls")[0]["id"] == "call_1"
+    assert messages[1].get("tool_call_id") == "call_1"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, "", "   ", [], [""], ["  "], [{"type": "text", "text": ""}], [{"type": "output_text", "text": "  "}]],
+)
+def test_blank_assistant_message_detection(content):
+    assert LiteLLMCompletionResponsesConfig._is_blank_assistant_message(
+        {"role": "assistant", "content": content}
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": "text"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call_1"}]},
+        {"role": "assistant", "content": None, "reasoning_content": "reasoning"},
+        {"role": "assistant", "content": None, "provider_specific_fields": {"signature": "value"}},
+        {"role": "assistant", "content": [{"type": "image_url", "image_url": {"url": "image"}}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "text"}]},
+    ],
+)
+def test_non_blank_assistant_messages_are_preserved(message):
+    assert not LiteLLMCompletionResponsesConfig._is_blank_assistant_message(message)
+
+
 class TestNamespaceToolTransformation:
     @staticmethod
     def _namespace_tools():
@@ -3090,8 +3145,6 @@ class TestEnsureOutputItemContentPartAdded:
 
     def _make_iterator(self):
         """Create a minimal LiteLLMCompletionStreamingIterator for testing."""
-        from unittest.mock import MagicMock
-
         from litellm.responses.litellm_completion_transformation.streaming_iterator import (
             LiteLLMCompletionStreamingIterator,
         )
@@ -3103,6 +3156,7 @@ class TestEnsureOutputItemContentPartAdded:
         iterator.sent_content_part_added_event = False
         iterator._sequence_number = 0
         iterator._cached_item_id = None
+        iterator._current_step_text = ""
         iterator._cached_reasoning_item_id = None
         iterator._reasoning_active = False
         iterator._pending_response_events = []
@@ -3151,6 +3205,142 @@ class TestEnsureOutputItemContentPartAdded:
         assert events[1].type == ResponsesAPIStreamEvents.CONTENT_PART_ADDED
         assert events[1].part.type == "output_text"
         assert iterator.sent_content_part_added_event is True
+
+    def test_step_boundary_uses_upstream_id_and_role_without_splitting_gemini_chunks(self):
+        from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+        iterator = self._make_iterator()
+        iterator._active_upstream_chunk_id = None
+        iterator._upstream_step_finished = False
+        iterator._cached_reasoning_item_id = "rs_step-1"
+        iterator._reasoning_item_id = "rs_step-1"
+        iterator._reasoning_done_emitted = True
+        iterator._reasoning_active = False
+        iterator._accumulated_reasoning_content_parts = ["old"]
+        iterator._pending_annotation_events = []
+
+        first = ModelResponseStream(
+            id="chatcmpl-step-1",
+            choices=[StreamingChoices(index=0, delta=Delta(role="assistant", content=""), finish_reason=None)],
+        )
+        changed_mid_step = ModelResponseStream(
+            id="chatcmpl-provider-changed-id",
+            choices=[StreamingChoices(index=0, delta=Delta(content="mid"), finish_reason=None)],
+        )
+        changed_mid_step_again = ModelResponseStream(
+            id="chatcmpl-provider-changed-id-again",
+            choices=[StreamingChoices(index=0, delta=Delta(content=""), finish_reason=None)],
+        )
+        step_finished = ModelResponseStream(
+            id="chatcmpl-step-1-finished",
+            choices=[StreamingChoices(index=0, delta=Delta(content=""), finish_reason="tool_calls")],
+        )
+        second = ModelResponseStream(
+            id="chatcmpl-step-2",
+            choices=[StreamingChoices(index=0, delta=Delta(role="assistant", content="after tool"), finish_reason=None)],
+        )
+
+        iterator._prepare_output_step_for_chunk(first)
+        iterator._ensure_output_item_for_chunk(first)
+        first_item_id = iterator._cached_item_id
+        iterator._pending_response_events.clear()
+        iterator._prepare_output_step_for_chunk(changed_mid_step)
+        iterator._prepare_output_step_for_chunk(changed_mid_step_again)
+        iterator._prepare_output_step_for_chunk(step_finished)
+
+        assert iterator._cached_item_id == first_item_id
+        assert iterator.sent_output_item_added_event is True
+
+        iterator._prepare_output_step_for_chunk(second)
+        iterator._ensure_output_item_for_chunk(second)
+        second_item_id = iterator._cached_item_id
+        delta_event = iterator._transform_chat_completion_chunk_to_response_api_chunk(second)
+
+        assert second_item_id != first_item_id
+        assert iterator._cached_reasoning_item_id is None
+        assert iterator._reasoning_item_id is None
+        assert iterator._reasoning_done_emitted is False
+        assert iterator._accumulated_reasoning_content_parts == []
+        assert not hasattr(iterator, "_pending_annotation_events")
+        assert iterator._pending_response_events[0].item_id == first_item_id
+        assert iterator._pending_response_events[1].item_id == first_item_id
+        assert iterator._pending_response_events[2].item.id == first_item_id
+        assert iterator._pending_response_events[3].item.id == second_item_id
+        assert iterator._pending_response_events[4].item_id == second_item_id
+        assert delta_event.item_id == second_item_id
+
+    def test_sync_iterator_preserves_first_text_delta_behind_initial_events(self):
+        from unittest.mock import MagicMock, Mock
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+        from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+        chunk = ModelResponseStream(
+            id="chatcmpl-step-2",
+            choices=[StreamingChoices(index=0, delta=Delta(role="assistant", content="first token"))],
+        )
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        wrapper.logging_obj = Mock()
+        wrapper.__next__.side_effect = [chunk, StopIteration]
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="anthropic/claude-sonnet-4-6",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="test",
+            responses_api_request={},
+            custom_llm_provider="anthropic",
+        )
+
+        events = [next(iterator) for _ in range(5)]
+
+        assert [event.type for event in events] == [
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+        ]
+        assert events[-1].delta == "first token"
+        assert events[2].item.id == events[3].item_id == events[4].item_id
+
+    @pytest.mark.asyncio
+    async def test_async_iterator_preserves_first_text_delta_behind_initial_events(self):
+        from unittest.mock import MagicMock, Mock
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+        from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+        chunk = ModelResponseStream(
+            id="chatcmpl-step-2",
+            choices=[StreamingChoices(index=0, delta=Delta(role="assistant", content="first token"))],
+        )
+        wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+        wrapper.logging_obj = Mock()
+        wrapper.__anext__.side_effect = [chunk, StopAsyncIteration]
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="anthropic/claude-sonnet-4-6",
+            litellm_custom_stream_wrapper=wrapper,
+            request_input="test",
+            responses_api_request={},
+            custom_llm_provider="anthropic",
+        )
+
+        events = [await iterator.__anext__() for _ in range(5)]
+
+        assert [event.type for event in events] == [
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+        ]
+        assert events[-1].delta == "first token"
+        assert events[2].item.id == events[3].item_id == events[4].item_id
 
     def test_emit_response_completed_uses_stream_finish_reason(self):
         """
