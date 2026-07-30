@@ -251,10 +251,11 @@ class TestResponsesAPIRequestUtils:
         assert result[1]["call_id"] == "call_abc"
         assert result[2]["call_id"] == "call_abc"
         assert "id" not in result[3]
-        assert result[0]["status"] == "completed"
+        assert "status" not in result[0]
         assert result[1]["status"] == "completed"
         assert "status" not in result[3]
         assert request_input[0]["id"] == "item_0c2b855288fb3034c4de8e23"
+        assert request_input[0]["status"] == "completed"
         assert request_input[1]["id"] == "tooluse_xyz"
         assert request_input[1]["call_id"] == signed_call_id
         assert request_input[2]["call_id"] == signed_call_id
@@ -293,7 +294,7 @@ class TestResponsesAPIRequestUtils:
         ],
     )
     def test_compatible_adapters_do_not_drop_foreign_reasoning_ids_without_evidence(self, provider, model):
-        request_input = [{"type": "reasoning", "id": "item_foreign", "summary": []}]
+        request_input = [{"type": "reasoning", "id": "item_foreign", "status": "completed", "summary": []}]
 
         result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
             request_input=request_input,
@@ -302,6 +303,7 @@ class TestResponsesAPIRequestUtils:
         )
 
         assert result[0]["id"] == "item_foreign"
+        assert result[0]["status"] == "completed"
 
     def test_replayed_item_id_normalization_preserves_native_and_non_openai_ids(self):
         openai_input = [
@@ -335,12 +337,13 @@ class TestResponsesAPIRequestUtils:
     @pytest.mark.parametrize("provider", ["openai", "azure"])
     def test_openai_and_azure_drop_foreign_reasoning_item_ids(self, provider):
         result = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
-            request_input=[{"type": "reasoning", "id": "item_foreign", "summary": []}],
+            request_input=[{"type": "reasoning", "id": "item_foreign", "status": "completed", "summary": []}],
             model="gpt-5.4",
             custom_llm_provider=provider,
         )
 
         assert "id" not in result[0]
+        assert "status" not in result[0]
 
     @pytest.mark.parametrize("provider", ["openai", "azure"])
     def test_openai_and_azure_drop_foreign_function_call_and_message_item_ids(self, provider):
@@ -725,6 +728,7 @@ def test_responses_normalizes_replayed_item_ids_before_native_dispatch():
                 {
                     "type": "reasoning",
                     "id": "item_0c2b855288fb3034c4de8e23",
+                    "status": "completed",
                     "summary": [],
                     "encrypted_content": "encrypted",
                 }
@@ -734,6 +738,7 @@ def test_responses_normalizes_replayed_item_ids_before_native_dispatch():
 
         forwarded_input = mock_handler.call_args.kwargs["input"]
         assert "id" not in forwarded_input[0]
+        assert "status" not in forwarded_input[0]
 
 
 def test_responses_maps_reasoning_effort_from_litellm_params_to_reasoning():

@@ -546,6 +546,7 @@ class ResponsesAPIRequestUtils:
                     )
                 ):
                     item.pop("id", None)
+                    item.pop("status", None)
             elif item_type == "message":
                 item_id = item.get("id")
                 if (
