@@ -8,6 +8,7 @@ ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:42df77a9974d6ec8b
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG APK_REPOSITORY=https://packages.wolfi.dev/os
 # Pinned by digest like the other base images; bump explicitly on Node upgrades.
 ARG UI_BUILD_IMAGE=node:20.18-alpine3.20@sha256:3488b10bf958af7125a176419d2d8a9937d895bf124012aae811651988d2ffe6
 
@@ -38,6 +39,7 @@ FROM $LITELLM_BUILD_IMAGE AS builder
 
 ARG NPM_REGISTRY
 ARG UV_INDEX_URL
+ARG APK_REPOSITORY
 
 WORKDIR /app
 USER root
@@ -45,7 +47,7 @@ USER root
 COPY --from=uvbin /uv /usr/local/bin/uv
 COPY --from=uvbin /uvx /usr/local/bin/uvx
 
-RUN apk add --no-cache \
+RUN apk --repositories-file /dev/null --repository ${APK_REPOSITORY} add --no-cache \
     bash \
     gcc \
     python3 \
@@ -108,8 +110,11 @@ FROM $LITELLM_RUNTIME_IMAGE AS runtime
 
 USER root
 
+ARG APK_REPOSITORY
+
 # node (without npm) is required by the prisma CLI at runtime
-RUN apk add --no-cache bash openssl tzdata nodejs python3 libsndfile
+RUN apk --repositories-file /dev/null --repository ${APK_REPOSITORY} add --no-cache \
+    bash openssl tzdata nodejs python3 libsndfile
 
 WORKDIR /app
 ENV PATH="/app/.venv/bin:${PATH}" \
