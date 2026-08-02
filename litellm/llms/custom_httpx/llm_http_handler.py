@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import ssl
+import time
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -123,6 +125,8 @@ from litellm.types.utils import (
     LiteLLMBatch,
     TranscriptionResponse,
 )
+
+
 from litellm.types.vector_store_files import (
     VectorStoreFileContentResponse,
     VectorStoreFileCreateRequest,
@@ -173,6 +177,31 @@ if TYPE_CHECKING:
     LiteLLMLoggingObj = _LiteLLMLoggingObj
 else:
     LiteLLMLoggingObj = Any
+
+
+_STREAM_TIMING_LOG_ENABLED = os.getenv("LITELLM_STREAM_TIMING_LOG", "").lower() in {"1", "true", "yes"}
+
+
+def _log_anthropic_stream_timing(
+    event: str,
+    started_at: float,
+    model: str,
+    logging_obj: LiteLLMLoggingObj,
+    status_code: int | None = None,
+    error_type: str | None = None,
+) -> None:
+    if not _STREAM_TIMING_LOG_ENABLED:
+        return
+    call_id = getattr(logging_obj, "litellm_call_id", None)
+    verbose_logger.info(
+        "Anthropic stream timing event=%s elapsed_ms=%.1f model=%s call_id=%s status_code=%s error_type=%s",
+        event,
+        (time.monotonic() - started_at) * 1000,
+        model,
+        call_id if isinstance(call_id, str) else "-",
+        status_code if status_code is not None else "-",
+        error_type or "-",
+    )
 
 
 def _google_genai_streaming_hidden_params(
@@ -1901,6 +1930,7 @@ class BaseLLMHTTPHandler:
         litellm_params_dict = dict(litellm_params)
         optional_params_dict = dict(litellm_params)
         for attempt_idx in range(max_attempts):
+            started_at = time.monotonic()
             try:
                 response = await async_httpx_client.post(
                     url=request_url,
@@ -1911,8 +1941,23 @@ class BaseLLMHTTPHandler:
                     timeout=timeout,
                 )
                 response.raise_for_status()
+                _log_anthropic_stream_timing(
+                    event="upstream_headers",
+                    started_at=started_at,
+                    model=model,
+                    logging_obj=logging_obj,
+                    status_code=response.status_code,
+                )
                 return response
             except httpx.HTTPStatusError as e:
+                _log_anthropic_stream_timing(
+                    event="upstream_error",
+                    started_at=started_at,
+                    model=model,
+                    logging_obj=logging_obj,
+                    status_code=e.response.status_code,
+                    error_type=type(e).__name__,
+                )
                 hit_max_attempt = attempt_idx + 1 == max_attempts
                 should_retry = provider_config.should_retry_anthropic_messages_on_http_error(
                     e=e, litellm_params=litellm_params_dict
@@ -1939,6 +1984,13 @@ class BaseLLMHTTPHandler:
                     continue
                 raise self._handle_error(e=e, provider_config=provider_config)
             except Exception as e:
+                _log_anthropic_stream_timing(
+                    event="upstream_error",
+                    started_at=started_at,
+                    model=model,
+                    logging_obj=logging_obj,
+                    error_type=type(e).__name__,
+                )
                 raise self._handle_error(e=e, provider_config=provider_config)
 
         raise RuntimeError("unreachable: anthropic messages HTTP retry loop exited without return")
