@@ -94,6 +94,25 @@ async def test_redis_cache_async_increment_default_does_not_bump_existing_ttl(
     mock_redis_instance.expire.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_redis_cache_async_subtract_floor_zero_is_atomic_and_namespaced(
+    monkeypatch, redis_no_ping
+):
+    monkeypatch.setenv("REDIS_HOST", "https://my-test-host")
+    redis_cache = RedisCache(namespace="budget")
+    mock_redis_instance = AsyncMock()
+    mock_redis_instance.eval.return_value = b"2.5"
+
+    with patch.object(redis_cache, "init_async_client", return_value=mock_redis_instance):
+        result = await redis_cache.async_subtract_floor_zero(
+            key="spend:key:k", value=100.0, ttl=60
+        )
+
+    assert result == 2.5
+    args = mock_redis_instance.eval.await_args.args
+    assert args[1:] == (1, "budget:spend:key:k", "100.0", "60")
+
+
 @pytest.mark.parametrize("namespace", [None, "litellm"])
 @pytest.mark.asyncio
 async def test_async_delete_cache_applies_namespace(

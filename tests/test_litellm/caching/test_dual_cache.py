@@ -89,6 +89,23 @@ async def test_dual_cache_async_set_cache_injects_default_in_memory_ttl():
 
 
 @pytest.mark.asyncio
+async def test_dual_cache_async_increment_injects_default_in_memory_ttl():
+    in_memory_cache = InMemoryCache(default_ttl=600)
+    dual_cache = DualCache(
+        in_memory_cache=in_memory_cache,
+        default_in_memory_ttl=60,
+    )
+
+    before = time.time()
+    await dual_cache.async_increment_cache(key="spend:key:k", value=1.0)
+    after = time.time()
+
+    expiry = in_memory_cache.ttl_dict["spend:key:k"]
+    assert expiry >= before + 60
+    assert expiry <= after + 60
+
+
+@pytest.mark.asyncio
 async def test_dual_cache_redis_backfill_injects_default_in_memory_ttl():
     """
     A Redis-hit backfill into the in-memory tier must honor
