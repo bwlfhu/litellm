@@ -617,8 +617,8 @@ async def test_service_logger_keys_success():
     logger success hook is called with the correct event metadata and no exception is logged.
     """
     keys = [
-        {"id": "key1", "spend": 10.0, "budget_duration": 60, "token": "key1"},
-        {"id": "key2", "spend": 15.0, "budget_duration": 60, "token": "key2"},
+        _attrify({"id": "key1", "spend": 10.0, "budget_duration": 60, "token": "key1"}),
+        _attrify({"id": "key2", "spend": 15.0, "budget_duration": 60, "token": "key2"}),
     ]
     prisma_client = MagicMock()
     prisma_client.get_data = AsyncMock(return_value=keys)

@@ -13,6 +13,7 @@ from litellm.proxy._types import (
     LiteLLM_UserTable,
     LiteLLM_VerificationToken,
 )
+from litellm.proxy.db.db_transaction_queue.pod_lock_manager import PodLockManager
 from litellm.proxy.utils import PrismaClient, ProxyLogging
 from litellm.repositories.organization_repository import OrganizationRepository
 from litellm.repositories.table_repositories import (
@@ -32,9 +33,19 @@ class ResetBudgetJob:
     Resets the budget for all the keys, users, and teams that need it
     """
 
-    def __init__(self, proxy_logging_obj: ProxyLogging, prisma_client: PrismaClient):
+    _DISTRIBUTED_LOCK_ID = "reset_budget_job"
+
+    def __init__(
+        self,
+        proxy_logging_obj: ProxyLogging,
+        prisma_client: PrismaClient,
+        pod_lock_manager: PodLockManager | None = None,
+        lock_ttl_seconds: int = 1200,
+    ):
         self.proxy_logging_obj: ProxyLogging = proxy_logging_obj
         self.prisma_client: PrismaClient = prisma_client
+        self.pod_lock_manager = pod_lock_manager
+        self.lock_ttl_seconds = lock_ttl_seconds
 
     async def reset_budget(
         self,
@@ -46,7 +57,23 @@ class ResetBudgetJob:
 
         Updates db
         """
-        if self.prisma_client is not None:
+        if self.prisma_client is None:
+            return
+
+        lock_acquired = False
+        lock_manager = self.pod_lock_manager
+        if lock_manager is not None and lock_manager.redis_cache is not None:
+            lock_acquired = bool(
+                await lock_manager.acquire_lock(
+                    cronjob_id=self._DISTRIBUTED_LOCK_ID,
+                    ttl=self.lock_ttl_seconds,
+                )
+            )
+            if not lock_acquired:
+                verbose_proxy_logger.info("Skipping budget reset cycle because another pod owns the distributed lock")
+                return
+
+        try:
             ### RESET KEY BUDGET ###
             await self.reset_budget_for_litellm_keys()
 
@@ -61,6 +88,9 @@ class ResetBudgetJob:
 
             ### RESET MULTI-WINDOW BUDGETS ###
             await self.reset_budget_windows()
+        finally:
+            if lock_acquired and lock_manager is not None:
+                await lock_manager.release_lock(cronjob_id=self._DISTRIBUTED_LOCK_ID)
 
     @staticmethod
     async def _invalidate_spend_counter(counter_key: str) -> None:
