@@ -8295,6 +8295,8 @@ class ProxyStartupEvent:
                 proxy_logging_obj=proxy_logging_obj,
                 prisma_client=prisma_client,
                 reset_settings=get_budget_reset_settings(),
+                pod_lock_manager=proxy_logging_obj.db_spend_update_writer.pod_lock_manager,
+                lock_ttl_seconds=max(60, proxy_budget_rescheduler_max_time * 2),
             )
 
             scheduler.add_job(

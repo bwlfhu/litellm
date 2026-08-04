@@ -1883,3 +1883,83 @@ def test_get_data_reset_query_selects_null_budget_reset_at(table_name):
     )
 
     _asserts_null_reset_is_due(_extract_reset_where(find_many))
+
+
+def test_reset_budget_uses_distributed_lock():
+    lock_manager = MagicMock()
+    lock_manager.redis_cache = MagicMock()
+    lock_manager.acquire_lock = AsyncMock(return_value=True)
+    lock_manager.release_lock = AsyncMock()
+    job = ResetBudgetJob(
+        proxy_logging_obj=MagicMock(),
+        prisma_client=MagicMock(),
+        pod_lock_manager=lock_manager,
+        lock_ttl_seconds=321,
+    )
+    job.reset_budget_for_litellm_keys = AsyncMock()
+    job.reset_budget_for_litellm_users = AsyncMock()
+    job.reset_budget_for_litellm_teams = AsyncMock()
+    job.reset_budget_for_litellm_budget_table = AsyncMock()
+    job.reset_budget_windows = AsyncMock()
+
+    asyncio.run(job.reset_budget())
+
+    lock_manager.acquire_lock.assert_awaited_once_with(
+        cronjob_id="reset_budget_job", ttl=321
+    )
+    job.reset_budget_for_litellm_keys.assert_awaited_once()
+    job.reset_budget_for_litellm_users.assert_awaited_once()
+    job.reset_budget_for_litellm_teams.assert_awaited_once()
+    job.reset_budget_for_litellm_budget_table.assert_awaited_once()
+    job.reset_budget_windows.assert_awaited_once()
+    lock_manager.release_lock.assert_awaited_once_with(
+        cronjob_id="reset_budget_job"
+    )
+
+
+def test_reset_budget_skips_when_distributed_lock_is_held():
+    lock_manager = MagicMock()
+    lock_manager.redis_cache = MagicMock()
+    lock_manager.acquire_lock = AsyncMock(return_value=False)
+    lock_manager.release_lock = AsyncMock()
+    job = ResetBudgetJob(
+        proxy_logging_obj=MagicMock(),
+        prisma_client=MagicMock(),
+        pod_lock_manager=lock_manager,
+    )
+    job.reset_budget_for_litellm_keys = AsyncMock()
+    job.reset_budget_for_litellm_users = AsyncMock()
+    job.reset_budget_for_litellm_teams = AsyncMock()
+    job.reset_budget_for_litellm_budget_table = AsyncMock()
+    job.reset_budget_windows = AsyncMock()
+
+    asyncio.run(job.reset_budget())
+
+    job.reset_budget_for_litellm_keys.assert_not_awaited()
+    job.reset_budget_for_litellm_users.assert_not_awaited()
+    job.reset_budget_for_litellm_teams.assert_not_awaited()
+    job.reset_budget_for_litellm_budget_table.assert_not_awaited()
+    job.reset_budget_windows.assert_not_awaited()
+    lock_manager.release_lock.assert_not_awaited()
+
+
+def test_reset_budget_releases_distributed_lock_after_failure():
+    lock_manager = MagicMock()
+    lock_manager.redis_cache = MagicMock()
+    lock_manager.acquire_lock = AsyncMock(return_value=True)
+    lock_manager.release_lock = AsyncMock()
+    job = ResetBudgetJob(
+        proxy_logging_obj=MagicMock(),
+        prisma_client=MagicMock(),
+        pod_lock_manager=lock_manager,
+    )
+    job.reset_budget_for_litellm_keys = AsyncMock(
+        side_effect=RuntimeError("database unavailable")
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        asyncio.run(job.reset_budget())
+
+    lock_manager.release_lock.assert_awaited_once_with(
+        cronjob_id="reset_budget_job"
+    )
