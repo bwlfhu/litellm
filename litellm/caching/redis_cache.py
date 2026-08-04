@@ -1023,12 +1023,38 @@ class RedisCache(BaseCache):
             "return ARGV[1] end "
             "return cur"
         )
-        result = cast(
+        result = cast(  # cast-ok: redis-py eval has no precise result type
             "str | bytes | int | float | None",
             await _redis_client.eval(lua, 1, key, str(value), str(int(_used_ttl or 0))),
         )
         if result is None:
             return None
+        if isinstance(result, bytes):
+            result = result.decode()
+        return float(result)
+
+    @_redis_circuit_breaker_guard
+    async def async_subtract_floor_zero(
+        self,
+        key: str,
+        value: float,
+        ttl: int | None = None,
+    ) -> float:
+        _redis_client = self.init_async_client()
+        _used_ttl = self.get_ttl(ttl=ttl)
+        key = self.check_and_fix_namespace(key=key)
+        lua = (
+            "local cur = tonumber(redis.call('GET', KEYS[1]) or '0') "
+            "local next = cur - tonumber(ARGV[1]) "
+            "if next < 0 then next = 0 end "
+            "redis.call('SET', KEYS[1], next) "
+            "if tonumber(ARGV[2]) > 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end "
+            "return tostring(next)"
+        )
+        result = cast(
+            "str | bytes | int | float",
+            await _redis_client.eval(lua, 1, key, str(value), str(int(_used_ttl or 0))),
+        )
         if isinstance(result, bytes):
             result = result.decode()
         return float(result)

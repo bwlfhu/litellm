@@ -391,7 +391,7 @@ class DualCache(BaseCache):
         result: float | None = None
         try:
             if self.in_memory_cache is not None:
-                result = await self.in_memory_cache.async_increment(key, value, **kwargs)
+                result = await self.in_memory_cache.async_increment(key, value, **self._backfill_kwargs(kwargs))
 
             if self.redis_cache is not None and local_only is False:
                 result = await self.redis_cache.async_increment(

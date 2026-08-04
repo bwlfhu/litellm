@@ -172,6 +172,26 @@ class ResetBudgetJob:
         await ResetBudgetJob._invalidate_user_api_key_cache_entry(GLOBAL_PROXY_SPEND_CACHE_KEY)
 
     @staticmethod
+    async def _reset_key_spend_counter(counter_key: str, previous_spend: float) -> None:
+        from litellm.proxy.proxy_server import spend_counter_cache
+
+        remaining_spend = 0.0
+        if spend_counter_cache.redis_cache is not None:
+            try:
+                remaining_spend = await spend_counter_cache.redis_cache.async_subtract_floor_zero(
+                    key=counter_key,
+                    value=previous_spend,
+                    ttl=60,
+                )
+            except Exception as redis_err:  # noqa: BLE001  # Redis backends expose multiple client-specific errors
+                verbose_proxy_logger.warning(
+                    "Failed to reconcile spend counter %s in Redis: %s. Budget may be over-enforced until retry.",
+                    counter_key,
+                    redis_err,
+                )
+        spend_counter_cache.in_memory_cache.set_cache(key=counter_key, value=remaining_spend, ttl=60)
+
+    @staticmethod
     async def _invalidate_user_api_key_cache_entry(cache_key: str) -> None:
         """Drop a stale management-cache entry so the next read fetches from DB.
 
@@ -503,6 +523,9 @@ class ResetBudgetJob:
             updated_keys: Final[list[LiteLLM_VerificationToken]] = []
             failed_keys: Final = []
             if keys_to_reset is not None and len(keys_to_reset) > 0:
+                previous_spend_by_token = {
+                    key.token: float(key.spend or 0.0) for key in keys_to_reset if key.token is not None
+                }
                 for key in keys_to_reset:
                     try:
                         updated_key = await ResetBudgetJob._reset_budget_for_key(
@@ -525,7 +548,11 @@ class ResetBudgetJob:
                     for k in updated_keys:
                         token = getattr(k, "token", None)
                         if token:
-                            await self._invalidate_spend_counter(f"spend:key:{token}")
+                            await self._reset_key_spend_counter(
+                                counter_key=f"spend:key:{token}",
+                                previous_spend=previous_spend_by_token.get(token, 0.0),
+                            )
+                            await self._invalidate_user_api_key_cache_entry(token)
 
             end_time = time.time()
             if len(failed_keys) > 0:  # If any keys failed to reset
