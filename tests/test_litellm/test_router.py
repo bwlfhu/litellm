@@ -4963,6 +4963,87 @@ def test_access_group_scoped_key_filters_deployments_with_same_public_model():
     assert seen == {"response-via-AG2"}
 
 
+@pytest.mark.asyncio
+async def test_access_group_filter_runs_before_affinity_for_restricted_deployment():
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
+        DeploymentAffinityCheck,
+    )
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "gpt-order-model",
+                "litellm_params": {"model": "openai/primary-a", "order": 0},
+                "model_info": {"id": "primary-a", "access_groups": ["engineering-models"]},
+            },
+            {
+                "model_name": "gpt-order-model",
+                "litellm_params": {"model": "openai/primary-b", "order": 0},
+                "model_info": {"id": "primary-b", "access_groups": ["engineering-models"]},
+            },
+            {
+                "model_name": "gpt-order-model",
+                "litellm_params": {"model": "openai/restricted", "order": 0},
+                "model_info": {"id": "restricted", "access_groups": ["efficiency-models"]},
+            },
+        ],
+        optional_pre_call_checks=["deployment_affinity"],
+    )
+    developer_key = UserAPIKeyAuth(
+        api_key="developer-hash",
+        team_id="engineering-team",
+        models=["engineering-models"],
+        team_models=["engineering-models"],
+    )
+    efficiency_key = UserAPIKeyAuth(
+        api_key="efficiency-hash",
+        team_id="efficiency-team",
+        models=["efficiency-models"],
+        team_models=["efficiency-models"],
+    )
+
+    try:
+        callback = next(
+            callback
+            for callback in router.optional_callbacks
+            if isinstance(callback, DeploymentAffinityCheck)
+        )
+        await callback.cache.async_set_cache(
+            DeploymentAffinityCheck.get_affinity_cache_key("gpt-order-model", "developer-hash"),
+            {"model_id": "restricted"},
+        )
+
+        developer_deployments = await router.async_get_healthy_deployments(
+            model="gpt-order-model",
+            request_kwargs={
+                "metadata": {
+                    "user_api_key_team_id": "engineering-team",
+                    "user_api_key_auth": developer_key,
+                    "user_api_key_hash": "developer-hash",
+                }
+            },
+        )
+        efficiency_deployments = await router.async_get_healthy_deployments(
+            model="gpt-order-model",
+            request_kwargs={
+                "metadata": {
+                    "user_api_key_team_id": "efficiency-team",
+                    "user_api_key_auth": efficiency_key,
+                    "user_api_key_hash": "efficiency-hash",
+                }
+            },
+        )
+
+        assert {deployment["model_info"]["id"] for deployment in developer_deployments} == {
+            "primary-a",
+            "primary-b",
+        }
+        assert [deployment["model_info"]["id"] for deployment in efficiency_deployments] == ["restricted"]
+    finally:
+        router.discard()
+
+
 def test_explicit_model_access_does_not_force_access_group_filtering():
     """
     If a key has explicit model access in addition to access group entries,

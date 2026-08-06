@@ -14,6 +14,7 @@ from litellm.caching.dual_cache import DualCache
 from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
     DeploymentAffinityCheck,
 )
+from litellm.utils import _get_order_filtered_deployments
 
 
 class MockResponse:
@@ -25,6 +26,145 @@ class MockResponse:
 
     def json(self):
         return self._json_data
+
+
+@pytest.mark.asyncio
+async def test_api_key_affinity_sticks_when_bound_deployment_remains_in_lowest_order_pool():
+    cache = DualCache()
+    callback = DeploymentAffinityCheck(
+        cache=cache,
+        ttl_seconds=60,
+        enable_user_key_affinity=True,
+        enable_responses_api_affinity=False,
+    )
+    deployments = [
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 0},
+            "model_info": {"id": "deployment-a"},
+        },
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 0},
+            "model_info": {"id": "deployment-b"},
+        },
+    ]
+    user_key = "stable-order-user"
+    await cache.async_set_cache(
+        DeploymentAffinityCheck.get_affinity_cache_key("ordered-model", user_key),
+        {"model_id": "deployment-a"},
+    )
+
+    filtered = await callback.async_filter_deployments(
+        model="ordered-model",
+        healthy_deployments=deployments,
+        messages=None,
+        request_kwargs={"metadata": {"user_api_key_hash": user_key}},
+    )
+
+    assert filtered == [deployments[0]]
+
+
+@pytest.mark.asyncio
+async def test_api_key_affinity_releases_pin_after_order_demotion_and_shared_cache_rewrites_it():
+    shared_cache = DualCache()
+    first_pod = DeploymentAffinityCheck(
+        cache=shared_cache,
+        ttl_seconds=60,
+        enable_user_key_affinity=True,
+        enable_responses_api_affinity=False,
+    )
+    second_pod = DeploymentAffinityCheck(
+        cache=shared_cache,
+        ttl_seconds=60,
+        enable_user_key_affinity=True,
+        enable_responses_api_affinity=False,
+    )
+    deployments = [
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 0},
+            "model_info": {"id": "lowest-order-deployment"},
+        },
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 0},
+            "model_info": {"id": "higher-order-deployment"},
+        },
+    ]
+    user_key = "downgrade-user"
+    cache_key = DeploymentAffinityCheck.get_affinity_cache_key("ordered-model", user_key)
+    await first_pod.cache.async_set_cache(cache_key, {"model_id": "higher-order-deployment"})
+
+    initially_filtered = await second_pod.async_filter_deployments(
+        model="ordered-model",
+        healthy_deployments=deployments,
+        messages=None,
+        request_kwargs={"metadata": {"user_api_key_hash": user_key}},
+    )
+    assert initially_filtered == [deployments[1]]
+
+    deployments[1]["litellm_params"]["order"] = 1
+    filtered = await second_pod.async_filter_deployments(
+        model="ordered-model",
+        healthy_deployments=deployments,
+        messages=None,
+        request_kwargs={"metadata": {"user_api_key_hash": user_key}},
+    )
+    selected = _get_order_filtered_deployments(filtered)
+    assert [deployment["model_info"]["id"] for deployment in selected] == ["lowest-order-deployment"]
+
+    await second_pod.async_pre_call_deployment_hook(
+        kwargs={
+            "model_info": {"id": "lowest-order-deployment"},
+            "metadata": {
+                "user_api_key_hash": user_key,
+                "deployment_model_name": "ordered-model",
+            },
+        },
+        call_type=None,
+    )
+    assert await first_pod.cache.async_get_cache(key=cache_key) == {"model_id": "lowest-order-deployment"}
+
+
+@pytest.mark.asyncio
+async def test_encrypted_content_pin_bypasses_order_aware_api_key_affinity():
+    cache = DualCache()
+    callback = DeploymentAffinityCheck(
+        cache=cache,
+        ttl_seconds=60,
+        enable_user_key_affinity=True,
+        enable_responses_api_affinity=False,
+    )
+    deployments = [
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 0},
+            "model_info": {"id": "deployment-a"},
+        },
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 1},
+            "model_info": {"id": "deployment-b"},
+        },
+    ]
+    user_key = "encrypted-user"
+    await cache.async_set_cache(
+        DeploymentAffinityCheck.get_affinity_cache_key("ordered-model", user_key),
+        {"model_id": "deployment-a"},
+    )
+
+    filtered = await callback.async_filter_deployments(
+        model="ordered-model",
+        healthy_deployments=[deployments[1]],
+        messages=None,
+        request_kwargs={
+            "metadata": {"user_api_key_hash": user_key},
+            "_encrypted_content_affinity_pinned": True,
+        },
+    )
+
+    assert filtered == [deployments[1]]
 
 
 @pytest.mark.asyncio
@@ -299,6 +439,7 @@ async def test_async_previous_response_id_priority_over_user_key_affinity():
                     "api_key": "mock-api-key-1",
                     "api_version": "mock-api-version",
                     "api_base": "https://mock-endpoint-1.openai.azure.com",
+                    "order": 0,
                 },
                 "model_info": {"base_model": "computer-use-preview"},
             },
@@ -309,6 +450,7 @@ async def test_async_previous_response_id_priority_over_user_key_affinity():
                     "api_key": "mock-api-key-2",
                     "api_version": "mock-api-version-2",
                     "api_base": "https://mock-endpoint-2.openai.azure.com",
+                    "order": 1,
                 },
                 "model_info": {"base_model": "computer-use-preview"},
             },

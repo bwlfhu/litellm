@@ -11,6 +11,9 @@ from typing import Optional
 import pytest
 
 from litellm import Router
+from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
+    DeploymentAffinityCheck,
+)
 from litellm.utils import _get_order_filtered_deployments
 
 # ---------------------------------------------------------------------------
@@ -190,6 +193,142 @@ async def test_router_order_fallback_on_failure():
         messages=[{"role": "user", "content": "hi"}],
     )
     assert response._hidden_params["model_id"] == "2"
+
+
+@pytest.mark.asyncio
+async def test_default_order_change_overrides_stale_api_key_affinity():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "ordered-model",
+                "litellm_params": {
+                    "model": "gpt-4o",
+                    "api_key": "key-a",
+                    "mock_response": "from lowest order",
+                    "order": 0,
+                },
+                "model_info": {"id": "lowest-order-deployment"},
+            },
+            {
+                "model_name": "ordered-model",
+                "litellm_params": {
+                    "model": "gpt-4o",
+                    "api_key": "key-b",
+                    "mock_response": "from higher order",
+                    "order": 1,
+                },
+                "model_info": {"id": "higher-order-deployment"},
+            },
+        ],
+        optional_pre_call_checks=["deployment_affinity"],
+    )
+    callback = next(
+        callback
+        for callback in router.optional_callbacks
+        if isinstance(callback, DeploymentAffinityCheck)
+    )
+    user_key = "ordered-user"
+    await callback.cache.async_set_cache(
+        DeploymentAffinityCheck.get_affinity_cache_key("ordered-model", user_key),
+        {"model_id": "higher-order-deployment"},
+    )
+
+    try:
+        deployments = await router.async_get_healthy_deployments(
+            model="ordered-model",
+            request_kwargs={"metadata": {"user_api_key_hash": user_key}},
+        )
+        assert [deployment["model_info"]["id"] for deployment in deployments] == ["lowest-order-deployment"]
+        response = await router.acompletion(
+            model="ordered-model",
+            messages=[{"role": "user", "content": "hello"}],
+            litellm_metadata={"user_api_key_hash": user_key},
+        )
+        assert response._hidden_params["model_id"] == "lowest-order-deployment"
+        assert await callback.cache.async_get_cache(
+            key=DeploymentAffinityCheck.get_affinity_cache_key("ordered-model", user_key)
+        ) == {"model_id": "lowest-order-deployment"}
+    finally:
+        router.discard()
+
+
+@pytest.mark.asyncio
+async def test_explicit_order_fallback_overrides_stale_api_key_affinity():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "ordered-model",
+                "litellm_params": {"model": "gpt-4o", "api_key": "key-a", "order": 1},
+                "model_info": {"id": "first-order"},
+            },
+            {
+                "model_name": "ordered-model",
+                "litellm_params": {"model": "gpt-4o", "api_key": "key-b", "order": 2},
+                "model_info": {"id": "second-order"},
+            },
+        ],
+        optional_pre_call_checks=["deployment_affinity"],
+    )
+    callback = next(
+        callback
+        for callback in router.optional_callbacks
+        if isinstance(callback, DeploymentAffinityCheck)
+    )
+    user_key = "fallback-user"
+    await callback.cache.async_set_cache(
+        DeploymentAffinityCheck.get_affinity_cache_key("ordered-model", user_key),
+        {"model_id": "first-order"},
+    )
+
+    try:
+        deployments = await router.async_get_healthy_deployments(
+            model="ordered-model",
+            request_kwargs={
+                "_target_order": 2,
+                "metadata": {"user_api_key_hash": user_key},
+            },
+        )
+        assert [deployment["model_info"]["id"] for deployment in deployments] == ["second-order"]
+    finally:
+        router.discard()
+
+
+@pytest.mark.asyncio
+async def test_default_order_change_overrides_stale_session_affinity():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "ordered-model",
+                "litellm_params": {"model": "gpt-4o", "api_key": "key-a", "order": 0},
+                "model_info": {"id": "lowest-order-deployment"},
+            },
+            {
+                "model_name": "ordered-model",
+                "litellm_params": {"model": "gpt-4o", "api_key": "key-b", "order": 1},
+                "model_info": {"id": "higher-order-deployment"},
+            },
+        ],
+        optional_pre_call_checks=["session_affinity"],
+    )
+    callback = next(
+        callback
+        for callback in router.optional_callbacks
+        if isinstance(callback, DeploymentAffinityCheck)
+    )
+    session_id = "ordered-session"
+    await callback.cache.async_set_cache(
+        DeploymentAffinityCheck.get_session_affinity_cache_key("ordered-model", session_id),
+        {"model_id": "higher-order-deployment"},
+    )
+
+    try:
+        deployments = await router.async_get_healthy_deployments(
+            model="ordered-model",
+            request_kwargs={"metadata": {"session_id": session_id}},
+        )
+        assert [deployment["model_info"]["id"] for deployment in deployments] == ["lowest-order-deployment"]
+    finally:
+        router.discard()
 
 
 @pytest.mark.asyncio
