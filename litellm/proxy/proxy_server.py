@@ -3232,12 +3232,19 @@ def _write_health_state_to_router_cache(
                 deployment_id=model_id,
             )
 
+            deployment_cooldown = None
+            deployment = llm_router.get_deployment(model_id=model_id)
+            if deployment is not None:
+                deployment_cooldown = llm_router._get_valid_deployment_cooldown_time(deployment)
+            if deployment_cooldown is None:
+                deployment_cooldown = llm_router.cooldown_time
+
             _set_cooldown_deployments(
                 litellm_router_instance=llm_router,
                 original_exception=original_exception,
                 exception_status=exception_status,
                 deployment=model_id,
-                time_to_cooldown=llm_router.cooldown_time,
+                time_to_cooldown=deployment_cooldown,
             )
 
     except Exception as e:

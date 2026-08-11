@@ -6999,6 +6999,14 @@ class Router:
 
         return None
 
+    def _get_valid_deployment_cooldown_time(self, deployment: Any) -> Optional[float]:
+        """Return a non-negative deployment cooldown, or None when unset/invalid."""
+        deployment_params = deployment.get("litellm_params", {}) or {}
+        cooldown_time = deployment_params.get("cooldown_time")
+        if cooldown_time is None or cooldown_time < 0:
+            return None
+        return cooldown_time
+
     def deployment_callback_on_failure(
         self,
         kwargs,  # kwargs to completion
@@ -7028,8 +7036,23 @@ class Router:
                 original_exception=exception
             )
 
-            # Determine cooldown time with priority: deployment config > response header > router default
+            if isinstance(_model_info, dict):
+                deployment_id: Optional[str] = _model_info.get("id")
+                if isinstance(deployment_id, int):
+                    deployment_id = str(deployment_id)
+            else:
+                deployment_id = None
+
+            # Generic API callbacks may omit deployment params. Recover the
+            # configured value from the selected deployment before falling
+            # back to request, response-header, or router defaults.
             deployment_cooldown = litellm_params.get("cooldown_time", None)
+            if deployment_id is not None:
+                deployment = self.get_deployment(model_id=deployment_id)
+                if deployment is not None:
+                    configured_cooldown = self._get_valid_deployment_cooldown_time(deployment)
+                    if configured_cooldown is not None:
+                        deployment_cooldown = configured_cooldown
 
             header_cooldown = None
             if exception_headers is not None:
@@ -7050,7 +7073,6 @@ class Router:
                 _time_to_cooldown = self.cooldown_time
 
             if isinstance(_model_info, dict):
-                deployment_id: Optional[str] = _model_info.get("id")
                 if deployment_id is None:
                     return False
                 increment_deployment_failures_for_current_minute(
@@ -7316,12 +7338,15 @@ class Router:
                             target=logging_obj.failure_handler,
                             args=(e, traceback.format_exc()),
                         ).start()  # log response
+                    deployment_cooldown = self._get_valid_deployment_cooldown_time(deployment)
+                    if deployment_cooldown is None:
+                        deployment_cooldown = self.cooldown_time
                     _set_cooldown_deployments(
                         litellm_router_instance=self,
                         exception_status=e.status_code,
                         original_exception=e,
                         deployment=deployment["model_info"]["id"],
-                        time_to_cooldown=self.cooldown_time,
+                        time_to_cooldown=deployment_cooldown,
                     )
                     raise e
                 except Exception as e:
