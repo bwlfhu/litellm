@@ -2,11 +2,13 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from litellm.caching.redis_cache import RedisCache
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
-from litellm.proxy.observability.observability_endpoints import get_routing_stats
+from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+from litellm.proxy.observability.observability_endpoints import get_routing_stats, router as observability_router
 from litellm.proxy.observability.routing_stats import RoutingStatsLogger, RoutingStatsStore
 
 
@@ -417,3 +419,26 @@ def test_routing_stats_logger_creates_distinct_ids_for_same_deployment_retry(mon
 
     assert kwargs["litellm_params"]["routing_stats_attempt_id"] == "attempt-two"
     assert len(scheduled) == 2
+
+
+def test_routing_stats_uses_one_redis_cluster_slot_per_terminal_attempt(monkeypatch):
+    store, _ = make_store(monkeypatch)
+    token = store._token("deployment-1")
+
+    assert "{" + token + "}" in store._active_key(token)
+    assert "{" + token + "}" in store._terminal_key(token, "attempt-1")
+    assert "{" + token + "}" in store._bucket_key(1, token)
+
+
+def test_routing_stats_asgi_validates_window_parameter(monkeypatch):
+    import litellm.proxy.proxy_server as proxy_server
+
+    store, _ = make_store(monkeypatch)
+    monkeypatch.setattr(proxy_server, "redis_usage_cache", store.redis_cache)
+    app = FastAPI()
+    app.include_router(observability_router)
+    app.dependency_overrides[user_api_key_auth] = lambda: _user(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY)
+
+    with TestClient(app) as client:
+        assert client.get("/observability/routing-stats?window=1m").status_code == 200
+        assert client.get("/observability/routing-stats?window=2m").status_code == 422
