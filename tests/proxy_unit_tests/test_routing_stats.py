@@ -142,6 +142,27 @@ async def test_routing_stats_aggregates_attempts_and_active_leases(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_routing_stats_exposes_first_in_flight_deployment(monkeypatch):
+    store, _ = make_store(monkeypatch)
+    metadata = {
+        "model_id": "deployment-in-flight",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud/v1",
+    }
+
+    await store.record_start(metadata, "attempt-active")
+
+    items = await store.query(window_minutes=1)
+    assert len(items) == 1
+    assert items[0]["model_id"] == "deployment-in-flight"
+    assert items[0]["requests"] == 0
+    assert items[0]["active_requests"] == 1
+    assert items[0]["latency_p50_ms"] is None
+    assert items[0]["latency_p95_ms"] is None
+
+
+@pytest.mark.asyncio
 async def test_routing_stats_terminal_event_is_idempotent(monkeypatch):
     store, _ = make_store(monkeypatch)
     metadata = {

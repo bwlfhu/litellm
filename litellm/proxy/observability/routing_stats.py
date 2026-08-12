@@ -120,11 +120,32 @@ class RoutingStatsStore:
         return self._key("terminal", "{" + token + "}", attempt_id)
 
     async def record_start(self, metadata: Metadata, attempt_id: str) -> None:
-        """Add an expiring active-request lease after a deployment is selected."""
+        """Publish deployment metadata and add an expiring active-request lease."""
         token = self._token(metadata["model_id"])
         active_key = self._active_key(token)
         terminal_key = self._terminal_key(token, attempt_id)
         client = self._async_client()
+        now_ms = int(time.time() * 1000)
+        bucket = self._bucket()
+        bucket_key = self._bucket_key(bucket, token)
+        index_key = self._index_key(bucket)
+        mapping = {
+            "model_id": metadata["model_id"],
+            "model_group": metadata["model_group"],
+            "channel": metadata["channel"],
+            "api_base": metadata.get("api_base", ""),
+            "last_seen_ms": now_ms,
+        }
+
+        # Index the selected deployment before it completes. This makes an
+        # in-flight request visible even when it is the first request for it.
+        async with client.pipeline(transaction=False) as pipe:
+            pipe.hset(bucket_key, mapping=mapping)
+            pipe.expire(bucket_key, _RETENTION_SECONDS)
+            pipe.sadd(index_key, token)
+            pipe.expire(index_key, _RETENTION_SECONDS)
+            await pipe.execute()
+
         expires_at = int(time.time() + _ACTIVE_LEASE_SECONDS)
         # A terminal callback can win a scheduling race with this background task.
         # The marker prevents a completed request from being resurrected as active.
