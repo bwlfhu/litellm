@@ -29,6 +29,13 @@ def test_use_chat_completions_api_not_forwarded_as_provider_param():
     assert "use_chat_completions_api" not in forwarded
 
 
+def test_routing_stats_snapshot_is_not_forwarded_as_provider_param():
+    snapshot = {"model_id": "deployment-1", "api_base": "https://provider.example/v1?key=secret"}
+    assert "_litellm_routing_stats_metadata" in all_litellm_params
+    forwarded = get_non_default_completion_params({"_litellm_routing_stats_metadata": snapshot})
+    assert "_litellm_routing_stats_metadata" not in forwarded
+
+
 def test_completion_does_not_leak_flag_into_provider_request_body():
     mock_response = MagicMock()
     mock_response.model_dump.return_value = {

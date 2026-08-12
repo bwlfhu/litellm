@@ -89,6 +89,28 @@ async def test_add_litellm_data_to_request_non_thread_endpoint(endpoint, mock_re
     assert "litellm_metadata" not in data
 
 
+@pytest.mark.asyncio
+async def test_add_litellm_data_to_request_strips_routing_stats_snapshot(mock_request):
+    mock_request.url.path = "/chat/completions"
+    data = {
+        "_litellm_routing_stats_metadata": {
+            "model_id": "caller-spoofed",
+            "model_group": "caller-spoofed",
+            "channel": "caller-spoofed",
+            "api_base": "https://caller.invalid",
+        }
+    }
+
+    await add_litellm_data_to_request(
+        data,
+        mock_request,
+        UserAPIKeyAuth(api_key="test_api_key"),
+        Mock(),
+    )
+
+    assert "_litellm_routing_stats_metadata" not in data
+
+
 # test adding traceparent
 
 

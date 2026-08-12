@@ -1020,6 +1020,9 @@ def function_setup(
 
         ## check if metadata is passed in
         litellm_params: Final[dict[str, Any]] = {"api_base": ""}
+        routing_stats_metadata = kwargs.pop("_litellm_routing_stats_metadata", None)
+        if isinstance(routing_stats_metadata, dict):
+            litellm_params["routing_stats_metadata"] = routing_stats_metadata
         if "metadata" in kwargs:
             litellm_params["metadata"] = kwargs["metadata"]
         if "litellm_metadata" in kwargs and isinstance(kwargs["litellm_metadata"], dict):

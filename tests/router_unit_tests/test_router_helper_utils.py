@@ -16,6 +16,7 @@ from create_mock_standard_logging_payload import create_standard_logging_payload
 from litellm.types.utils import StandardLoggingPayload
 from litellm.types.router import Deployment, LiteLLM_Params, ModelInfo
 from litellm.constants import DEFAULT_AUTO_ROUTER_MAX_INPUT_CHARS
+from litellm.utils import Rules, function_setup
 
 
 @pytest.fixture
@@ -393,7 +394,7 @@ async def test_router_make_call(model_list):
 def test_update_kwargs_with_deployment(model_list):
     """Test if the '_update_kwargs_with_deployment' function is working correctly"""
     router = Router(model_list=model_list)
-    kwargs: dict = {"metadata": {}}
+    kwargs: dict = {"metadata": {"model_group": "gpt-5-mini"}}
     deployment = router.get_deployment_by_model_group_name(
         model_group_name="gpt-5-mini"
     )
@@ -403,6 +404,55 @@ def test_update_kwargs_with_deployment(model_list):
     )
     set_fields = ["deployment", "api_base", "model_info"]
     assert all(field in kwargs["metadata"] for field in set_fields)
+    assert kwargs["_litellm_routing_stats_metadata"] == {
+        "model_id": str(kwargs["metadata"]["model_info"]["id"]),
+        "model_group": "gpt-5-mini",
+        "channel": "group1",
+        "api_base": kwargs["metadata"]["api_base"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("original_function", "router_function_name"),
+    [("acompletion", None), ("aresponses", "generic_api_call")],
+)
+def test_update_kwargs_syncs_routing_stats_to_prebuilt_logging_object(
+    model_list, original_function, router_function_name
+):
+    """Proxy logger setup precedes Router deployment selection for both API surfaces."""
+    router = Router(model_list=model_list)
+    logging_obj, kwargs = function_setup(
+        original_function=original_function,
+        rules_obj=Rules(),
+        start_time=datetime.now(),
+        model="gpt-5-mini",
+        messages=[{"role": "user", "content": "hello"}],
+        litellm_call_id="routing-stats-prebuilt-logger",
+        metadata={"model_group": "gpt-5-mini"},
+        litellm_metadata={"model_group": "gpt-5-mini"},
+    )
+    kwargs["litellm_logging_obj"] = logging_obj
+    deployment = router.get_deployment_by_model_group_name("gpt-5-mini")
+
+    router._update_kwargs_with_deployment(
+        deployment=deployment,
+        kwargs=kwargs,
+        function_name=router_function_name,
+    )
+
+    expected = {
+        "model_id": str(deployment["model_info"]["id"]),
+        "model_group": "gpt-5-mini",
+        "channel": "group1",
+        "api_base": deployment["litellm_params"].get("api_base"),
+    }
+    assert "_litellm_routing_stats_metadata" not in kwargs
+    assert logging_obj.model_call_details["litellm_params"]["routing_stats_metadata"] == expected
+
+    from litellm.proxy.observability.routing_stats import RoutingStatsLogger
+
+    expected_callback_metadata = {**expected, "api_base": expected["api_base"] or ""}
+    assert RoutingStatsLogger._metadata(logging_obj.model_call_details) == expected_callback_metadata
 
 
 def test_update_kwargs_with_default_litellm_params(model_list):

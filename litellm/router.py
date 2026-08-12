@@ -3182,6 +3182,25 @@ class Router:
                 "channel": access_groups[0],
                 "api_base": deployment_api_base,
             }
+        routing_stats_metadata = kwargs.get("_litellm_routing_stats_metadata")
+        logging_obj = kwargs.get("litellm_logging_obj")
+        if isinstance(routing_stats_metadata, dict) and logging_obj is not None:
+            # The proxy creates its logging object before Router selects a
+            # deployment. Keep that callback payload in sync here, rather than
+            # waiting for function_setup(), which is skipped for prebuilt loggers.
+            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
+            if isinstance(logging_litellm_params, dict):
+                logging_litellm_params["routing_stats_metadata"] = routing_stats_metadata
+
+            model_call_details = getattr(logging_obj, "model_call_details", None)
+            if isinstance(model_call_details, dict):
+                model_call_litellm_params = model_call_details.get("litellm_params")
+                if isinstance(model_call_litellm_params, dict):
+                    model_call_litellm_params["routing_stats_metadata"] = routing_stats_metadata
+
+            # This is callback-only state. Do not let it flow through the Chat
+            # provider parameter builder after a prebuilt logger was updated.
+            kwargs.pop("_litellm_routing_stats_metadata", None)
 
         routing_stats_metadata = kwargs.get("_litellm_routing_stats_metadata")
         logging_obj = kwargs.get("litellm_logging_obj")
