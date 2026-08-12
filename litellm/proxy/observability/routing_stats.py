@@ -46,6 +46,8 @@ class RoutingStatsPipeline(Protocol):
 
     def sadd(self, key: str, value: str) -> object: ...
 
+    def zadd(self, key: str, mapping: Mapping[str, int]) -> object: ...
+
     def execute(self) -> Awaitable[object]: ...
 
 
@@ -55,6 +57,8 @@ class RoutingStatsRedis(Protocol):
     def pipeline(self, *, transaction: bool) -> AbstractAsyncContextManager[RoutingStatsPipeline]: ...
 
     def smembers(self, key: str) -> Awaitable[Set[RedisValue]]: ...
+
+    def zrangebyscore(self, key: str, minimum: int, maximum: str) -> Awaitable[list[RedisValue]]: ...
 
     def hgetall(self, key: str) -> Awaitable[Mapping[RedisValue, RedisValue]]: ...
 
@@ -136,7 +140,7 @@ class RoutingStatsStore:
         return self._key("active-metadata", "{" + token + "}")
 
     def _active_index_key(self) -> str:
-        return self._key("active-index")
+        return self._key("active-index-v2")
 
     def _terminal_key(self, token: str, attempt_id: str) -> str:
         return self._key("terminal", "{" + token + "}", attempt_id)
@@ -148,9 +152,16 @@ class RoutingStatsStore:
         terminal_key = self._terminal_key(token, attempt_id)
         client = self._async_client()
         bucket = self._bucket()
-        await self._retry(lambda: self._write_inventory(client, metadata, token, bucket, include_active=True))
-
         expires_at = int(time.time() + _ACTIVE_LEASE_SECONDS)
+        await self._retry(
+            lambda: self._write_inventory(
+                client,
+                metadata,
+                token,
+                bucket,
+                active_expires_at=expires_at,
+            )
+        )
         # A terminal callback can win a scheduling race with this background task.
         # The marker prevents a completed request from being resurrected as active.
         script = (
@@ -220,7 +231,7 @@ class RoutingStatsStore:
                 duration_ms,
                 latency_field,
             )
-            await self._write_inventory(client, metadata, token, bucket, include_active=False)
+            await self._write_inventory(client, metadata, token, bucket, active_expires_at=None)
 
         await self._retry(_record)
 
@@ -230,7 +241,7 @@ class RoutingStatsStore:
         metadata: Metadata,
         token: str,
         bucket: int,
-        include_active: bool,
+        active_expires_at: Optional[int],
     ) -> None:
         """Index deployment metadata separately from the atomic metric write."""
         now_ms = int(time.time() * 1000)
@@ -247,13 +258,11 @@ class RoutingStatsStore:
             pipe.expire(bucket_key, _RETENTION_SECONDS)
             pipe.sadd(self._index_key(bucket), token)
             pipe.expire(self._index_key(bucket), _RETENTION_SECONDS)
-            if include_active:
+            if active_expires_at is not None:
                 active_metadata_key = self._active_metadata_key(token)
-                active_index_key = self._active_index_key()
                 pipe.hset(active_metadata_key, mapping=mapping)
                 pipe.expire(active_metadata_key, _ACTIVE_LEASE_SECONDS)
-                pipe.sadd(active_index_key, token)
-                pipe.expire(active_index_key, _ACTIVE_LEASE_SECONDS)
+                pipe.zadd(self._active_index_key(), {token: active_expires_at})
             await pipe.execute()
 
     @staticmethod
@@ -299,7 +308,10 @@ class RoutingStatsStore:
             *(client.smembers(self._index_key(bucket)) for bucket in buckets)
         )
         tokens = {_decode(token) for token_set in token_sets for token in token_set}
-        tokens.update(_decode(token) for token in await client.smembers(self._active_index_key()))
+        active_index_key = self._active_index_key()
+        now = int(time.time())
+        await client.zremrangebyscore(active_index_key, "-inf", now)
+        tokens.update(_decode(token) for token in await client.zrangebyscore(active_index_key, now + 1, "+inf"))
 
         rows = await asyncio.gather(
             *(self._read_token(client=client, token=token, buckets=buckets) for token in tokens)
@@ -471,30 +483,35 @@ class RoutingStatsLogger(CustomLogger):
         if not isinstance(litellm_params_raw, dict):
             return None
         litellm_params = cast(Dict[str, object], litellm_params_raw)
-        for metadata_name in ("metadata", "litellm_metadata"):
-            metadata_raw = litellm_params.get(metadata_name)
-            if not isinstance(metadata_raw, dict):
-                continue
-            metadata = cast(Dict[str, object], metadata_raw)
-            model_info_raw = metadata.get("model_info", litellm_params.get("model_info"))
-            if not isinstance(model_info_raw, dict):
-                continue
-            model_info = cast(Dict[str, object], model_info_raw)
-            model_id = model_info.get("id")
-            model_group = metadata.get("model_group")
-            access_groups = model_info.get("access_groups")
-            if model_id is None or not isinstance(model_group, str) or not isinstance(access_groups, list) or not access_groups:
-                continue
-            channel: object = cast(object, access_groups[0])
-            if not isinstance(channel, str) or not channel:
-                continue
-            return {
-                "model_id": str(model_id),
-                "model_group": model_group,
-                "channel": channel,
-                "api_base": _sanitize_api_base(metadata.get("api_base")),
-            }
-        return None
+        # LITELLM_METADATA_ROUTES (including Responses) reserve
+        # `litellm_metadata` for router-injected deployment information while
+        # ordinary `metadata` is provider-visible client input. Never combine
+        # the two: choosing the first usable mapping lets client fields poison
+        # an otherwise genuine deployment's control-plane statistics.
+        metadata_raw = litellm_params.get("litellm_metadata")
+        if not isinstance(metadata_raw, dict):
+            metadata_raw = litellm_params.get("metadata")
+        if not isinstance(metadata_raw, dict):
+            return None
+        metadata = cast(Dict[str, object], metadata_raw)
+        model_info_raw = metadata.get("model_info", litellm_params.get("model_info"))
+        if not isinstance(model_info_raw, dict):
+            return None
+        model_info = cast(Dict[str, object], model_info_raw)
+        model_id = model_info.get("id")
+        model_group = metadata.get("model_group")
+        access_groups = model_info.get("access_groups")
+        if model_id is None or not isinstance(model_group, str) or not isinstance(access_groups, list) or not access_groups:
+            return None
+        channel: object = cast(object, access_groups[0])
+        if not isinstance(channel, str) or not channel:
+            return None
+        return {
+            "model_id": str(model_id),
+            "model_group": model_group,
+            "channel": channel,
+            "api_base": _sanitize_api_base(metadata.get("api_base")),
+        }
 
     @staticmethod
     async def _run_background(coroutine: Coroutine[object, object, None]) -> None:

@@ -41,6 +41,9 @@ class FakePipeline:
     def sadd(self, key, value):
         self.operations.append(("sadd", key, value))
 
+    def zadd(self, key, mapping):
+        self.operations.append(("zadd", key, mapping))
+
     async def execute(self):
         for operation in self.operations:
             method = getattr(self.client, operation[0])
@@ -109,8 +112,15 @@ class FakeRedis:
     async def sadd(self, key, value):
         self.sets.setdefault(key, set()).add(value)
 
+    async def zadd(self, key, mapping):
+        self.zsets.setdefault(key, {}).update({str(member): int(score) for member, score in mapping.items()})
+
     async def smembers(self, key):
         return self.sets.get(key, set())
+
+    async def zrangebyscore(self, key, minimum, maximum):
+        lower = int(minimum)
+        return [member for member, score in self.zsets.get(key, {}).items() if score >= lower]
 
     async def hgetall(self, key):
         return self.hashes.get(key, {})
@@ -239,7 +249,18 @@ async def test_routing_stats_keeps_active_request_visible_across_minute_boundary
     assert item["model_id"] == "deployment-in-flight"
     assert item["requests"] == 0
     assert item["active_requests"] == 1
-    assert fake_redis.sets[store._active_index_key()]
+    assert fake_redis.zsets[store._active_index_key()]
+
+
+@pytest.mark.asyncio
+async def test_routing_stats_prunes_expired_active_index_tokens(monkeypatch):
+    store, fake_redis = make_store(monkeypatch)
+    stale_token = store._token("removed-deployment")
+    fake_redis.zsets[store._active_index_key()] = {stale_token: 0}
+    monkeypatch.setattr("litellm.proxy.observability.routing_stats.time.time", lambda: 1)
+
+    assert await store.query(window_minutes=1) == []
+    assert stale_token not in fake_redis.zsets[store._active_index_key()]
 
 
 @pytest.mark.asyncio
@@ -253,7 +274,16 @@ async def test_routing_stats_retries_failed_redis_terminal_write(monkeypatch):
     }
     now = datetime.now(timezone.utc)
     original_eval = fake_redis.eval
-    fake_redis.eval = AsyncMock(side_effect=[ConnectionError("transient"), original_eval])
+    calls = 0
+
+    async def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("transient")
+        return await original_eval(*args, **kwargs)
+
+    fake_redis.eval = AsyncMock(side_effect=fail_once)
     monkeypatch.setattr("litellm.proxy.observability.routing_stats.asyncio.sleep", AsyncMock())
 
     await store.record_terminal(metadata, "attempt-1", True, now, now)
@@ -389,6 +419,31 @@ def test_routing_stats_logger_supports_responses_litellm_metadata_and_sanitizes_
                     "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
                     "api_base": "https://user:password@code1.mmkg.cloud/v1?key=secret#fragment",
                 }
+            }
+        }
+    )
+
+    assert metadata == {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud",
+    }
+
+
+def test_routing_stats_logger_rejects_responses_requester_metadata_spoofing():
+    metadata = RoutingStatsLogger._metadata(
+        {
+            "litellm_params": {
+                "metadata": {
+                    "model_group": "caller-spoofed",
+                    "api_base": "https://caller.invalid/v1?key=secret",
+                },
+                "litellm_metadata": {
+                    "model_group": "gpt-5.6-sol",
+                    "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
+                    "api_base": "https://code1.mmkg.cloud/v1",
+                },
             }
         }
     )
