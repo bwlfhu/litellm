@@ -13,14 +13,15 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from collections.abc import Awaitable, Coroutine, Mapping, Set
 from contextlib import AbstractAsyncContextManager
-from typing import Dict, Iterable, Optional, Protocol, Union, cast
+from typing import Callable, Dict, Iterable, Optional, Protocol, Union, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from litellm._logging import verbose_proxy_logger
 from litellm._uuid import uuid
 from litellm.caching.redis_cache import RedisCache
 from litellm.integrations.custom_logger import CustomLogger
 
-_PREFIX = "litellm:routing-stats:v1"
+_PREFIX = "litellm:routing-stats:v2"
 _BUCKET_SECONDS = 60
 _RETENTION_SECONDS = 20 * 60
 _ACTIVE_LEASE_SECONDS = 20 * 60
@@ -50,8 +51,6 @@ class RoutingStatsPipeline(Protocol):
 
 class RoutingStatsRedis(Protocol):
     def eval(self, script: str, numkeys: int, *args: object) -> Awaitable[object]: ...
-
-    def set(self, key: str, value: str, *, ex: int, nx: bool) -> Awaitable[object]: ...
 
     def pipeline(self, *, transaction: bool) -> AbstractAsyncContextManager[RoutingStatsPipeline]: ...
 
@@ -86,6 +85,23 @@ def _as_float(value: Optional[RedisValue]) -> float:
         return 0.0
 
 
+def _sanitize_api_base(api_base: object) -> str:
+    """Keep only a provider URL's scheme, host, and optional port."""
+    if not isinstance(api_base, str) or not api_base:
+        return ""
+    try:
+        parsed = urlsplit(api_base)
+        if not parsed.scheme or not parsed.hostname:
+            return ""
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host if parsed.port is None else f"{host}:{parsed.port}"
+        return urlunsplit((parsed.scheme.lower(), netloc, "", "", ""))
+    except ValueError:
+        return ""
+
+
 class RoutingStatsStore:
     """Writes and reads minute-bucketed deployment attempt statistics."""
 
@@ -108,13 +124,19 @@ class RoutingStatsStore:
         return int((timestamp if timestamp is not None else time.time()) // _BUCKET_SECONDS)
 
     def _bucket_key(self, bucket: int, token: str) -> str:
-        return self._key("bucket", bucket, token)
+        return self._key("bucket", "{" + token + "}", bucket)
 
     def _index_key(self, bucket: int) -> str:
         return self._key("index", bucket)
 
     def _active_key(self, token: str) -> str:
         return self._key("active", "{" + token + "}")
+
+    def _active_metadata_key(self, token: str) -> str:
+        return self._key("active-metadata", "{" + token + "}")
+
+    def _active_index_key(self) -> str:
+        return self._key("active-index")
 
     def _terminal_key(self, token: str, attempt_id: str) -> str:
         return self._key("terminal", "{" + token + "}", attempt_id)
@@ -125,26 +147,8 @@ class RoutingStatsStore:
         active_key = self._active_key(token)
         terminal_key = self._terminal_key(token, attempt_id)
         client = self._async_client()
-        now_ms = int(time.time() * 1000)
         bucket = self._bucket()
-        bucket_key = self._bucket_key(bucket, token)
-        index_key = self._index_key(bucket)
-        mapping = {
-            "model_id": metadata["model_id"],
-            "model_group": metadata["model_group"],
-            "channel": metadata["channel"],
-            "api_base": metadata.get("api_base", ""),
-            "last_seen_ms": now_ms,
-        }
-
-        # Index the selected deployment before it completes. This makes an
-        # in-flight request visible even when it is the first request for it.
-        async with client.pipeline(transaction=False) as pipe:
-            pipe.hset(bucket_key, mapping=mapping)
-            pipe.expire(bucket_key, _RETENTION_SECONDS)
-            pipe.sadd(index_key, token)
-            pipe.expire(index_key, _RETENTION_SECONDS)
-            await pipe.execute()
+        await self._retry(lambda: self._write_inventory(client, metadata, token, bucket, include_active=True))
 
         expires_at = int(time.time() + _ACTIVE_LEASE_SECONDS)
         # A terminal callback can win a scheduling race with this background task.
@@ -154,8 +158,10 @@ class RoutingStatsStore:
             "redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2]) "
             "redis.call('EXPIRE', KEYS[1], ARGV[3]) return 1"
         )
-        await client.eval(
-            script, 2, active_key, terminal_key, expires_at, attempt_id, _ACTIVE_LEASE_SECONDS
+        await self._retry(
+            lambda: client.eval(
+                script, 2, active_key, terminal_key, expires_at, attempt_id, _ACTIVE_LEASE_SECONDS
+            )
         )
 
     async def record_terminal(
@@ -169,20 +175,65 @@ class RoutingStatsStore:
         """Persist an attempt result. This is called from a detached task."""
         client = self._async_client()
         token = self._token(metadata["model_id"])
-        terminal_key = self._terminal_key(token, attempt_id)
-        # Callback chains may include more than one terminal path. Count an
-        # attempt once, and also leave a marker for a lagging start task.
-        first_terminal = await client.set(terminal_key, "1", ex=_ACTIVE_LEASE_SECONDS, nx=True)
-        if not first_terminal:
-            return
-
         now_ms = int(time.time() * 1000)
         duration_ms = self._duration_ms(start_time=start_time, end_time=end_time)
         bucket = self._bucket()
         bucket_key = self._bucket_key(bucket, token)
-        index_key = self._index_key(bucket)
         active_key = self._active_key(token)
+        terminal_key = self._terminal_key(token, attempt_id)
         latency_field = self._latency_field(duration_ms)
+        metric_field = "success" if succeeded else "failure"
+        # The three keys share the deployment token's Redis Cluster hash tag.
+        # This makes deduplication, active cleanup, and counters atomic.
+        script = (
+            "if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end "
+            "redis.call('SET', KEYS[2], '1', 'EX', ARGV[2]) "
+            "redis.call('ZREM', KEYS[1], ARGV[1]) "
+            "redis.call('HSET', KEYS[3], 'model_id', ARGV[4], 'model_group', ARGV[5], "
+            "'channel', ARGV[6], 'api_base', ARGV[7], 'last_seen_ms', ARGV[8]) "
+            "redis.call('HINCRBY', KEYS[3], 'requests', 1) "
+            "redis.call('HINCRBY', KEYS[3], ARGV[9], 1) "
+            "redis.call('HINCRBYFLOAT', KEYS[3], 'latency_sum_ms', ARGV[10]) "
+            "redis.call('HINCRBY', KEYS[3], ARGV[11], 1) "
+            "redis.call('EXPIRE', KEYS[3], ARGV[3]) return 1"
+        )
+
+        async def _record() -> None:
+            # An already-recorded terminal event is expected on duplicate
+            # callback delivery. Inventory is still retried if its previous
+            # non-atomic write failed after the metric script succeeded.
+            await client.eval(
+                script,
+                3,
+                active_key,
+                terminal_key,
+                bucket_key,
+                attempt_id,
+                _ACTIVE_LEASE_SECONDS,
+                _RETENTION_SECONDS,
+                metadata["model_id"],
+                metadata["model_group"],
+                metadata["channel"],
+                metadata.get("api_base", ""),
+                now_ms,
+                metric_field,
+                duration_ms,
+                latency_field,
+            )
+            await self._write_inventory(client, metadata, token, bucket, include_active=False)
+
+        await self._retry(_record)
+
+    async def _write_inventory(
+        self,
+        client: RoutingStatsRedis,
+        metadata: Metadata,
+        token: str,
+        bucket: int,
+        include_active: bool,
+    ) -> None:
+        """Index deployment metadata separately from the atomic metric write."""
+        now_ms = int(time.time() * 1000)
         mapping = {
             "model_id": metadata["model_id"],
             "model_group": metadata["model_group"],
@@ -190,18 +241,32 @@ class RoutingStatsStore:
             "api_base": metadata.get("api_base", ""),
             "last_seen_ms": now_ms,
         }
-
         async with client.pipeline(transaction=False) as pipe:
-            pipe.zrem(active_key, attempt_id)
+            bucket_key = self._bucket_key(bucket, token)
             pipe.hset(bucket_key, mapping=mapping)
-            pipe.hincrby(bucket_key, "requests", 1)
-            pipe.hincrby(bucket_key, "success" if succeeded else "failure", 1)
-            pipe.hincrbyfloat(bucket_key, "latency_sum_ms", duration_ms)
-            pipe.hincrby(bucket_key, latency_field, 1)
             pipe.expire(bucket_key, _RETENTION_SECONDS)
-            pipe.sadd(index_key, token)
-            pipe.expire(index_key, _RETENTION_SECONDS)
+            pipe.sadd(self._index_key(bucket), token)
+            pipe.expire(self._index_key(bucket), _RETENTION_SECONDS)
+            if include_active:
+                active_metadata_key = self._active_metadata_key(token)
+                active_index_key = self._active_index_key()
+                pipe.hset(active_metadata_key, mapping=mapping)
+                pipe.expire(active_metadata_key, _ACTIVE_LEASE_SECONDS)
+                pipe.sadd(active_index_key, token)
+                pipe.expire(active_index_key, _ACTIVE_LEASE_SECONDS)
             await pipe.execute()
+
+    @staticmethod
+    async def _retry(operation: Callable[[], Awaitable[object]]) -> object:
+        """Retry short Redis blips inside the detached telemetry task."""
+        for attempt in range(3):
+            try:
+                return await operation()
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.05 * (attempt + 1))
+        raise AssertionError("unreachable")
 
     @staticmethod
     def _duration_ms(start_time: Timestamp, end_time: Timestamp) -> int:
@@ -234,6 +299,7 @@ class RoutingStatsStore:
             *(client.smembers(self._index_key(bucket)) for bucket in buckets)
         )
         tokens = {_decode(token) for token_set in token_sets for token in token_set}
+        tokens.update(_decode(token) for token in await client.smembers(self._active_index_key()))
 
         rows = await asyncio.gather(
             *(self._read_token(client=client, token=token, buckets=buckets) for token in tokens)
@@ -256,6 +322,7 @@ class RoutingStatsStore:
         hash_rows = await asyncio.gather(
             *(client.hgetall(self._bucket_key(bucket, token)) for bucket in bucket_list)
         )
+        active_metadata = await client.hgetall(self._active_metadata_key(token))
         merged: dict[str, float] = defaultdict(float)
         latest_metadata: dict[str, str] = {}
         latest_seen = -1
@@ -278,9 +345,15 @@ class RoutingStatsStore:
                 merged[field] += _as_int(row.get(field))
             merged["latency_le_inf"] += _as_int(row.get("latency_le_inf"))
 
-        if not latest_metadata.get("model_id"):
-            return None
         active_requests = await self._active_requests(client=client, token=token)
+        if not latest_metadata and active_metadata:
+            active_row = {_decode(key): _decode(value) for key, value in active_metadata.items()}
+            latest_seen = _as_int(active_row.get("last_seen_ms"))
+            latest_metadata = {
+                key: active_row.get(key, "") for key in ("channel", "model_group", "model_id", "api_base")
+            }
+        if not latest_metadata.get("model_id") or (not any(hash_rows) and active_requests == 0):
+            return None
         requests = int(merged["requests"])
         return {
             **latest_metadata,
@@ -294,6 +367,7 @@ class RoutingStatsStore:
             "latency_p95_ms": self._percentile(merged, requests, 0.95),
             "latency_avg_ms": round(merged["latency_sum_ms"] / requests, 2) if requests else None,
             "latency_max_ms": self._histogram_max(merged) if requests else None,
+            "latency_overflow_count": int(merged["latency_le_inf"]),
             "last_seen": datetime.fromtimestamp(latest_seen / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
@@ -313,14 +387,16 @@ class RoutingStatsStore:
             running += metrics[f"latency_le_{bound}"]
             if running >= target:
                 return bound
-        return _LATENCY_BUCKETS_MS[-1]
+        return None
 
     @staticmethod
-    def _histogram_max(metrics: dict[str, float]) -> int:
+    def _histogram_max(metrics: dict[str, float]) -> Optional[int]:
+        if metrics["latency_le_inf"] > 0:
+            return None
         for bound in reversed(_LATENCY_BUCKETS_MS):
             if metrics[f"latency_le_{bound}"] > 0:
                 return bound
-        return _LATENCY_BUCKETS_MS[-1]
+        return None
 
 
 class RoutingStatsLogger(CustomLogger):
@@ -341,12 +417,11 @@ class RoutingStatsLogger(CustomLogger):
         if not isinstance(litellm_params_raw, dict):
             return
         litellm_params = cast(Dict[str, object], litellm_params_raw)
-        current_model_id = litellm_params.get("routing_stats_attempt_model_id")
-        attempt_id = litellm_params.get("routing_stats_attempt_id")
-        if current_model_id != metadata["model_id"] or not isinstance(attempt_id, str):
-            attempt_id = str(uuid.uuid4())
-            litellm_params["routing_stats_attempt_id"] = attempt_id
-            litellm_params["routing_stats_attempt_model_id"] = metadata["model_id"]
+        # The input callback runs once per provider handoff. Router retries can
+        # select the same deployment and reuse request kwargs, so never reuse a
+        # prior attempt identifier based on model id.
+        attempt_id = str(uuid.uuid4())
+        litellm_params["routing_stats_attempt_id"] = attempt_id
         self._schedule(self._store.record_start(metadata=metadata, attempt_id=attempt_id))
 
     def log_success_event(
@@ -396,27 +471,30 @@ class RoutingStatsLogger(CustomLogger):
         if not isinstance(litellm_params_raw, dict):
             return None
         litellm_params = cast(Dict[str, object], litellm_params_raw)
-        model_info_raw = litellm_params.get("model_info")
-        metadata_raw = litellm_params.get("metadata")
-        if not isinstance(model_info_raw, dict) or not isinstance(metadata_raw, dict):
-            return None
-        model_info = cast(Dict[str, object], model_info_raw)
-        metadata = cast(Dict[str, object], metadata_raw)
-        model_id = model_info.get("id")
-        model_group = metadata.get("model_group")
-        access_groups = model_info.get("access_groups")
-        if model_id is None or not isinstance(model_group, str) or not isinstance(access_groups, list) or not access_groups:
-            return None
-        channel: object = cast(object, access_groups[0])
-        if not isinstance(channel, str) or not channel:
-            return None
-        api_base = metadata.get("api_base")
-        return {
-            "model_id": str(model_id),
-            "model_group": model_group,
-            "channel": channel,
-            "api_base": api_base if isinstance(api_base, str) else "",
-        }
+        for metadata_name in ("metadata", "litellm_metadata"):
+            metadata_raw = litellm_params.get(metadata_name)
+            if not isinstance(metadata_raw, dict):
+                continue
+            metadata = cast(Dict[str, object], metadata_raw)
+            model_info_raw = metadata.get("model_info", litellm_params.get("model_info"))
+            if not isinstance(model_info_raw, dict):
+                continue
+            model_info = cast(Dict[str, object], model_info_raw)
+            model_id = model_info.get("id")
+            model_group = metadata.get("model_group")
+            access_groups = model_info.get("access_groups")
+            if model_id is None or not isinstance(model_group, str) or not isinstance(access_groups, list) or not access_groups:
+                continue
+            channel: object = cast(object, access_groups[0])
+            if not isinstance(channel, str) or not channel:
+                continue
+            return {
+                "model_id": str(model_id),
+                "model_group": model_group,
+                "channel": channel,
+                "api_base": _sanitize_api_base(metadata.get("api_base")),
+            }
+        return None
 
     @staticmethod
     async def _run_background(coroutine: Coroutine[object, object, None]) -> None:

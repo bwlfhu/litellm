@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -53,17 +54,35 @@ class FakeRedis:
         self.zsets = {}
         self.values = {}
 
-    async def eval(self, script, numkeys, active_key, terminal_key, expires_at, attempt_id, ttl):
+    async def eval(self, script, numkeys, *args):
+        if numkeys == 2:
+            active_key, terminal_key, expires_at, attempt_id, _ttl = args
+            if terminal_key in self.values:
+                return 0
+            self.zsets.setdefault(active_key, {})[attempt_id] = int(expires_at)
+            return 1
+
+        active_key, terminal_key, bucket_key, attempt_id, _lease_ttl, _retention_ttl, *fields = args
         if terminal_key in self.values:
             return 0
-        self.zsets.setdefault(active_key, {})[attempt_id] = int(expires_at)
+        self.values[terminal_key] = "1"
+        self.zsets.setdefault(active_key, {}).pop(attempt_id, None)
+        model_id, model_group, channel, api_base, last_seen_ms, metric_field, duration_ms, latency_field = fields
+        await self.hset(
+            bucket_key,
+            {
+                "model_id": model_id,
+                "model_group": model_group,
+                "channel": channel,
+                "api_base": api_base,
+                "last_seen_ms": last_seen_ms,
+            },
+        )
+        await self.hincrby(bucket_key, "requests", 1)
+        await self.hincrby(bucket_key, metric_field, 1)
+        await self.hincrbyfloat(bucket_key, "latency_sum_ms", duration_ms)
+        await self.hincrby(bucket_key, latency_field, 1)
         return 1
-
-    async def set(self, key, value, ex=None, nx=False):
-        if nx and key in self.values:
-            return False
-        self.values[key] = value
-        return True
 
     def pipeline(self, transaction=False):
         return FakePipeline(self)
@@ -179,6 +198,88 @@ async def test_routing_stats_terminal_event_is_idempotent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_routing_stats_counts_same_deployment_retries(monkeypatch):
+    store, _ = make_store(monkeypatch)
+    metadata = {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud/v1",
+    }
+    now = datetime.now(timezone.utc)
+
+    await store.record_start(metadata, "retry-1")
+    await store.record_terminal(metadata, "retry-1", False, now, now)
+    await store.record_start(metadata, "retry-2")
+    await store.record_terminal(metadata, "retry-2", True, now, now)
+
+    item = (await store.query(window_minutes=1))[0]
+    assert item["requests"] == 2
+    assert item["success"] == 1
+    assert item["failure"] == 1
+    assert item["active_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_routing_stats_keeps_active_request_visible_across_minute_boundary(monkeypatch):
+    store, fake_redis = make_store(monkeypatch)
+    metadata = {
+        "model_id": "deployment-in-flight",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud/v1",
+    }
+    monkeypatch.setattr(store, "_bucket", lambda timestamp=None: 100)
+    await store.record_start(metadata, "attempt-active")
+    monkeypatch.setattr(store, "_bucket", lambda timestamp=None: 101)
+
+    item = (await store.query(window_minutes=1))[0]
+    assert item["model_id"] == "deployment-in-flight"
+    assert item["requests"] == 0
+    assert item["active_requests"] == 1
+    assert fake_redis.sets[store._active_index_key()]
+
+
+@pytest.mark.asyncio
+async def test_routing_stats_retries_failed_redis_terminal_write(monkeypatch):
+    store, fake_redis = make_store(monkeypatch)
+    metadata = {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud/v1",
+    }
+    now = datetime.now(timezone.utc)
+    original_eval = fake_redis.eval
+    fake_redis.eval = AsyncMock(side_effect=[ConnectionError("transient"), original_eval])
+    monkeypatch.setattr("litellm.proxy.observability.routing_stats.asyncio.sleep", AsyncMock())
+
+    await store.record_terminal(metadata, "attempt-1", True, now, now)
+
+    assert fake_redis.eval.await_count == 2
+    assert (await store.query(window_minutes=1))[0]["requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_routing_stats_marks_latency_overflow_without_underreporting(monkeypatch):
+    store, _ = make_store(monkeypatch)
+    metadata = {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud/v1",
+    }
+    now = datetime.now(timezone.utc)
+    await store.record_terminal(metadata, "attempt-1", True, now, now + timedelta(seconds=121))
+
+    item = (await store.query(window_minutes=1))[0]
+    assert item["latency_p50_ms"] is None
+    assert item["latency_p95_ms"] is None
+    assert item["latency_max_ms"] is None
+    assert item["latency_overflow_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_routing_stats_filters_by_channel_and_model_group(monkeypatch):
     store, _ = make_store(monkeypatch)
     now = datetime.now(timezone.utc)
@@ -275,3 +376,44 @@ def test_routing_stats_logger_uses_deployment_access_group_as_channel():
         "channel": "ac-mmkg",
         "api_base": "https://code1.mmkg.cloud/v1",
     }
+
+
+def test_routing_stats_logger_supports_responses_litellm_metadata_and_sanitizes_url():
+    metadata = RoutingStatsLogger._metadata(
+        {
+            "litellm_params": {
+                "litellm_metadata": {
+                    "model_group": "gpt-5.6-sol",
+                    "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
+                    "api_base": "https://user:password@code1.mmkg.cloud/v1?key=secret#fragment",
+                }
+            }
+        }
+    )
+
+    assert metadata == {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud",
+    }
+
+
+def test_routing_stats_logger_creates_distinct_ids_for_same_deployment_retry(monkeypatch):
+    logger = RoutingStatsLogger.__new__(RoutingStatsLogger)
+    logger._store = object()
+    scheduled = []
+    monkeypatch.setattr(logger, "_schedule", lambda coroutine: (coroutine.close(), scheduled.append(coroutine)))
+    kwargs = {
+        "litellm_params": {
+            "metadata": {"model_group": "gpt-5.6-sol", "api_base": "https://code1.mmkg.cloud/v1"},
+            "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
+        }
+    }
+    monkeypatch.setattr("litellm.proxy.observability.routing_stats.uuid.uuid4", lambda: "attempt-one")
+    logger.log_pre_api_call("model", [], kwargs)
+    monkeypatch.setattr("litellm.proxy.observability.routing_stats.uuid.uuid4", lambda: "attempt-two")
+    logger.log_pre_api_call("model", [], kwargs)
+
+    assert kwargs["litellm_params"]["routing_stats_attempt_id"] == "attempt-two"
+    assert len(scheduled) == 2
