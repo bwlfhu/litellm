@@ -402,6 +402,12 @@ def test_update_kwargs_with_deployment(model_list):
     )
     set_fields = ["deployment", "api_base", "model_info"]
     assert all(field in kwargs["metadata"] for field in set_fields)
+    assert kwargs["_litellm_routing_stats_metadata"] == {
+        "model_id": str(kwargs["metadata"]["model_info"]["id"]),
+        "model_group": "gpt-5-mini",
+        "channel": "group1",
+        "api_base": kwargs["metadata"]["api_base"],
+    }
 
 
 def test_update_kwargs_with_default_litellm_params(model_list):

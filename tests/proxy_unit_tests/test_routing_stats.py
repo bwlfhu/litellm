@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from litellm.caching.redis_cache import RedisCache
+from litellm.utils import Rules, function_setup
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.observability.observability_endpoints import get_routing_stats, router as observability_router
@@ -312,6 +313,52 @@ async def test_routing_stats_marks_latency_overflow_without_underreporting(monke
 
 
 @pytest.mark.asyncio
+async def test_routing_stats_treats_all_percentiles_as_unknown_with_mixed_overflow_samples(monkeypatch):
+    store, _ = make_store(monkeypatch)
+    metadata = {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud/v1",
+    }
+    now = datetime.now(timezone.utc)
+    for attempt in range(20):
+        await store.record_terminal(metadata, f"fast-{attempt}", True, now, now + timedelta(milliseconds=100))
+    await store.record_terminal(metadata, "slow", True, now, now + timedelta(seconds=121))
+
+    item = (await store.query(window_minutes=1))[0]
+    assert item["latency_p50_ms"] is None
+    assert item["latency_p95_ms"] is None
+    assert item["latency_max_ms"] is None
+    assert item["latency_overflow_count"] == 1
+
+
+def test_routing_stats_snapshot_reaches_callback_payload_without_reaching_provider_kwargs():
+    snapshot = {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud/v1",
+    }
+    kwargs = {
+        "model": "gpt-5.6-sol",
+        "messages": [{"role": "user", "content": "hello"}],
+        "litellm_call_id": "routing-stats-test",
+        "_litellm_routing_stats_metadata": snapshot,
+    }
+
+    logging_obj, provider_kwargs = function_setup(
+        original_function="acompletion",
+        rules_obj=Rules(),
+        start_time=datetime.now(timezone.utc),
+        **kwargs,
+    )
+
+    assert provider_kwargs.get("_litellm_routing_stats_metadata") is None
+    assert logging_obj.model_call_details["litellm_params"]["routing_stats_metadata"] == snapshot
+
+
+@pytest.mark.asyncio
 async def test_routing_stats_filters_by_channel_and_model_group(monkeypatch):
     store, _ = make_store(monkeypatch)
     now = datetime.now(timezone.utc)
@@ -396,8 +443,12 @@ def test_routing_stats_logger_uses_deployment_access_group_as_channel():
     metadata = RoutingStatsLogger._metadata(
         {
             "litellm_params": {
-                "metadata": {"model_group": "gpt-5.6-sol", "api_base": "https://code1.mmkg.cloud/v1"},
-                "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
+                "routing_stats_metadata": {
+                    "model_id": "deployment-1",
+                    "model_group": "gpt-5.6-sol",
+                    "channel": "ac-mmkg",
+                    "api_base": "https://code1.mmkg.cloud/v1",
+                }
             }
         }
     )
@@ -414,9 +465,10 @@ def test_routing_stats_logger_supports_responses_litellm_metadata_and_sanitizes_
     metadata = RoutingStatsLogger._metadata(
         {
             "litellm_params": {
-                "litellm_metadata": {
+                "routing_stats_metadata": {
+                    "model_id": "deployment-1",
                     "model_group": "gpt-5.6-sol",
-                    "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
+                    "channel": "ac-mmkg",
                     "api_base": "https://user:password@code1.mmkg.cloud/v1?key=secret#fragment",
                 }
             }
@@ -444,6 +496,43 @@ def test_routing_stats_logger_rejects_responses_requester_metadata_spoofing():
                     "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
                     "api_base": "https://code1.mmkg.cloud/v1",
                 },
+                "routing_stats_metadata": {
+                    "model_id": "deployment-1",
+                    "model_group": "gpt-5.6-sol",
+                    "channel": "ac-mmkg",
+                    "api_base": "https://code1.mmkg.cloud/v1",
+                },
+            }
+        }
+    )
+
+    assert metadata == {
+        "model_id": "deployment-1",
+        "model_group": "gpt-5.6-sol",
+        "channel": "ac-mmkg",
+        "api_base": "https://code1.mmkg.cloud",
+    }
+
+
+def test_routing_stats_logger_rejects_chat_requester_litellm_metadata_spoofing():
+    metadata = RoutingStatsLogger._metadata(
+        {
+            "litellm_params": {
+                "metadata": {
+                    "model_group": "gpt-5.6-sol",
+                    "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
+                    "api_base": "https://code1.mmkg.cloud/v1",
+                },
+                "litellm_metadata": {
+                    "model_group": "caller-spoofed",
+                    "api_base": "https://caller.invalid/v1?key=secret",
+                },
+                "routing_stats_metadata": {
+                    "model_id": "deployment-1",
+                    "model_group": "gpt-5.6-sol",
+                    "channel": "ac-mmkg",
+                    "api_base": "https://code1.mmkg.cloud/v1",
+                },
             }
         }
     )
@@ -463,8 +552,12 @@ def test_routing_stats_logger_creates_distinct_ids_for_same_deployment_retry(mon
     monkeypatch.setattr(logger, "_schedule", lambda coroutine: (coroutine.close(), scheduled.append(coroutine)))
     kwargs = {
         "litellm_params": {
-            "metadata": {"model_group": "gpt-5.6-sol", "api_base": "https://code1.mmkg.cloud/v1"},
-            "model_info": {"id": "deployment-1", "access_groups": ["ac-mmkg"]},
+            "routing_stats_metadata": {
+                "model_id": "deployment-1",
+                "model_group": "gpt-5.6-sol",
+                "channel": "ac-mmkg",
+                "api_base": "https://code1.mmkg.cloud/v1",
+            },
         }
     }
     monkeypatch.setattr("litellm.proxy.observability.routing_stats.uuid.uuid4", lambda: "attempt-one")

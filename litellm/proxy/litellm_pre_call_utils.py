@@ -117,6 +117,9 @@ LITELLM_METADATA_ROUTES = (
 )
 
 _UNTRUSTED_ROOT_CONTROL_FIELDS = (
+    # Set by Router after it has selected a deployment. It is copied into the
+    # logging payload only and must never be accepted from a proxy caller.
+    "_litellm_routing_stats_metadata",
     "proxy_server_request",
     "standard_logging_object",
     "secret_fields",

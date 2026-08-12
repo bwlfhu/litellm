@@ -3073,6 +3073,10 @@ class Router:
             function_name=function_name,
         )
 
+        # Routing telemetry must use this router-authored snapshot rather than
+        # either metadata container. The other metadata container can remain
+        # caller-provided for Chat/Responses compatibility.
+        kwargs.pop("_litellm_routing_stats_metadata", None)
         kwargs.setdefault(metadata_variable_name, {}).update(
             {
                 "deployment": deployment_litellm_model_name,
@@ -3081,6 +3085,23 @@ class Router:
                 "deployment_model_name": deployment_model_name,
             }
         )
+        model_group = kwargs[metadata_variable_name].get("model_group")
+        access_groups = model_info.get("access_groups")
+        model_id = model_info.get("id")
+        if (
+            model_id is not None
+            and isinstance(model_group, str)
+            and isinstance(access_groups, list)
+            and access_groups
+            and isinstance(access_groups[0], str)
+            and access_groups[0]
+        ):
+            kwargs["_litellm_routing_stats_metadata"] = {
+                "model_id": str(model_id),
+                "model_group": model_group,
+                "channel": access_groups[0],
+                "api_base": deployment_api_base,
+            }
 
         # A retry/fallback reuses this same kwargs dict for the next deployment.
         # Refund and clear any reservation the previous deployment attempt left

@@ -367,6 +367,7 @@ class RoutingStatsStore:
         if not latest_metadata.get("model_id") or (not any(hash_rows) and active_requests == 0):
             return None
         requests = int(merged["requests"])
+        has_latency_overflow = merged["latency_le_inf"] > 0
         return {
             **latest_metadata,
             "requests": requests,
@@ -375,10 +376,10 @@ class RoutingStatsStore:
             "failure": int(merged["failure"]),
             "upstream_failure": int(merged["failure"]),
             "active_requests": active_requests,
-            "latency_p50_ms": self._percentile(merged, requests, 0.50),
-            "latency_p95_ms": self._percentile(merged, requests, 0.95),
+            "latency_p50_ms": None if has_latency_overflow else self._percentile(merged, requests, 0.50),
+            "latency_p95_ms": None if has_latency_overflow else self._percentile(merged, requests, 0.95),
             "latency_avg_ms": round(merged["latency_sum_ms"] / requests, 2) if requests else None,
-            "latency_max_ms": self._histogram_max(merged) if requests else None,
+            "latency_max_ms": self._histogram_max(merged) if requests and not has_latency_overflow else None,
             "latency_overflow_count": int(merged["latency_le_inf"]),
             "last_seen": datetime.fromtimestamp(latest_seen / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
         }
@@ -483,28 +484,17 @@ class RoutingStatsLogger(CustomLogger):
         if not isinstance(litellm_params_raw, dict):
             return None
         litellm_params = cast(Dict[str, object], litellm_params_raw)
-        # LITELLM_METADATA_ROUTES (including Responses) reserve
-        # `litellm_metadata` for router-injected deployment information while
-        # ordinary `metadata` is provider-visible client input. Never combine
-        # the two: choosing the first usable mapping lets client fields poison
-        # an otherwise genuine deployment's control-plane statistics.
-        metadata_raw = litellm_params.get("litellm_metadata")
-        if not isinstance(metadata_raw, dict):
-            metadata_raw = litellm_params.get("metadata")
+        # Router writes this independent snapshot after each deployment
+        # selection. Both metadata containers can otherwise contain caller
+        # input: Chat routes via `metadata`, Responses via `litellm_metadata`.
+        metadata_raw = litellm_params.get("routing_stats_metadata")
         if not isinstance(metadata_raw, dict):
             return None
         metadata = cast(Dict[str, object], metadata_raw)
-        model_info_raw = metadata.get("model_info", litellm_params.get("model_info"))
-        if not isinstance(model_info_raw, dict):
-            return None
-        model_info = cast(Dict[str, object], model_info_raw)
-        model_id = model_info.get("id")
+        model_id = metadata.get("model_id")
         model_group = metadata.get("model_group")
-        access_groups = model_info.get("access_groups")
-        if model_id is None or not isinstance(model_group, str) or not isinstance(access_groups, list) or not access_groups:
-            return None
-        channel: object = cast(object, access_groups[0])
-        if not isinstance(channel, str) or not channel:
+        channel = metadata.get("channel")
+        if model_id is None or not isinstance(model_group, str) or not isinstance(channel, str) or not channel:
             return None
         return {
             "model_id": str(model_id),
