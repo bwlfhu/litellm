@@ -457,7 +457,7 @@ def test_routing_stats_logger_uses_deployment_access_group_as_channel():
         "model_id": "deployment-1",
         "model_group": "gpt-5.6-sol",
         "channel": "ac-mmkg",
-        "api_base": "https://code1.mmkg.cloud/v1",
+        "api_base": "https://code1.mmkg.cloud",
     }
 
 
@@ -547,7 +547,12 @@ def test_routing_stats_logger_rejects_chat_requester_litellm_metadata_spoofing()
 
 def test_routing_stats_logger_creates_distinct_ids_for_same_deployment_retry(monkeypatch):
     logger = RoutingStatsLogger.__new__(RoutingStatsLogger)
-    logger._store = object()
+
+    class StoreStub:
+        async def record_start(self, **kwargs):
+            return None
+
+    logger._store = StoreStub()
     scheduled = []
     monkeypatch.setattr(logger, "_schedule", lambda coroutine: (coroutine.close(), scheduled.append(coroutine)))
     kwargs = {

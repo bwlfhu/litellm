@@ -3151,6 +3151,7 @@ all_litellm_params = (
     + [
         "metadata",
         "litellm_metadata",
+        "_litellm_routing_stats_metadata",
         "litellm_trace_id",
         "litellm_request_debug",
         "guardrails",
