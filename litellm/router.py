@@ -28,6 +28,7 @@ from typing import (
     Dict,
     FrozenSet,
     Generator,
+    Iterator,
     List,
     Literal,
     Optional,
@@ -2723,8 +2724,9 @@ class Router:
                         include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
                     )
                     if hasattr(fallback_response, "__next__"):
+                        fallback_iterator = cast(Iterator[Any], fallback_response)
                         prepared_hidden_params = Router._prepare_fallback_hidden_params(fallback_response)
-                        for fallback_item in fallback_response:  # type: ignore[operator]
+                        for fallback_item in fallback_iterator:
                             Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
                             yield fallback_item
                     else:
