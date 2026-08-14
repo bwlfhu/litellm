@@ -792,6 +792,10 @@ class DeepSeekAnthropicResponsesBridge:
             responses_api_request,
             accounting,
         )
+        # Router-owned requests defer dispatch until the fallback engine has
+        # returned. Stamp the result now so Router can identify the DeepSeek
+        # bridge response and finalize the single parent lifecycle.
+        _apply_parent_accounting(response_obj, accounting, kwargs.get("litellm_logging_obj"))
         assistant_content = response_obj._hidden_params.get("deepseek_assistant_content")
         if response_obj.status == "completed" and isinstance(assistant_content, list):
             session_messages = list(canonical.messages)

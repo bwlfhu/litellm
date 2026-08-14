@@ -4,6 +4,7 @@ from litellm.router_protocol import (
     DeploymentReasoningProtocol,
     _activate_router_protocol_context,
     _build_deployment_protocol_context,
+    _build_rate_snapshot,
     protocol_context_from_kwargs,
     resolve_deployment_protocol,
     sanitize_model_info,
@@ -67,3 +68,17 @@ def test_direct_sdk_private_factory_cannot_build_the_protocol():
     )
 
     assert context is None
+
+
+def test_router_rate_snapshot_uses_litellm_cache_price_field_names():
+    snapshot = _build_rate_snapshot(
+        {
+            "input_cost_per_token": 0.1,
+            "output_cost_per_token": 0.2,
+            "cache_read_input_token_cost": 0.03,
+            "cache_creation_input_token_cost": 0.04,
+        }
+    )
+
+    assert snapshot.cache_read_input_cost_per_token == 0.03
+    assert snapshot.cache_creation_input_cost_per_token == 0.04

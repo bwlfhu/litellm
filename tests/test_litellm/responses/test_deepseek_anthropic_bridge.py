@@ -181,6 +181,48 @@ async def test_deepseek_responses_non_stream_parent_accounting_uses_router_rate_
     assert logging_obj.failures == []
 
 
+@pytest.mark.asyncio
+async def test_router_owned_non_stream_bridge_stamps_accounting_for_parent_finalize():
+    logging_obj = _RecordingResponsesLogging()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_router_owned",
+                "content": [{"type": "text", "text": "answer"}],
+                "usage": {"input_tokens": 4, "output_tokens": 2, "cache_read_input_tokens": 1},
+            },
+        )
+
+    tracker = DeepSeekParentAccountingTracker()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context_with_rates_for("router-id", "router-attempt", 0.1, 0.2, 0.03),
+        _deepseek_parent_accounting_tracker=tracker,
+        _deepseek_parent_accounting_owner=True,
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+    await client.aclose()
+
+    assert response._hidden_params["deepseek_parent_accounting"]["attempt_count"] == 1
+    assert logging_obj.successes == []
+    await DeepSeekAnthropicResponsesBridge.finalize_router_success(
+        tracker=tracker,
+        response=response,
+        logging_obj=logging_obj,
+    )
+    assert logging_obj.successes == [response]
+
+
 def test_deepseek_responses_sync_bridge_uses_same_raw_reconstruction_core():
     requests: list[dict] = []
 

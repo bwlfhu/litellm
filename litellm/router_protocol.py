@@ -123,11 +123,19 @@ def _non_negative_rate(value: object) -> float:
 
 
 def _build_rate_snapshot(model_info: Mapping[str, object]) -> DeploymentRateSnapshot:
+    cache_read_rate = model_info.get(
+        "cache_read_input_token_cost",
+        model_info.get("cache_read_input_cost_per_token"),
+    )
+    cache_creation_rate = model_info.get(
+        "cache_creation_input_token_cost",
+        model_info.get("cache_creation_input_cost_per_token"),
+    )
     return DeploymentRateSnapshot(
         input_cost_per_token=_non_negative_rate(model_info.get("input_cost_per_token")),
         output_cost_per_token=_non_negative_rate(model_info.get("output_cost_per_token")),
-        cache_read_input_cost_per_token=_non_negative_rate(model_info.get("cache_read_input_cost_per_token")),
-        cache_creation_input_cost_per_token=_non_negative_rate(model_info.get("cache_creation_input_cost_per_token")),
+        cache_read_input_cost_per_token=_non_negative_rate(cache_read_rate),
+        cache_creation_input_cost_per_token=_non_negative_rate(cache_creation_rate),
     )
 
 
