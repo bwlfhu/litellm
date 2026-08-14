@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
+from inspect import currentframe
 from math import isfinite
 from typing import Mapping
 
@@ -45,6 +46,14 @@ _ACTIVE_ROUTER_PROTOCOL_CONTEXT: ContextVar[DeploymentProtocolContext | None] = 
 )
 
 
+def _called_from_router() -> bool:
+    frame = currentframe()
+    if frame is None or frame.f_back is None or frame.f_back.f_back is None:
+        return False
+    module_name: object = frame.f_back.f_back.f_globals.get("__name__")
+    return module_name == "litellm.router"
+
+
 def _non_negative_rate(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
@@ -57,9 +66,7 @@ def _build_rate_snapshot(model_info: Mapping[str, object]) -> DeploymentRateSnap
         input_cost_per_token=_non_negative_rate(model_info.get("input_cost_per_token")),
         output_cost_per_token=_non_negative_rate(model_info.get("output_cost_per_token")),
         cache_read_input_cost_per_token=_non_negative_rate(model_info.get("cache_read_input_cost_per_token")),
-        cache_creation_input_cost_per_token=_non_negative_rate(
-            model_info.get("cache_creation_input_cost_per_token")
-        ),
+        cache_creation_input_cost_per_token=_non_negative_rate(model_info.get("cache_creation_input_cost_per_token")),
     )
 
 
@@ -78,6 +85,8 @@ def _build_deployment_protocol_context(
     deployment_id: object,
     attempt_id: object,
 ) -> DeploymentProtocolContext | None:
+    if not _called_from_router():
+        return None
     protocol = model_info.get(_PROTOCOL_FIELD)
     if protocol != DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC.value:
         return None

@@ -93,6 +93,11 @@ from litellm.router_strategy.tag_based_routing import (
     get_deployments_for_tag,
     is_valid_deployment_tag,
 )
+from litellm.router_protocol import (
+    _activate_router_protocol_context,
+    _build_deployment_protocol_context,
+    sanitize_model_info,
+)
 from litellm.router_utils.add_retry_fallback_headers import (
     _HiddenParamsHost,
     add_fallback_headers_to_response,
@@ -3058,20 +3063,19 @@ class Router:
         """
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
-        from litellm.router_protocol import (
-            _build_deployment_protocol_context,
-            sanitize_model_info,
-        )
-
         raw_model_info = deployment.get("model_info", {})
         model_info = raw_model_info.copy()
         deployment_id = model_info.get("id")
         attempt_id = kwargs.get("litellm_call_id") or kwargs.get("litellm_trace_id") or deployment_id
-        protocol_context = _build_deployment_protocol_context(
-            raw_model_info,
-            deployment_id,
-            attempt_id,
-        ) if isinstance(raw_model_info, dict) else None
+        protocol_context = (
+            _build_deployment_protocol_context(
+                raw_model_info,
+                deployment_id,
+                attempt_id,
+            )
+            if isinstance(raw_model_info, dict)
+            else None
+        )
         kwargs.pop("_litellm_deployment_protocol_context", None)
         if protocol_context is not None:
             kwargs["_litellm_deployment_protocol_context"] = protocol_context
@@ -4574,32 +4578,25 @@ class Router:
             if custom_llm_provider is not None:
                 response_kwargs["custom_llm_provider"] = custom_llm_provider
 
-            from litellm.router_protocol import _activate_router_protocol_context
-
             with _activate_router_protocol_context(kwargs.get("_litellm_deployment_protocol_context")):
                 response = original_generic_function(**response_kwargs)
+                rpm_semaphore = self._get_client(
+                    deployment=deployment,
+                    kwargs=kwargs,
+                    client_type="max_parallel_requests",
+                )
 
-            rpm_semaphore = self._get_client(
-                deployment=deployment,
-                kwargs=kwargs,
-                client_type="max_parallel_requests",
-            )
-
-            if rpm_semaphore is not None and isinstance(rpm_semaphore, asyncio.Semaphore):
-                async with rpm_semaphore:
-                    """
-                    - Check rpm limits before making the call
-                    - If allowed, increment the rpm limit (allows global value to be updated, concurrency-safe)
-                    """
+                if rpm_semaphore is not None and isinstance(rpm_semaphore, asyncio.Semaphore):
+                    async with rpm_semaphore:
+                        await self.async_routing_strategy_pre_call_checks(
+                            deployment=deployment, parent_otel_span=parent_otel_span
+                        )
+                        response = await response  # type: ignore
+                else:
                     await self.async_routing_strategy_pre_call_checks(
                         deployment=deployment, parent_otel_span=parent_otel_span
                     )
                     response = await response  # type: ignore
-            else:
-                await self.async_routing_strategy_pre_call_checks(
-                    deployment=deployment, parent_otel_span=parent_otel_span
-                )
-                response = await response  # type: ignore
 
             self.success_calls[model_name] += 1
             verbose_router_logger.info(f"ageneric_api_call_with_fallbacks(model={model_name})\033[32m 200 OK\033[0m")
@@ -4691,6 +4688,13 @@ class Router:
         return response
 
     def _responses_with_fallbacks(self, original_function: Callable, **kwargs: Any) -> object:
+        if not kwargs.get("stream"):
+
+            async def async_original_function(**call_kwargs: object) -> object:
+                return original_function(**call_kwargs)
+
+            return run_async_function(self._aresponses_with_streaming_fallbacks, async_original_function, **kwargs)
+
         from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
         from litellm.responses.deepseek_streaming import DeepSeekAnthropicResponsesSyncStream
 
@@ -4775,8 +4779,6 @@ class Router:
                 custom_llm_provider = custom_llm_provider or inferred_custom_llm_provider
             except Exception:
                 custom_llm_provider = None
-
-            from litellm.router_protocol import _activate_router_protocol_context
 
             with _activate_router_protocol_context(kwargs.get("_litellm_deployment_protocol_context")):
                 response = original_function(

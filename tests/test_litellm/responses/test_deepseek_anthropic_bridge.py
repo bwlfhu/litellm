@@ -12,31 +12,29 @@ from litellm.responses.deepseek_session import (
     SpendLogDeepSeekResponsesSessionRepository,
     create_deepseek_responses_session,
 )
-from litellm.router_protocol import _build_deployment_protocol_context
+from litellm.router_protocol import DeploymentProtocolContext, DeploymentRateSnapshot, DeploymentReasoningProtocol
 
 
 def _context():
-    context = _build_deployment_protocol_context(
-        {"id": "deployment-a", "reasoning_protocol": "deepseek_anthropic", "max_input_tokens": 4096},
-        "deployment-a",
-        "attempt-a",
+    return DeploymentProtocolContext(
+        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
+        deployment_id="deployment-a",
+        attempt_id="attempt-a",
+        suffix_token_budget=4096,
+        rate_snapshot=DeploymentRateSnapshot(),
+        _provenance=object(),
     )
-    assert context is not None
-    return context
 
 
 def _context_with_suffix_budget(suffix_token_budget: int):
-    context = _build_deployment_protocol_context(
-        {
-            "id": "deployment-a",
-            "reasoning_protocol": "deepseek_anthropic",
-            "deepseek_reasoning_suffix_token_budget": suffix_token_budget,
-        },
-        "deployment-a",
-        "attempt-a",
+    return DeploymentProtocolContext(
+        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
+        deployment_id="deployment-a",
+        attempt_id="attempt-a",
+        suffix_token_budget=suffix_token_budget,
+        rate_snapshot=DeploymentRateSnapshot(),
+        _provenance=object(),
     )
-    assert context is not None
-    return context
 
 
 def _context_with_rates():
@@ -50,20 +48,18 @@ def _context_with_rates_for(
     output_cost: float,
     cache_read_cost: float,
 ):
-    context = _build_deployment_protocol_context(
-        {
-            "id": deployment_id,
-            "reasoning_protocol": "deepseek_anthropic",
-            "max_input_tokens": 4096,
-            "input_cost_per_token": input_cost,
-            "output_cost_per_token": output_cost,
-            "cache_read_input_cost_per_token": cache_read_cost,
-        },
-        deployment_id,
-        attempt_id,
+    return DeploymentProtocolContext(
+        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
+        deployment_id=deployment_id,
+        attempt_id=attempt_id,
+        suffix_token_budget=4096,
+        rate_snapshot=DeploymentRateSnapshot(
+            input_cost_per_token=input_cost,
+            output_cost_per_token=output_cost,
+            cache_read_input_cost_per_token=cache_read_cost,
+        ),
+        _provenance=object(),
     )
-    assert context is not None
-    return context
 
 
 def _unexpected_public_entrypoint(**kwargs):
@@ -267,7 +263,11 @@ async def test_deepseek_responses_bridge_preserves_reasoning_function_call_and_o
     second = await DeepSeekAnthropicResponsesBridge.response_api_handler(
         model="deepseek-v4-pro",
         input=[{"type": "function_call_output", "call_id": "call-1", "output": "value"}],
-        responses_api_request={"max_output_tokens": 32, "previous_response_id": first.id, "reasoning": {"effort": "high"}},
+        responses_api_request={
+            "max_output_tokens": 32,
+            "previous_response_id": first.id,
+            "reasoning": {"effort": "high"},
+        },
         custom_llm_provider="anthropic",
         _is_async=True,
         stream=False,
@@ -300,7 +300,9 @@ async def test_deepseek_responses_effort_none_rejects_complete_tool_history_with
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}]},
         ),
     )
-    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request, json={})))
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request, json={}))
+    )
     with pytest.raises(DeepSeekProtocolError, match="reasoning_mode_conflict"):
         await DeepSeekAnthropicResponsesBridge.response_api_handler(
             model="deepseek-v4-pro",
