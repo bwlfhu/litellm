@@ -58,6 +58,7 @@ from litellm.llms.openai.data_residency import infer_openai_data_residency
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.responses.main import *
 from litellm.types.router import GenericLiteLLMParams
+from litellm.router_protocol import protocol_context_from_kwargs
 from litellm.utils import (
     ProviderConfigManager,
     client,
@@ -1086,6 +1087,21 @@ def responses(
         )
         if _file_search_dispatch is not None:
             return _file_search_dispatch
+
+        protocol_context = protocol_context_from_kwargs(kwargs)
+        if protocol_context is not None and protocol_context.protocol.value == "deepseek_anthropic":
+            from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+
+            return DeepSeekAnthropicResponsesBridge.response_api_handler(
+                model=model,
+                input=input,
+                responses_api_request=response_api_optional_params,
+                custom_llm_provider=custom_llm_provider,
+                _is_async=_is_async,
+                stream=stream,
+                protocol_context=protocol_context,
+                **kwargs,
+            )
 
         if responses_api_provider_config is None or use_chat_completions_api is True:
             return litellm_completion_transformation_handler.response_api_handler(

@@ -130,6 +130,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             max_suffix_tokens=suffix_budget,
         )
         request_params["thinking"] = request_params.get("thinking", {"type": "enabled"})
+        deepseek_thinking = dict(request_params["thinking"])
+        deepseek_output_config = request_params.get("output_config")
         anthropic_messages_request = super().transform_anthropic_messages_request(
             model=model,
             messages=list(canonical.messages),
@@ -137,6 +139,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             litellm_params=litellm_params,
             headers=headers,
         )
+        anthropic_messages_request["thinking"] = deepseek_thinking
+        if isinstance(deepseek_output_config, dict):
+            anthropic_messages_request["output_config"] = deepseek_output_config
         if "tools" in anthropic_messages_request:
             anthropic_messages_request["tools"] = self._sanitize_tools_for_deepseek(anthropic_messages_request["tools"])
         return anthropic_messages_request
