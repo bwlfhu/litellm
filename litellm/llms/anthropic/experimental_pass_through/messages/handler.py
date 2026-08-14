@@ -38,6 +38,7 @@ from litellm.types.llms.anthropic_messages.anthropic_response import (
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
+from litellm.router_protocol import protocol_context_from_kwargs
 from litellm.utils import ProviderConfigManager, client, is_tool_diagnostics_enabled, log_tool_request_shape
 
 from ..utils import is_reasoning_auto_summary_enabled
@@ -536,7 +537,12 @@ def anthropic_messages_handler(
 
     anthropic_messages_provider_config: Optional[BaseAnthropicMessagesConfig] = None
 
-    if custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
+    protocol_context = protocol_context_from_kwargs(kwargs)
+    if protocol_context is not None and protocol_context.protocol.value == "deepseek_anthropic":
+        from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
+
+        anthropic_messages_provider_config = DeepSeekAnthropicMessagesConfig()
+    elif custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
         anthropic_messages_provider_config = ProviderConfigManager.get_provider_anthropic_messages_config(
             model=model,
             provider=litellm.LlmProviders(custom_llm_provider),

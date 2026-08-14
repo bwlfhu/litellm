@@ -3057,7 +3057,24 @@ class Router:
         """
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
-        model_info = deployment.get("model_info", {}).copy()
+        from litellm.router_protocol import (
+            build_deployment_protocol_context,
+            sanitize_model_info,
+        )
+
+        raw_model_info = deployment.get("model_info", {})
+        model_info = raw_model_info.copy()
+        deployment_id = model_info.get("id")
+        attempt_id = kwargs.get("litellm_call_id") or kwargs.get("litellm_trace_id") or deployment_id
+        protocol_context = build_deployment_protocol_context(
+            raw_model_info,
+            deployment_id,
+            attempt_id,
+        ) if isinstance(raw_model_info, dict) else None
+        kwargs.pop("_litellm_deployment_protocol_context", None)
+        if protocol_context is not None:
+            kwargs["_litellm_deployment_protocol_context"] = protocol_context
+        model_info = sanitize_model_info(model_info)
         deployment_litellm_model_name = deployment["litellm_params"]["model"]
         deployment_api_base = deployment["litellm_params"].get("api_base")
         deployment_model_name = deployment["model_name"]
@@ -3065,7 +3082,7 @@ class Router:
             deployment_pydantic_obj = self._handle_clientside_credential(
                 deployment=deployment, kwargs=kwargs, function_name=function_name
             )
-            model_info = deployment_pydantic_obj.model_info.model_dump()
+            model_info = sanitize_model_info(deployment_pydantic_obj.model_info.model_dump())
             deployment_litellm_model_name = deployment_pydantic_obj.litellm_params.model
             deployment_api_base = deployment_pydantic_obj.litellm_params.api_base
 
