@@ -5,9 +5,12 @@ import json
 import queue
 import threading
 from collections.abc import AsyncIterator
-from typing import Mapping
+from typing import Awaitable, Callable, Mapping
 
 import httpx
+
+
+DeepSeekStreamCompletionHandler = Callable[[Mapping[str, object]], Awaitable[None]]
 
 
 class DeepSeekAnthropicResponsesSSEDecoder:
@@ -191,20 +194,37 @@ class DeepSeekAnthropicResponsesSSEDecoder:
 
 
 class DeepSeekAnthropicResponsesAsyncStream:
-    def __init__(self, response: httpx.Response, model: str, response_id: str, owns_client: bool, client: httpx.AsyncClient):
+    def __init__(
+        self,
+        response: httpx.Response,
+        model: str,
+        response_id: str,
+        owns_client: bool,
+        client: httpx.AsyncClient,
+        on_completed: DeepSeekStreamCompletionHandler | None = None,
+    ):
         self._response = response
         self._decoder = DeepSeekAnthropicResponsesSSEDecoder(model, response_id)
         self._owns_client = owns_client
         self._client = client
         self._events = self._decoder.decode(response.aiter_lines())
         self._closed = False
+        self._on_completed = on_completed
 
     def __aiter__(self) -> "DeepSeekAnthropicResponsesAsyncStream":
         return self
 
     async def __anext__(self) -> dict[str, object]:
         try:
-            return await self._events.__anext__()
+            event = await self._events.__anext__()
+            response = event.get("response")
+            if (
+                event.get("type") == "response.completed"
+                and isinstance(response, Mapping)
+                and self._on_completed is not None
+            ):
+                await self._on_completed(response)
+            return event
         except StopAsyncIteration:
             await self.aclose()
             raise

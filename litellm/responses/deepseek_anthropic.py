@@ -382,6 +382,35 @@ def _anthropic_response_to_responses(
     return response
 
 
+def _responses_output_to_assistant_content(output: object) -> list[dict[str, object]]:
+    if not isinstance(output, list):
+        return []
+    content: list[dict[str, object]] = []
+    for item in output:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            thinking = _reasoning_text(item)
+            if thinking is not None:
+                content.append({"type": "thinking", "thinking": thinking})
+        elif item_type == "message":
+            content.extend(_text_blocks(item.get("content")))
+        elif item_type == "function_call":
+            call_id = item.get("call_id") or item.get("id")
+            name = item.get("name")
+            if isinstance(call_id, str) and call_id.strip() and isinstance(name, str) and name.strip():
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": _function_input(item),
+                    }
+                )
+    return content
+
+
 class DeepSeekAnthropicResponsesBridge:
     @classmethod
     def response_api_handler(
@@ -485,12 +514,24 @@ class DeepSeekAnthropicResponsesBridge:
                 await http_client.aclose()
             _raise_raw_failure(raw_result)
         if stream:
+            response_id = f"resp_ds_{int(time.time() * 1000)}"
+
+            async def save_completed_stream(response: Mapping[str, object]) -> None:
+                if response.get("status") != "completed":
+                    return
+                assistant_content = _responses_output_to_assistant_content(response.get("output"))
+                if assistant_content:
+                    session_messages = list(canonical.messages)
+                    session_messages.append({"role": "assistant", "content": assistant_content})
+                    DeepSeekResponsesSessionStore.save(response_id, session_messages)
+
             return DeepSeekAnthropicResponsesAsyncStream(
                 raw_result.response,
                 model,
-                f"resp_ds_{int(time.time() * 1000)}",
+                response_id,
                 owns_client,
                 http_client,
+                save_completed_stream,
             )
         payload = await _read_raw_payload(raw_result.response, owns_client, http_client)
         if not isinstance(payload, Mapping):

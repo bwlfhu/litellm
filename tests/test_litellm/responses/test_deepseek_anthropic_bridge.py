@@ -267,6 +267,62 @@ async def test_deepseek_responses_async_stream_uses_pure_decoder_and_completed_e
     assert events[-1]["response"]["status"] == "completed"
 
 
+@pytest.mark.asyncio
+async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_next_turn():
+    requests: list[dict] = []
+    sse = (
+        "event: content_block_start\n"
+        'data: {"index":0,"content_block":{"type":"thinking"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"index":0,"delta":{"type":"thinking_delta","thinking":"reason"}}\n\n'
+        "event: content_block_start\n"
+        'data: {"index":1,"content_block":{"type":"tool_use","id":"call-1","name":"lookup"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n'
+        "event: message_stop\n"
+        "data: {}\n\n"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(200, request=request, content=sse)
+        return httpx.Response(
+            200,
+            request=request,
+            json={"id": "resp_second", "content": [{"type": "text", "text": "done"}], "usage": {}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context(),
+        client=client,
+    )
+    events = [event async for event in stream]
+    response_id = events[-1]["response"]["id"]
+    await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input=[{"type": "function_call_output", "call_id": "call-1", "output": "value"}],
+        responses_api_request={"max_output_tokens": 32, "previous_response_id": response_id},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context(),
+        client=client,
+    )
+    await client.aclose()
+
+    assert len(requests) == 2
+    assert requests[1]["messages"][1]["content"][0] == {"type": "thinking", "thinking": "reason"}
+    assert requests[1]["messages"][2]["content"][0]["tool_use_id"] == "call-1"
+
+
 def test_deepseek_responses_sync_stream_worker_forwards_events():
     sse = b"event: message_stop\ndata: {}\n\n"
 
