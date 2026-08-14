@@ -20,6 +20,9 @@ class DeploymentProtocolContext:
     attempt_id: str
     _provenance: object
 
+    def is_router_provenanced(self) -> bool:
+        return self._provenance is _ROUTER_PROVENANCE
+
 
 def build_deployment_protocol_context(
     model_info: Mapping[str, object],
@@ -49,7 +52,7 @@ def resolve_deployment_protocol(
 ) -> DeploymentReasoningProtocol | None:
     if not isinstance(context, DeploymentProtocolContext):
         return None
-    if context._provenance is not _ROUTER_PROVENANCE:
+    if not context.is_router_provenanced():
         return None
     if deployment_id is not None and context.deployment_id != deployment_id:
         return None

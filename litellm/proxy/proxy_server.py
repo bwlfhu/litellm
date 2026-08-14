@@ -12635,6 +12635,10 @@ def _translate_model_name_for_response(model: dict) -> dict:
     model_info = model.get("model_info") or {}
     if not isinstance(model_info, dict):
         return model
+    from litellm.router_protocol import sanitize_model_info
+
+    model = {**model, "model_info": sanitize_model_info(model_info)}
+    model_info = model["model_info"]
     team_public = model_info.get("team_public_model_name")
     team_id = model_info.get("team_id")
     if not team_public or not team_id:
@@ -12753,6 +12757,8 @@ async def model_info_v1(
 
     if user_model is not None:
         # user is trying to get specific model from litellm router
+        from litellm.router_protocol import sanitize_model_info
+
         try:
             model_info: Dict = cast(Dict, litellm.get_model_info(model=user_model))
         except Exception:
@@ -12769,6 +12775,7 @@ async def model_info_v1(
             deployment_dict=_deployment_info_dict,
             excluded_keys={"litellm_credential_name"},
         )
+        _deployment_info_dict["model_info"] = sanitize_model_info(_deployment_info_dict.get("model_info", {}))
         return {"data": _deployment_info_dict}
 
     if llm_model_list is None:

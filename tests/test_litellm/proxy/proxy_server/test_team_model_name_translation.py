@@ -187,6 +187,27 @@ async def test_model_info_v1_list_path_translates_team_model_name(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_model_info_v1_user_model_sanitizes_protocol_field(monkeypatch):
+    monkeypatch.setattr(ps, "user_model", "deepseek-anthropic")
+    monkeypatch.setattr(
+        ps.litellm,
+        "get_model_info",
+        lambda **_: {
+            "reasoning_protocol": "deepseek_anthropic",
+            "id": "deployment-a",
+        },
+    )
+
+    response = await ps.model_info_v1(
+        user_api_key_dict=UserAPIKeyAuth(user_id="u", user_role=LitellmUserRoles.PROXY_ADMIN),
+        litellm_model_id=None,
+    )
+
+    assert response["data"]["model_info"]["id"] == "deployment-a"
+    assert "reasoning_protocol" not in response["data"]["model_info"]
+
+
+@pytest.mark.asyncio
 async def test_model_info_v1_unrestricted_key_returns_all_deployments(monkeypatch):
     """Unrestricted keys must see all router deployments (legacy v1 access logic)."""
     deployment = {
