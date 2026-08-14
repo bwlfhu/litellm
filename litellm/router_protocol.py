@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from inspect import currentframe
 from math import isfinite
-from typing import Callable, Mapping
+from typing import Callable, Mapping, cast
 
 
 class DeploymentReasoningProtocol(StrEnum):
@@ -37,6 +37,9 @@ class DeploymentProtocolContext:
     def is_router_provenanced(self) -> bool:
         return _is_router_provenanced(self)
 
+    def has_provenance(self, provenance: object) -> bool:
+        return self._provenance is provenance
+
 
 def _called_from_router() -> bool:
     frame = currentframe()
@@ -60,7 +63,8 @@ class _RouterProtocolContextActivation:
 
     def __enter__(self) -> None:
         if _called_from_router() and self._is_router_provenanced(self._context):
-            self._token = self._active_context.set(self._context)
+            context = cast(DeploymentProtocolContext, self._context)
+            self._token = self._active_context.set(context)
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         if self._token is not None:
@@ -79,7 +83,7 @@ def _protocol_context_runtime() -> tuple[
     )
 
     def is_router_provenanced(context: object) -> bool:
-        return isinstance(context, DeploymentProtocolContext) and context._provenance is provenance
+        return isinstance(context, DeploymentProtocolContext) and context.has_provenance(provenance)
 
     def build(
         model_info: Mapping[str, object], deployment_id: object, attempt_id: object
