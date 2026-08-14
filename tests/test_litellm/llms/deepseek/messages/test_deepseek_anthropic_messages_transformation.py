@@ -5,6 +5,10 @@ from litellm.llms.anthropic.experimental_pass_through.messages.transformation im
 from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
 )
+from litellm.llms.deepseek.anthropic_protocol import (
+    DeepSeekProtocolError,
+    compile_deepseek_anthropic_history,
+)
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
 
@@ -187,3 +191,120 @@ def test_deepseek_anthropic_messages_preserves_thinking_and_sanitizes_custom_too
         "input_schema": {"type": "object"},
     }
     assert request["tools"][1]["type"] == "web_search_20260209"
+
+
+def test_deepseek_canonical_history_preserves_parallel_tool_reasoning_and_digest():
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "reason", "signature": "must-not-leak"},
+                {"type": "tool_use", "id": "call-a", "name": "a", "input": {}},
+                {"type": "tool_use", "id": "call-b", "name": "b", "input": {}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-b", "content": "b"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-a", "content": "a"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "follow up"}, {"type": "text", "text": "done"}]},
+        {"role": "user", "content": "continue"},
+    ]
+
+    compiled = compile_deepseek_anthropic_history(messages)
+
+    assert compiled.history_reasoning_required is True
+    assert compiled.suffix is not None
+    assert compiled.suffix.call_ids == ("call-a", "call-b")
+    assert compiled.suffix.digest
+    assert compiled.messages[1]["content"][0] == {"type": "thinking", "thinking": "reason"}
+    assert messages[1]["content"][0]["signature"] == "must-not-leak"
+
+
+def test_deepseek_canonical_history_rejects_missing_reasoning_redaction_and_disabled_mode():
+    base = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call-a", "name": "a", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-a", "content": "a"}]},
+    ]
+
+    for thinking, expected in ((None, "reasoning_history_missing"), ({"type": "disabled"}, "reasoning_history_missing")):
+        try:
+            compile_deepseek_anthropic_history(base, thinking)
+        except DeepSeekProtocolError as error:
+            assert error.code == expected
+        else:
+            raise AssertionError("missing reasoning must fail")
+    redacted = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "tool_use", "id": "call-a", "name": "a", "input": {}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-a", "content": "a"}]},
+    ]
+    try:
+        compile_deepseek_anthropic_history(redacted)
+    except DeepSeekProtocolError as error:
+        assert error.code == "reasoning_history_unrecoverable"
+    else:
+        raise AssertionError("redacted tool history must fail")
+
+
+def test_deepseek_canonical_history_rejects_bad_graph_digest_and_budget():
+    complete = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "reason"},
+                {"type": "tool_use", "id": "call-a", "name": "a", "input": {}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-a", "content": "a"}]},
+    ]
+    compiled = compile_deepseek_anthropic_history(complete)
+    assert compiled.suffix is not None
+    cases = (
+        ({"version": 1, "digest": "incorrect"}, "reasoning_history_unrecoverable"),
+        (None, "reasoning_history_context_exhausted"),
+    )
+    for manifest, expected in cases:
+        try:
+            compile_deepseek_anthropic_history(
+                complete,
+                manifest=manifest,
+                max_suffix_tokens=0 if manifest is None else None,
+            )
+        except DeepSeekProtocolError as error:
+            assert error.code == expected
+        else:
+            raise AssertionError("invalid suffix must fail")
+    orphan = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "missing", "content": "x"}]}]
+    try:
+        compile_deepseek_anthropic_history(orphan)
+    except DeepSeekProtocolError as error:
+        assert error.code == "tool_result_orphaned"
+    else:
+        raise AssertionError("orphaned tool result must fail")
+    consecutive = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "one"},
+                {"type": "tool_use", "id": "call-a", "name": "a", "input": {}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "two"},
+                {"type": "tool_use", "id": "call-b", "name": "b", "input": {}},
+            ],
+        },
+    ]
+    try:
+        compile_deepseek_anthropic_history(consecutive)
+    except DeepSeekProtocolError as error:
+        assert error.code == "tool_history_incomplete"
+    else:
+        raise AssertionError("consecutive unfinished tool calls must fail")
