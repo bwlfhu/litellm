@@ -32,6 +32,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
 )
 from litellm.llms.base_llm.responses.transformation import BaseResponsesAPIConfig
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolNonFallbackError
 from litellm.responses.litellm_completion_transformation.handler import (
     LiteLLMCompletionTransformationHandler,
 )
@@ -599,6 +600,8 @@ async def aresponses(
             raise ValueError(f"Got an unexpected None response from the Responses API: {response}")
 
         return response
+    except DeepSeekProtocolNonFallbackError:
+        raise
     except Exception as e:
         raise litellm.exception_type(
             model=model,
@@ -1228,6 +1231,8 @@ def responses(
             response._hidden_params["custom_llm_provider"] = custom_llm_provider
 
         return response
+    except DeepSeekProtocolNonFallbackError:
+        raise
     except Exception as e:
         raise litellm.exception_type(
             model=model,

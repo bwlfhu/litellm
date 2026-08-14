@@ -95,7 +95,7 @@ async def test_router_aresponses_keeps_protocol_context_and_aggregates_pre_outpu
         )
         if context.deployment_id == "primary-id":
             raise DeepSeekUpstreamError("connect_error", None)
-        return ResponsesAPIResponse(
+        response = ResponsesAPIResponse(
             id="resp_fallback",
             created_at=0,
             model=model,
@@ -104,6 +104,9 @@ async def test_router_aresponses_keeps_protocol_context_and_aggregates_pre_outpu
             status="completed",
             usage={"input_tokens": 10, "output_tokens": 4, "total_tokens": 14},
         )
+        # Simulate the DeepSeek bridge's result-side accounting capability.
+        response._hidden_params["deepseek_parent_accounting"] = {"attempt_count": 0}
+        return response
 
     monkeypatch.setattr("litellm.aresponses", fake_aresponses)
     router = Router(
@@ -194,3 +197,119 @@ def test_router_responses_falls_back_before_output(monkeypatch):
 
     assert response.id == "resp_sync_fallback"
     assert calls == ["primary-id", "backup-id"]
+
+
+def _router_with_deepseek_backup() -> Router:
+    return Router(
+        model_list=[
+            {
+                "model_name": "primary",
+                "litellm_params": {"model": "anthropic/primary"},
+                "model_info": {"id": "primary-id", "reasoning_protocol": "deepseek_anthropic"},
+            },
+            {
+                "model_name": "backup",
+                "litellm_params": {"model": "anthropic/backup"},
+                "model_info": {"id": "backup-id", "reasoning_protocol": "deepseek_anthropic"},
+            },
+        ],
+        num_retries=0,
+    )
+
+
+def _invalid_deepseek_tool_history() -> list[dict[str, object]]:
+    return [{"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"}]
+
+
+@pytest.mark.asyncio
+async def test_router_aresponses_does_not_fallback_after_public_protocol_error_mapping():
+    router = _router_with_deepseek_backup()
+
+    with pytest.raises(DeepSeekProtocolNonFallbackError):
+        await router.aresponses(
+            model="primary",
+            input=_invalid_deepseek_tool_history(),
+            reasoning={"effort": "high"},
+            fallbacks=["backup"],
+        )
+
+    assert router.total_calls["anthropic/primary"] == 1
+    assert router.total_calls["anthropic/backup"] == 0
+
+
+def test_router_responses_does_not_fallback_after_public_protocol_error_mapping():
+    router = _router_with_deepseek_backup()
+
+    with pytest.raises(DeepSeekProtocolNonFallbackError):
+        router.responses(
+            model="primary",
+            input=_invalid_deepseek_tool_history(),
+            reasoning={"effort": "high"},
+            fallbacks=["backup"],
+        )
+
+    assert router.total_calls["anthropic/primary"] == 1
+    assert router.total_calls["anthropic/backup"] == 0
+
+
+@pytest.mark.asyncio
+async def test_router_aresponses_cross_provider_success_does_not_finalize_deepseek_parent(
+    monkeypatch,
+):
+    """A native Responses fallback owns its own logging/cost lifecycle."""
+    calls: list[str] = []
+    logging_obj = _RecordingResponsesLogging()
+
+    async def fake_aresponses(*, model: str, **kwargs: object) -> ResponsesAPIResponse:
+        context = protocol_context_from_kwargs(kwargs)
+        calls.append(model)
+        if context is not None:
+            tracker = kwargs["_deepseek_parent_accounting_tracker"]
+            assert isinstance(tracker, DeepSeekParentAccountingTracker)
+            tracker.record_attempt(
+                build_attempt_snapshot(
+                    model=model,
+                    deployment_id=context.deployment_id,
+                    usage={},
+                    rates=context.rate_snapshot,
+                )
+            )
+            raise DeepSeekUpstreamError("connect_error", None)
+        return ResponsesAPIResponse(
+            id="native-fallback",
+            created_at=0,
+            model=model,
+            object="response",
+            output=[],
+            status="completed",
+            usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
+
+    monkeypatch.setattr("litellm.aresponses", fake_aresponses)
+    router = Router(
+        model_list=[
+            {
+                "model_name": "primary",
+                "litellm_params": {"model": "anthropic/primary"},
+                "model_info": {"id": "primary-id", "reasoning_protocol": "deepseek_anthropic"},
+            },
+            {
+                "model_name": "backup",
+                "litellm_params": {"model": "openai/backup"},
+                "model_info": {"id": "backup-id"},
+            },
+        ],
+        num_retries=0,
+    )
+
+    response = await router.aresponses(
+        model="primary",
+        input="question",
+        fallbacks=["backup"],
+        litellm_logging_obj=logging_obj,
+    )
+
+    assert calls == ["anthropic/primary", "openai/backup"]
+    assert response._hidden_params.get("deepseek_parent_accounting") is None
+    assert response._hidden_params.get("response_cost") is None
+    assert logging_obj.successes == []
