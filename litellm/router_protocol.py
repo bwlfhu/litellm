@@ -1,20 +1,17 @@
 """Router-authored protocol capabilities for provider-specific request paths."""
 
-from collections.abc import Generator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from enum import StrEnum
 from inspect import currentframe
 from math import isfinite
-from typing import Mapping
+from typing import Callable, Mapping
 
 
 class DeploymentReasoningProtocol(StrEnum):
     DEEPSEEK_ANTHROPIC = "deepseek_anthropic"
 
 
-_ROUTER_PROVENANCE = object()
 _PROTOCOL_FIELD = "reasoning_protocol"
 _SUFFIX_TOKEN_BUDGET_FIELD = "deepseek_reasoning_suffix_token_budget"
 _PROTOCOL_PRIVATE_MODEL_INFO_FIELDS = frozenset({_PROTOCOL_FIELD, _SUFFIX_TOKEN_BUDGET_FIELD})
@@ -38,22 +35,80 @@ class DeploymentProtocolContext:
     _provenance: object
 
     def is_router_provenanced(self) -> bool:
-        return self._provenance is _ROUTER_PROVENANCE
+        return _is_router_provenanced(self)
 
 
 def _called_from_router() -> bool:
     frame = currentframe()
-    while frame is not None:
-        module_name: object = frame.f_globals.get("__name__")
-        if module_name == "litellm.router":
-            return True
-        frame = frame.f_back
-    return False
+    if frame is None or frame.f_back is None or frame.f_back.f_back is None:
+        return False
+    module_name: object = frame.f_back.f_back.f_globals.get("__name__")
+    return module_name == "litellm.router"
 
 
-_ACTIVE_ROUTER_PROTOCOL_CONTEXT: ContextVar[DeploymentProtocolContext | None] = ContextVar(
-    "active_router_protocol_context", default=None
-)
+class _RouterProtocolContextActivation:
+    def __init__(
+        self,
+        context: object,
+        active_context: ContextVar[DeploymentProtocolContext | None],
+        is_router_provenanced: Callable[[object], bool],
+    ) -> None:
+        self._context = context
+        self._active_context = active_context
+        self._is_router_provenanced = is_router_provenanced
+        self._token: Token[DeploymentProtocolContext | None] | None = None
+
+    def __enter__(self) -> None:
+        if _called_from_router() and self._is_router_provenanced(self._context):
+            self._token = self._active_context.set(self._context)
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        if self._token is not None:
+            self._active_context.reset(self._token)
+
+
+def _protocol_context_runtime() -> tuple[
+    Callable[[Mapping[str, object], object, object], DeploymentProtocolContext | None],
+    Callable[[object], _RouterProtocolContextActivation],
+    Callable[[], DeploymentProtocolContext | None],
+    Callable[[object], bool],
+]:
+    provenance = object()
+    active_context: ContextVar[DeploymentProtocolContext | None] = ContextVar(
+        "active_router_protocol_context", default=None
+    )
+
+    def is_router_provenanced(context: object) -> bool:
+        return isinstance(context, DeploymentProtocolContext) and context._provenance is provenance
+
+    def build(
+        model_info: Mapping[str, object], deployment_id: object, attempt_id: object
+    ) -> DeploymentProtocolContext | None:
+        if not _called_from_router():
+            return None
+        protocol = model_info.get(_PROTOCOL_FIELD)
+        if protocol != DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC.value:
+            return None
+        if not isinstance(deployment_id, str) or not deployment_id:
+            return None
+        if not isinstance(attempt_id, str) or not attempt_id:
+            return None
+        return DeploymentProtocolContext(
+            protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
+            deployment_id=deployment_id,
+            attempt_id=attempt_id,
+            suffix_token_budget=_suffix_token_budget(model_info),
+            rate_snapshot=_build_rate_snapshot(model_info),
+            _provenance=provenance,
+        )
+
+    def activate(context: object) -> _RouterProtocolContextActivation:
+        return _RouterProtocolContextActivation(context, active_context, is_router_provenanced)
+
+    def active() -> DeploymentProtocolContext | None:
+        return active_context.get()
+
+    return build, activate, active, is_router_provenanced
 
 
 def _non_negative_rate(value: object) -> float:
@@ -82,44 +137,12 @@ def _suffix_token_budget(model_info: Mapping[str, object]) -> int:
     return 0
 
 
-def _build_deployment_protocol_context(
-    model_info: Mapping[str, object],
-    deployment_id: object,
-    attempt_id: object,
-) -> DeploymentProtocolContext | None:
-    if not _called_from_router():
-        return None
-    protocol = model_info.get(_PROTOCOL_FIELD)
-    if protocol != DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC.value:
-        return None
-    if not isinstance(deployment_id, str) or not deployment_id:
-        return None
-    if not isinstance(attempt_id, str) or not attempt_id:
-        return None
-    return DeploymentProtocolContext(
-        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
-        deployment_id=deployment_id,
-        attempt_id=attempt_id,
-        suffix_token_budget=_suffix_token_budget(model_info),
-        rate_snapshot=_build_rate_snapshot(model_info),
-        _provenance=_ROUTER_PROVENANCE,
-    )
-
-
-@contextmanager
-def _activate_router_protocol_context(context: object) -> Generator[None, None, None]:
-    if (
-        not _called_from_router()
-        or not isinstance(context, DeploymentProtocolContext)
-        or not context.is_router_provenanced()
-    ):
-        yield
-        return
-    token = _ACTIVE_ROUTER_PROTOCOL_CONTEXT.set(context)
-    try:
-        yield
-    finally:
-        _ACTIVE_ROUTER_PROTOCOL_CONTEXT.reset(token)
+(
+    _build_deployment_protocol_context,
+    _activate_router_protocol_context,
+    _active_router_protocol_context,
+    _is_router_provenanced,
+) = _protocol_context_runtime()
 
 
 def resolve_deployment_protocol(
@@ -152,7 +175,7 @@ def protocol_context_from_kwargs(
     candidate = kwargs.get("_litellm_deployment_protocol_context")
     if not isinstance(candidate, DeploymentProtocolContext):
         return None
-    if _ACTIVE_ROUTER_PROTOCOL_CONTEXT.get() is not candidate:
+    if _active_router_protocol_context() is not candidate:
         return None
     if resolve_deployment_protocol(candidate, deployment_id=deployment_id, attempt_id=attempt_id) is None:
         return None
