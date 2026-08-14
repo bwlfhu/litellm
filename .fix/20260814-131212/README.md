@@ -163,7 +163,7 @@ Responses endpoint
 -> shared session reconstruction + canonical validator
 -> _prepare_anthropic_messages_wire_request()
    -> DeepSeekAnthropicMessagesConfig.transform_anthropic_messages_request() exactly once
--> _async_anthropic_messages_raw_transport(prebuilt_request)
+-> DeepSeekResponsesRawTransport.send(prebuilt_request)
 -> configured DeepSeek /v1/messages
 -> raw Anthropic JSON/SSE
 -> DeepSeekAnthropicResponsesBridge response/stream transformation + final accounting
@@ -171,16 +171,17 @@ Responses endpoint
 
 不能把预编译 body 传给现有 [`BaseLLMHTTPHandler.anthropic_messages_handler()`](/home/allcam/projects/litellm/litellm/llms/custom_httpx/llm_http_handler.py:2407)：它会在 [`async_anthropic_messages_handler():2109`](/home/allcam/projects/litellm/litellm/llms/custom_httpx/llm_http_handler.py:2109) 再次调用 config transform，并在非流式响应进入 [`_finalize_anthropic_messages_response():2295`](/home/allcam/projects/litellm/litellm/llms/custom_httpx/llm_http_handler.py:2295)。这会重复编译并把 Anthropic agentic/finalize 生命周期混入 Responses
 
-从当前 handler 提取两个内部、强类型且不可从 public API 选择的 primitive：
+从当前 handler 提取一个共享的 request-preparation primitive，并定义两种内部、强类型且不可从 public API 选择的 transport strategy：
 
-1. `_prepare_anthropic_messages_wire_request(...) -> PreparedAnthropicMessagesWireRequest`：复用环境校验、header 过滤、`DeepSeekAnthropicMessagesConfig` transform、URL、签名、序列化和 timeout 解析；返回冻结的 prebuilt body bytes/URL/headers/signed body/timeout，config transform 只能发生一次。生成后 body bytes、headers、签名和 URL 均不可变
-2. `_async_anthropic_messages_raw_transport(prepared_request, ...) -> httpx.Response`：DeepSeek Path B 只发送一次冻结的 HTTP 请求并返回未做 provider response transform/finalize 的 raw response；初始实现明确禁用所有会改变请求体的 HTTP error retry。不得调用 `transform_anthropic_messages_request_on_http_error()`、删除 thinking block、重签名、原地修改 prebuilt request、更新 `logging_obj.model_call_details`、重复 `pre_call` 或写 retry body。未来若增加连接类 retry，也只能重放完全相同的 body bytes、headers、签名和 URL，且不得重复任何 logging/accounting 生命周期。该 primitive 不调用 `update_from_kwargs`、Anthropic response transform、agentic hooks、fake stream、success/failure hook、Usage、cost 或 SpendLog；上游 400（包括 signature 类 400）原样交给 Responses accounting owner
+1. `_prepare_anthropic_messages_wire_request(...) -> PreparedAnthropicMessagesWireRequest`：复用环境校验、header 过滤、`DeepSeekAnthropicMessagesConfig` transform、URL、签名、序列化和 timeout 解析；每个 attempt 返回冻结的 prebuilt body bytes/URL/headers/signed body/timeout，单个 attempt 内 config transform 只能发生一次。生成后该 attempt 的 body bytes、headers、签名和 URL 均不可变
+2. `ClaudeAnthropicMessagesTransport`：原生 `/v1/messages` 继续保留 Claude 现有的签名恢复策略。签名类 400 可以触发第二次 attempt，但必须先从未修改的 canonical request 删除无效 Claude thinking block，再重新调用 `_prepare_anthropic_messages_wire_request()` 生成新的冻结 request；不得把该可变恢复策略暴露给 DeepSeek Path B
+3. `DeepSeekResponsesRawTransport`：公共 `/v1/responses` 只发送一次冻结的 HTTP 请求并返回未做 provider response transform/finalize 的 raw response。明确禁用所有会改变请求体的 HTTP error retry，不得调用 `transform_anthropic_messages_request_on_http_error()`、删除 thinking block、重签名、原地修改 prebuilt request、更新 `logging_obj.model_call_details`、重复 `pre_call` 或写 retry body。未来若增加连接类 retry，也只能重放完全相同的 body bytes、headers、签名和 URL，且不得重复任何 logging/accounting 生命周期。该 transport 不调用 `update_from_kwargs`、Anthropic response transform、agentic hooks、fake stream、success/failure hook、Usage、cost 或 SpendLog；上游 400（包括 signature 类 400）原样交给 Responses accounting owner
 
-原生 Messages handler 改为组合这两个 primitive，再继续执行原有 Anthropic response transform、stream wrapper 和 finalize，保持路径 A 行为。Responses bridge 也组合相同 primitive，但由 Responses logging owner 在 raw transport 前执行一次 provider pre-call，并直接解析 raw JSON；不重新执行 Router，也不进入 Anthropic finalize
+原生 Messages handler 只复用共享的 request preparation，并通过 `ClaudeAnthropicMessagesTransport` 保留现有签名恢复和重新 prepare 行为，再继续执行原有 Anthropic response transform、stream wrapper 和 finalize，保持路径 A 行为。Responses bridge 复用同一 request preparation，但只能调用 `DeepSeekResponsesRawTransport`；由 Responses logging owner 在 raw transport 前执行一次 provider pre-call，并直接解析 raw JSON，不重新执行 Router，也不进入 Anthropic finalize
 
 Responses streaming 必须使用独立的 `DeepSeekAnthropicResponsesSSEDecoder` 纯 SSE decoder。它只负责 Anthropic SSE framing、reasoning/text/tool delta 累计和 Responses event 编码，不得实例化 `BaseAnthropicMessagesStreamingIterator`，不得调用 `PassThroughStreamingHandler` 或 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ`，不得标记 `/v1/messages` pass-through route，也不得执行任何 success/failure logging、Usage、cost 或 SpendLog。完成事件中的累计 reasoning 由 Responses bridge 交给唯一 accounting owner；decoder 本身不保存跨请求 session，也不拥有终态生命周期
 
-wire-level fake transport 必须断言 config transform 和 HTTP request 各一次，唯一出站 URL 是已选 deployment 的 `/v1/messages`，body 含所需无签名 thinking，且内部 protocol 字段不在 body/header/metadata 中。streaming 测试还必须对 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 和 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ` 设置 fail-fast spy，断言三者均未调用；签名类 400 测试必须断言实际请求 body bytes 与 frozen prepared body 完全一致、请求次数为一次、config transform 只调用一次，并且没有 body mutation、重签名、retry logging 或成功 SpendLog。若未来启用连接类重试，测试必须对每个 attempt 断言 body bytes、headers、签名和 URL 完全一致
+wire-level fake transport 必须断言 DeepSeek config transform 和首个 HTTP request 各一次，唯一出站 URL 是已选 deployment 的 `/v1/messages`，body 含所需无签名 thinking，且内部 protocol 字段不在 body/header/metadata 中。streaming 测试还必须对 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 和 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ` 设置 fail-fast spy，断言三者均未调用。两组 retry 测试必须互斥：Claude signature 类 400 允许第二次发送，断言第二次 request 来自重新 prepare 的已清理 Claude body 并最终成功；DeepSeek 对等 400 只能发送一次，断言实际请求 body bytes 与 frozen prepared body 完全一致、config transform 只调用一次、没有 body mutation、重签名、retry logging 或成功 SpendLog。若未来启用连接类重试，DeepSeek 测试必须对每个 attempt 断言 body bytes、headers、签名和 URL 完全一致
 
 #### 5.4.2 canonical 转换
 
@@ -200,9 +201,9 @@ wire-level fake transport 必须断言 config transform 和 HTTP request 各一�
 
 为 `previous_response_id` 持久化/读取的完整 Responses output 必须包含 reasoning item。显式 input 自身已包含完整 canonical history 时不依赖 session；一旦请求需要 response id 补全历史，以下情况在 sync/async 都返回相同的 `reasoning_history_unrecoverable` 400：未配置 session DB、SpendLog 不存在、cold-storage object 缺失/不可读、response id 不存在、已存 output 缺 reasoning。现有“session 为空时只保留本轮新 input”的宽松分支不能用于 `deepseek_anthropic`
 
-新增 raw transport 只提供 async 网络实现。非流式 sync bridge 用 `run_async_function()` 覆盖从共享 request preparation、raw HTTP 到 Responses response transformation 的整个 coroutine，不调用完整 Messages handler。sync streaming 不能在临时 loop 中取得 raw async stream 后关闭 loop；新增专用 sync Responses iterator，由一个 worker thread 持有同一 event loop 直至上游 response/iterator 完成、失败或取消，通过有界 queue 逐 event 转发，并在 close、客户端断开和异常时取消 task、关闭 response 和 join thread。HTTP proxy 的 async endpoint 继续直接消费 raw async stream，不经过该 sync wrapper
+DeepSeek raw transport 只提供 async 网络实现。非流式 sync bridge 用 `run_async_function()` 覆盖从共享 request preparation、`DeepSeekResponsesRawTransport` 到 Responses response transformation 的整个 coroutine，不调用完整 Messages handler。sync streaming 不能在临时 loop 中取得 raw async stream 后关闭 loop；新增专用 sync Responses iterator，由一个 worker thread 持有同一 event loop 直至上游 response/iterator 完成、失败或取消，通过有界 queue 逐 event 转发，并在 close、客户端断开和异常时取消 task、关闭 response 和 join thread。HTTP proxy 的 async endpoint 继续直接消费 DeepSeek raw async stream，不经过该 sync wrapper
 
-sync 与 async 都先调用同一个 canonical `prepare_request()`，再调用同一个 wire preparation、raw transport 和 Responses response codec。测试必须分别覆盖非流式与流式两轮：第一轮 reasoning 被保存，第二轮由 `previous_response_id` 重建到同一 assistant 节点，最终 wire body 完全一致；并对无 DB、cold storage 缺失和未知 response id 做参数化等价断言
+sync 与 async 都先调用同一个 canonical `prepare_request()`，再调用同一个 wire preparation、`DeepSeekResponsesRawTransport` 和 Responses response codec。测试必须分别覆盖非流式与流式两轮：第一轮 reasoning 被保存，第二轮由 `previous_response_id` 重建到同一 assistant 节点，最终 wire body 完全一致；并对无 DB、cold storage 缺失和未知 response id 做参数化等价断言
 
 #### 5.4.4 单次日志与计费生命周期
 
@@ -339,12 +340,13 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 
 ### Step 3：抽取 Path B 的冻结 wire/raw transport
 
-1. 从现有 Anthropic handler 提取 `_prepare_anthropic_messages_wire_request()`，使 config transform、序列化、签名和 URL 只执行一次并返回冻结对象
-2. 增加 `_async_anthropic_messages_raw_transport()`，只负责发送冻结请求和返回 raw response/stream，不进入 Anthropic response finalize 或 accounting hook
-3. DeepSeek Path B 初始版本禁用 HTTP error retry；明确禁止 `transform_anthropic_messages_request_on_http_error()`、删 thinking、重签名和 retry logging
-4. 增加 signature 类 400 测试，断言请求次数为一次、实际 body bytes 与 frozen body 相同、无 body mutation、无重复 pre-call/SpendLog
+1. 从现有 Anthropic handler 提取 `_prepare_anthropic_messages_wire_request()`，使每个 attempt 的 config transform、序列化、签名和 URL 只执行一次并返回冻结对象
+2. 原生 Messages 继续使用 `ClaudeAnthropicMessagesTransport` 的可变签名恢复；签名类 400 后从 canonical request 清理 Claude thinking，再重新 prepare，不能复用已发送的 frozen request
+3. 为 Path B 增加独立 `DeepSeekResponsesRawTransport`，只负责发送一次冻结请求和返回 raw response/stream，不进入 Anthropic response finalize 或 accounting hook
+4. DeepSeek Path B 初始版本禁用 HTTP error retry；明确禁止 `transform_anthropic_messages_request_on_http_error()`、删 thinking、重签名和 retry logging
+5. 增加互斥测试：Claude signature 类 400 第二次重新 prepare 后成功；DeepSeek 对等 400 始终只发送一次冻结 body，且无 body mutation、重复 pre-call 或 SpendLog
 
-**Step 3 门禁**：config transform 和 HTTP request 各一次，raw transport 不改变请求，失败由调用方接管；原生 Messages 既有 handler 测试全部通过
+**Step 3 门禁**：DeepSeek config transform 和首个 HTTP request 各一次，DeepSeek raw transport 不改变请求且失败由调用方接管；Claude signature recovery 第二次请求来自新的 prepare；原生 Messages 既有 handler 测试全部通过
 
 ### Step 4：实现公共 `/v1/responses` 非流式桥接
 
@@ -366,7 +368,7 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 4. 确保 reasoning delta 同时进入对外 event、completed response、session history 和唯一 accounting payload
 5. 增加异步/同步流式测试和三个 pass-through 组件的 fail-fast spy
 
-建议提交：`test(responses): cover deepseek reasoning session and fallback`
+建议提交：`fix(responses): decode deepseek anthropic streams without pass-through logging`、`test(responses): cover deepseek anthropic stream lifecycle`
 
 **Step 5 门禁**：stream completed、首 token 前失败、流中失败和取消路径均只有一个终态生命周期；无重复 success handler、SpendLog 或 cost
 
