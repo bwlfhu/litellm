@@ -364,7 +364,8 @@ def _anthropic_response_to_responses(
     accounting: ParentAccounting,
 ) -> ResponsesAPIResponse:
     response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"resp_ds_{int(time.time() * 1000)}"
-    content = payload.get("content") if isinstance(payload.get("content"), list) else []
+    content_value = payload.get("content")
+    content: list[object] = content_value if isinstance(content_value, list) else []
     output: list[dict[str, object]] = []
     assistant_content: list[dict[str, object]] = []
     for block in content:
