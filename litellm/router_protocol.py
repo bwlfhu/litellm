@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from inspect import currentframe
 from math import isfinite
+import asyncio
 from typing import Callable, Mapping, cast
 
 
@@ -14,7 +15,10 @@ class DeploymentReasoningProtocol(StrEnum):
 
 _PROTOCOL_FIELD = "reasoning_protocol"
 _SUFFIX_TOKEN_BUDGET_FIELD = "deepseek_reasoning_suffix_token_budget"
-_PROTOCOL_PRIVATE_MODEL_INFO_FIELDS = frozenset({_PROTOCOL_FIELD, _SUFFIX_TOKEN_BUDGET_FIELD})
+_CONTEXT_TOKEN_BUDGET_FIELD = "deepseek_reasoning_context_token_budget"
+_PROTOCOL_PRIVATE_MODEL_INFO_FIELDS = frozenset(
+    {_PROTOCOL_FIELD, _SUFFIX_TOKEN_BUDGET_FIELD, _CONTEXT_TOKEN_BUDGET_FIELD}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,7 @@ class DeploymentProtocolContext:
     suffix_token_budget: int
     rate_snapshot: DeploymentRateSnapshot
     _provenance: object
+    context_token_budget: int = 0
 
     def is_router_provenanced(self) -> bool:
         return _is_router_provenanced(self)
@@ -54,21 +59,33 @@ class _RouterProtocolContextActivation:
         self,
         context: object,
         active_context: ContextVar[DeploymentProtocolContext | None],
+        active_owner: ContextVar[object | None],
         is_router_provenanced: Callable[[object], bool],
     ) -> None:
         self._context = context
         self._active_context = active_context
+        self._active_owner = active_owner
         self._is_router_provenanced = is_router_provenanced
         self._token: Token[DeploymentProtocolContext | None] | None = None
+        self._owner_token: Token[object | None] | None = None
 
     def __enter__(self) -> None:
         if _called_from_router() and self._is_router_provenanced(self._context):
             context = cast(DeploymentProtocolContext, self._context)
             self._token = self._active_context.set(context)
+            try:
+                owner: object | None = asyncio.current_task()
+            except RuntimeError:
+                owner = None
+            if owner is None:
+                owner = object()
+            self._owner_token = self._active_owner.set(owner)
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         if self._token is not None:
             self._active_context.reset(self._token)
+        if self._owner_token is not None:
+            self._active_owner.reset(self._owner_token)
 
 
 def _protocol_context_runtime() -> tuple[
@@ -81,6 +98,7 @@ def _protocol_context_runtime() -> tuple[
     active_context: ContextVar[DeploymentProtocolContext | None] = ContextVar(
         "active_router_protocol_context", default=None
     )
+    active_owner: ContextVar[object | None] = ContextVar("active_router_protocol_owner", default=None)
 
     def is_router_provenanced(context: object) -> bool:
         return isinstance(context, DeploymentProtocolContext) and context.has_provenance(provenance)
@@ -104,13 +122,27 @@ def _protocol_context_runtime() -> tuple[
             suffix_token_budget=_suffix_token_budget(model_info),
             rate_snapshot=_build_rate_snapshot(model_info),
             _provenance=provenance,
+            context_token_budget=_context_token_budget(model_info),
         )
 
     def activate(context: object) -> _RouterProtocolContextActivation:
-        return _RouterProtocolContextActivation(context, active_context, is_router_provenanced)
+        return _RouterProtocolContextActivation(context, active_context, active_owner, is_router_provenanced)
 
     def active() -> DeploymentProtocolContext | None:
-        return active_context.get()
+        context = active_context.get()
+        owner = active_owner.get()
+        if context is None or owner is None:
+            return None
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        # Context copied into an executor thread has no asyncio task and is
+        # still part of the same Router dispatch. A child asyncio task has a
+        # different task identity and must not inherit the capability.
+        if current is not None and current is not owner:
+            return None
+        return context
 
     return build, activate, active, is_router_provenanced
 
@@ -141,6 +173,16 @@ def _build_rate_snapshot(model_info: Mapping[str, object]) -> DeploymentRateSnap
 
 def _suffix_token_budget(model_info: Mapping[str, object]) -> int:
     configured_budget = model_info.get(_SUFFIX_TOKEN_BUDGET_FIELD)
+    if isinstance(configured_budget, int) and not isinstance(configured_budget, bool) and configured_budget >= 0:
+        return configured_budget
+    context_window = model_info.get("max_input_tokens")
+    if isinstance(context_window, int) and not isinstance(context_window, bool) and context_window > 0:
+        return context_window
+    return 0
+
+
+def _context_token_budget(model_info: Mapping[str, object]) -> int:
+    configured_budget = model_info.get(_CONTEXT_TOKEN_BUDGET_FIELD)
     if isinstance(configured_budget, int) and not isinstance(configured_budget, bool) and configured_budget >= 0:
         return configured_budget
     context_window = model_info.get("max_input_tokens")

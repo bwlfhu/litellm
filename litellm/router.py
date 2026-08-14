@@ -300,6 +300,22 @@ def _has_deepseek_protocol_context(kwargs: Mapping[str, object]) -> bool:
     return isinstance(context, DeploymentProtocolContext) and context.is_router_provenanced()
 
 
+def _responses_fallback_candidates(fallbacks: object, model_group: str | None) -> list[str]:
+    """Return explicit response fallback groups in deterministic order."""
+    if not isinstance(fallbacks, list):
+        return []
+    if all(isinstance(item, str) for item in fallbacks):
+        return [item for item in fallbacks if isinstance(item, str)]
+    for item in fallbacks:
+        if not isinstance(item, dict):
+            continue
+        if model_group is not None and isinstance(item.get(model_group), list):
+            return [value for value in item[model_group] if isinstance(value, str)]
+        if isinstance(item.get("*"), list):
+            return [value for value in item["*"] if isinstance(value, str)]
+    return []
+
+
 _PreRoutingStrategyT = TypeVar("_PreRoutingStrategyT")
 
 
@@ -2590,15 +2606,59 @@ class Router:
                         include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
                     )
 
-                    if hasattr(fallback_response, "__aiter__"):
-                        prepared_fallback_hidden_params = Router._prepare_fallback_hidden_params(fallback_response)
-                        async for fallback_item in fallback_response:  # type: ignore
-                            Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_fallback_hidden_params)
-                            if partial_usage is not None:
-                                Router._combine_responses_fallback_usage(fallback_item, partial_usage)
-                            yield fallback_item
-                    else:
-                        yield fallback_response
+                    candidates = _responses_fallback_candidates(fallbacks, model_group)
+
+                    async def forward_fallback(
+                        iterator_or_response: object, candidate_index: int
+                    ) -> AsyncGenerator[object, None]:
+                        if not hasattr(iterator_or_response, "__aiter__"):
+                            yield iterator_or_response
+                            return
+                        prepared_hidden_params = Router._prepare_fallback_hidden_params(iterator_or_response)
+                        try:
+                            async for fallback_item in iterator_or_response:  # type: ignore
+                                Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
+                                if partial_usage is not None:
+                                    Router._combine_responses_fallback_usage(fallback_item, partial_usage)
+                                yield fallback_item
+                        except MidStreamFallbackError as next_error:
+                            # A fallback stream is an iterator, so its own
+                            # pre-output failure occurs after the fallback
+                            # engine has already returned. Continue with the
+                            # next explicit deployment instead of terminating
+                            # the whole chain at that point.
+                            next_index = candidate_index + 1
+                            if next_index >= len(candidates):
+                                raise
+                            next_kwargs = dict(initial_kwargs)
+                            next_kwargs["fallbacks"] = candidates[next_index:]
+                            if next_error.is_pre_first_chunk or not next_error.generated_content:
+                                next_kwargs["input"] = initial_kwargs.get("input")
+                            else:
+                                next_kwargs["input"] = Router._build_responses_continuation_input(
+                                    initial_kwargs.get("input"), next_error.generated_content
+                                )
+                            next_response = await self.async_function_with_fallbacks_common_utils(
+                                e=next_error,
+                                disable_fallbacks=False,
+                                fallbacks=candidates[next_index:],
+                                context_window_fallbacks=context_window_fallbacks,
+                                content_policy_fallbacks=content_policy_fallbacks,
+                                model_group=model_group,
+                                args=(),
+                                kwargs=next_kwargs,
+                                include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
+                            )
+                            async for nested_item in forward_fallback(next_response, next_index):
+                                yield nested_item
+
+                    candidate_index = 0
+                    if candidates:
+                        response_model = getattr(fallback_response, "model", None)
+                        if isinstance(response_model, str) and response_model in candidates:
+                            candidate_index = candidates.index(response_model)
+                    async for fallback_item in forward_fallback(fallback_response, candidate_index):
+                        yield fallback_item
                 except BaseException as fallback_error:
                     verbose_router_logger.error(f"Responses streaming fallback also failed: {fallback_error}")
                     # A DeepSeek stream deliberately defers parent failure
@@ -2632,6 +2692,36 @@ class Router:
                     ):
                         raise fallback_error.original_exception from fallback_error
                     raise fallback_error
+            except asyncio.CancelledError as cancellation:
+                accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+                if accounting_tracker is not None and _has_deepseek_protocol_context(initial_kwargs):
+                    from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
+                    from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+
+                    if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                        await asyncio.shield(
+                            DeepSeekAnthropicResponsesBridge.finalize_router_failure(
+                                tracker=accounting_tracker,
+                                logging_obj=initial_kwargs.get("litellm_logging_obj"),
+                                error=cancellation,
+                                is_async=True,
+                            )
+                        )
+                raise
+            except BaseException as source_error:
+                accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+                if accounting_tracker is not None and _has_deepseek_protocol_context(initial_kwargs):
+                    from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
+                    from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+
+                    if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                        await DeepSeekAnthropicResponsesBridge.finalize_router_failure(
+                            tracker=accounting_tracker,
+                            logging_obj=initial_kwargs.get("litellm_logging_obj"),
+                            error=source_error,
+                            is_async=True,
+                        )
+                raise
             finally:
                 with anyio.CancelScope(shield=True):
                     if hasattr(source_iterator, "aclose"):
@@ -2736,14 +2826,50 @@ class Router:
                         kwargs=initial_kwargs,
                         include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
                     )
-                    if hasattr(fallback_response, "__next__"):
-                        fallback_iterator = cast(Iterator[Any], fallback_response)
-                        prepared_hidden_params = Router._prepare_fallback_hidden_params(fallback_response)
-                        for fallback_item in fallback_iterator:
-                            Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
-                            yield fallback_item
-                    else:
-                        yield fallback_response
+                    candidates = _responses_fallback_candidates(fallbacks, model_group)
+
+                    def forward_fallback(iterator_or_response: object, candidate_index: int) -> Generator[Any, None, None]:
+                        if not hasattr(iterator_or_response, "__next__"):
+                            yield iterator_or_response
+                            return
+                        prepared_hidden_params = Router._prepare_fallback_hidden_params(iterator_or_response)
+                        try:
+                            fallback_iterator = cast(Iterator[Any], iterator_or_response)
+                            for fallback_item in fallback_iterator:
+                                Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
+                                yield fallback_item
+                        except MidStreamFallbackError as next_error:
+                            next_index = candidate_index + 1
+                            if next_index >= len(candidates):
+                                raise
+                            next_kwargs = dict(initial_kwargs)
+                            next_kwargs["fallbacks"] = candidates[next_index:]
+                            if next_error.is_pre_first_chunk or not next_error.generated_content:
+                                next_kwargs["input"] = initial_kwargs.get("input")
+                            else:
+                                next_kwargs["input"] = Router._build_responses_continuation_input(
+                                    initial_kwargs.get("input"), next_error.generated_content
+                                )
+                            next_response = run_async_function(
+                                router_self.async_function_with_fallbacks_common_utils,
+                                e=next_error,
+                                disable_fallbacks=False,
+                                fallbacks=candidates[next_index:],
+                                context_window_fallbacks=context_window_fallbacks,
+                                content_policy_fallbacks=content_policy_fallbacks,
+                                model_group=model_group,
+                                args=(),
+                                kwargs=next_kwargs,
+                                include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
+                            )
+                            yield from forward_fallback(next_response, next_index)
+
+                    candidate_index = 0
+                    if candidates:
+                        response_model = getattr(fallback_response, "model", None)
+                        if isinstance(response_model, str) and response_model in candidates:
+                            candidate_index = candidates.index(response_model)
+                    yield from forward_fallback(fallback_response, candidate_index)
                 except BaseException as fallback_error:
                     verbose_router_logger.error(f"Responses sync streaming fallback also failed: {fallback_error}")
                     accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
@@ -2768,6 +2894,21 @@ class Router:
                     if isinstance(fallback_error, MidStreamFallbackError) and fallback_error.original_exception is not None:
                         raise fallback_error.original_exception from fallback_error
                     raise
+            except BaseException as source_error:
+                accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+                if accounting_tracker is not None and _has_deepseek_protocol_context(initial_kwargs):
+                    from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
+                    from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+
+                    if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                        run_async_function(
+                            DeepSeekAnthropicResponsesBridge.finalize_router_failure,
+                            tracker=accounting_tracker,
+                            logging_obj=initial_kwargs.get("litellm_logging_obj"),
+                            error=source_error,
+                            is_async=False,
+                        )
+                raise
             finally:
                 close = getattr(source_iterator, "close", None)
                 if callable(close):
@@ -3249,7 +3390,10 @@ class Router:
         raw_model_info = deployment.get("model_info", {})
         model_info = raw_model_info.copy()
         deployment_id = model_info.get("id")
-        attempt_id = kwargs.get("litellm_call_id") or kwargs.get("litellm_trace_id") or deployment_id
+        # A public call/trace id identifies the parent request, not an
+        # individual deployment attempt. Keep the parent id in logging, but
+        # issue a fresh internal capability id for every selected deployment.
+        attempt_id = f"{kwargs.get('litellm_call_id') or kwargs.get('litellm_trace_id') or 'request'}:{uuid.uuid4()}"
         protocol_context = (
             _build_deployment_protocol_context(
                 raw_model_info,

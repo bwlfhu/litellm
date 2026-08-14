@@ -15,6 +15,7 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Mapping,
     Optional,
     Union,
     cast,
@@ -75,6 +76,11 @@ def _sanitize_anthropic_tool_history_with_diagnostics(
             },
         )
     return sanitized_messages
+
+
+def _is_deepseek_protocol_request(kwargs: Mapping[str, object]) -> bool:
+    """DeepSeek's canonical validator must see the original call ids."""
+    return protocol_context_from_kwargs(kwargs) is not None
 
 
 def _should_route_to_responses_api(custom_llm_provider: Optional[str]) -> bool:
@@ -259,11 +265,12 @@ async def anthropic_messages(
     # ids like ``functions.Bash:0`` that violate Anthropic's id pattern.
     tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
     tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
-    messages = _sanitize_anthropic_tool_history_with_diagnostics(
-        messages=messages,
-        model=model,
-        call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
-    )
+    if not _is_deepseek_protocol_request(kwargs):
+        messages = _sanitize_anthropic_tool_history_with_diagnostics(
+            messages=messages,
+            model=model,
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        )
 
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
@@ -468,11 +475,12 @@ def anthropic_messages_handler(
         messages = strip_empty_text_blocks_from_anthropic_messages(messages)
         tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
         tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
-        messages = _sanitize_anthropic_tool_history_with_diagnostics(
-            messages=messages,
-            model=model,
-            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
-        )
+        if not _is_deepseek_protocol_request(kwargs):
+            messages = _sanitize_anthropic_tool_history_with_diagnostics(
+                messages=messages,
+                model=model,
+                call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+            )
 
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
@@ -615,7 +623,7 @@ def anthropic_messages_handler(
             protocol_context.suffix_token_budget
         )
         anthropic_messages_optional_request_params["_deepseek_reasoning_context_token_budget"] = (
-            protocol_context.suffix_token_budget
+            protocol_context.context_token_budget
         )
 
     return base_llm_http_handler.anthropic_messages_handler(

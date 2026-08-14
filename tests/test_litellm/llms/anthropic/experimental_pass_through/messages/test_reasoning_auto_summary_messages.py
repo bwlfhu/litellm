@@ -9,8 +9,8 @@ modes (type="enabled" or type="adaptive").
 
 import os
 import sys
+from types import SimpleNamespace
 
-import pytest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath("../../../../.."))
@@ -171,3 +171,48 @@ class TestReasoningAutoSummaryMessages:
             )
         thinking = params.get("thinking", {})
         assert thinking.get("display") == "summarized"
+
+
+def test_deepseek_protocol_skips_generic_tool_id_rewrite(monkeypatch):
+    """Canonical DeepSeek graph validation must receive the original IDs."""
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler as handler_module
+
+    captured: dict[str, object] = {}
+    protocol_context = SimpleNamespace(
+        protocol=SimpleNamespace(value="deepseek_anthropic"),
+        suffix_token_budget=512,
+        context_token_budget=4096,
+    )
+    monkeypatch.setattr(handler_module, "protocol_context_from_kwargs", lambda kwargs: protocol_context)
+    monkeypatch.setattr(
+        handler_module,
+        "_sanitize_anthropic_tool_history_with_diagnostics",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("DeepSeek IDs must not be rewritten")),
+    )
+    monkeypatch.setattr(handler_module, "is_reasoning_auto_summary_enabled", lambda: False)
+    monkeypatch.setattr(
+        handler_module,
+        "ProviderConfigManager",
+        SimpleNamespace(get_provider_anthropic_messages_config=lambda **kwargs: object()),
+    )
+
+    class BaseHandler:
+        def anthropic_messages_handler(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(handler_module, "base_llm_http_handler", BaseHandler())
+    messages = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "a_b", "name": "lookup", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a.b", "content": "x"}]},
+    ]
+    handler_module.anthropic_messages_handler(
+        max_tokens=16,
+        messages=messages,
+        model="deepseek-v4-pro",
+        custom_llm_provider="deepseek",
+        api_key="test-key",
+        _litellm_deployment_protocol_context=protocol_context,
+    )
+
+    assert captured["messages"] == messages
