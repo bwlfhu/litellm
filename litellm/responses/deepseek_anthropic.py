@@ -3,7 +3,7 @@
 import json
 import time
 from copy import deepcopy
-from typing import Mapping, NoReturn, Sequence
+from typing import Mapping, NoReturn
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
@@ -29,22 +29,10 @@ from litellm.responses.deepseek_accounting import (
     ParentAccounting,
     build_attempt_snapshot,
 )
+from litellm.responses.deepseek_session import SpendLogDeepSeekResponsesSessionRepository
 from litellm.router_protocol import DeploymentProtocolContext
 from litellm.types.llms.openai import ResponseInputParam, ResponsesAPIOptionalRequestParams, ResponsesAPIResponse
 from litellm.types.router import GenericLiteLLMParams
-
-
-class DeepSeekResponsesSessionStore:
-    _histories: dict[str, tuple[dict[str, object], ...]] = {}
-
-    @classmethod
-    def save(cls, response_id: str, messages: Sequence[dict[str, object]]) -> None:
-        cls._histories[response_id] = tuple(deepcopy(dict(message)) for message in messages)
-
-    @classmethod
-    def load(cls, response_id: str) -> tuple[dict[str, object], ...] | None:
-        history = cls._histories.get(response_id)
-        return None if history is None else tuple(deepcopy(dict(message)) for message in history)
 
 
 _PROTOCOL_INTEGRITY_CODES = frozenset(
@@ -258,13 +246,37 @@ def _responses_tools_to_anthropic(tools: object) -> list[dict[str, object]]:
     return converted
 
 
-def _load_session_history(previous_response_id: object) -> tuple[dict[str, object], ...]:
+async def _load_session_history(
+    previous_response_id: object, session_repository: object
+) -> tuple[dict[str, object], ...]:
     if not isinstance(previous_response_id, str):
         return ()
-    history = DeepSeekResponsesSessionStore.load(previous_response_id)
-    if history is None:
+    load = getattr(session_repository, "load", None)
+    if not callable(load):
         raise DeepSeekProtocolError("reasoning_history_unrecoverable")
-    return history
+    session = await load(previous_response_id)
+    if session is None or not hasattr(session, "messages"):
+        raise DeepSeekProtocolError("reasoning_history_unrecoverable")
+    messages = getattr(session, "messages")
+    if not isinstance(messages, tuple) or not all(isinstance(message, dict) for message in messages):
+        raise DeepSeekProtocolError("reasoning_history_unrecoverable")
+    return tuple(deepcopy(message) for message in messages)
+
+
+def _session_repository_from_kwargs(kwargs: Mapping[str, object]) -> object:
+    repository = kwargs.get("_deepseek_session_repository")
+    return repository if repository is not None else SpendLogDeepSeekResponsesSessionRepository()
+
+
+def _stage_session(
+    session_repository: object,
+    proxy_server_request: object,
+    response_id: str,
+    messages: tuple[dict[str, object], ...],
+) -> None:
+    stage = getattr(session_repository, "stage", None)
+    if callable(stage):
+        stage(proxy_server_request, response_id, messages)
 
 
 def _bridge_optional_params(
@@ -474,7 +486,8 @@ class DeepSeekAnthropicResponsesBridge:
         reasoning = responses_api_request.get("reasoning")
         thinking, enabled = _effort_to_thinking(reasoning)
         previous_response_id = responses_api_request.get("previous_response_id")
-        session_history = _load_session_history(previous_response_id)
+        session_repository = _session_repository_from_kwargs(kwargs)
+        session_history = await _load_session_history(previous_response_id, session_repository)
         new_messages = _responses_input_to_messages(input, responses_api_request.get("instructions"))
         all_messages = session_history + tuple(new_messages)
         canonical = compile_deepseek_anthropic_history(
@@ -528,7 +541,12 @@ class DeepSeekAnthropicResponsesBridge:
                 if assistant_content:
                     session_messages = list(canonical.messages)
                     session_messages.append({"role": "assistant", "content": assistant_content})
-                    DeepSeekResponsesSessionStore.save(response_id, session_messages)
+                    _stage_session(
+                        session_repository,
+                        kwargs.get("proxy_server_request"),
+                        response_id,
+                        tuple(session_messages),
+                    )
 
             return DeepSeekAnthropicResponsesAsyncStream(
                 raw_result.response,
@@ -569,8 +587,13 @@ class DeepSeekAnthropicResponsesBridge:
         if isinstance(assistant_content, list):
             session_messages = list(canonical.messages)
             session_messages.append({"role": "assistant", "content": assistant_content})
-            DeepSeekResponsesSessionStore.save(response_obj.id, session_messages)
+            _stage_session(
+                session_repository,
+                kwargs.get("proxy_server_request"),
+                response_obj.id,
+                tuple(session_messages),
+            )
         return response_obj
 
 
-__all__ = ["DeepSeekAnthropicResponsesBridge", "DeepSeekResponsesSessionStore"]
+__all__ = ["DeepSeekAnthropicResponsesBridge"]

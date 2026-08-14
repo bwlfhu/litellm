@@ -7,7 +7,11 @@ import litellm
 from litellm.litellm_core_utils.asyncify import run_async_function
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, DeepSeekUpstreamError
 from litellm.router_protocol import _build_deployment_protocol_context
-from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge, DeepSeekResponsesSessionStore
+from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+from litellm.responses.deepseek_session import (
+    SpendLogDeepSeekResponsesSessionRepository,
+    create_deepseek_responses_session,
+)
 
 
 def _context():
@@ -36,6 +40,18 @@ def _context_with_suffix_budget(suffix_token_budget: int):
 
 def _unexpected_public_entrypoint(**kwargs):
     raise AssertionError("completion entrypoint must not be used")
+
+
+class _InMemorySessionRepository:
+    def __init__(self):
+        self._sessions: dict[str, object] = {}
+
+    async def load(self, response_id: str) -> object | None:
+        return self._sessions.get(response_id)
+
+    def stage(self, proxy_server_request: object, response_id: str, messages: tuple[dict[str, object], ...]) -> None:
+        del proxy_server_request
+        self._sessions[response_id] = create_deepseek_responses_session(response_id, messages)
 
 
 @pytest.mark.asyncio
@@ -109,9 +125,23 @@ def test_deepseek_responses_sync_bridge_uses_same_raw_reconstruction_core():
 @pytest.mark.asyncio
 async def test_deepseek_responses_bridge_preserves_reasoning_function_call_and_output_history():
     requests: list[dict] = []
+    session_repository = _InMemorySessionRepository()
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
+        if len(requests) > 1:
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "id": "resp_ds_follow_up",
+                    "content": [
+                        {"type": "thinking", "thinking": "follow up"},
+                        {"type": "text", "text": "done"},
+                    ],
+                    "usage": {"input_tokens": 4, "output_tokens": 3},
+                },
+            )
         return httpx.Response(
             200,
             request=request,
@@ -139,6 +169,7 @@ async def test_deepseek_responses_bridge_preserves_reasoning_function_call_and_o
         _is_async=True,
         stream=False,
         protocol_context=_context(),
+        _deepseek_session_repository=session_repository,
         client=client,
     )
     second = await DeepSeekAnthropicResponsesBridge.response_api_handler(
@@ -149,6 +180,7 @@ async def test_deepseek_responses_bridge_preserves_reasoning_function_call_and_o
         _is_async=True,
         stream=False,
         protocol_context=_context(),
+        _deepseek_session_repository=session_repository,
         client=client,
     )
     await client.aclose()
@@ -161,9 +193,11 @@ async def test_deepseek_responses_bridge_preserves_reasoning_function_call_and_o
 
 @pytest.mark.asyncio
 async def test_deepseek_responses_effort_none_rejects_complete_tool_history_without_http():
-    DeepSeekResponsesSessionStore.save(
+    session_repository = _InMemorySessionRepository()
+    session_repository.stage(
+        None,
         "resp_existing",
-        [
+        (
             {
                 "role": "assistant",
                 "content": [
@@ -172,7 +206,7 @@ async def test_deepseek_responses_effort_none_rejects_complete_tool_history_with
                 ],
             },
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}]},
-        ],
+        ),
     )
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request, json={})))
     with pytest.raises(DeepSeekProtocolError, match="reasoning_mode_conflict"):
@@ -184,6 +218,7 @@ async def test_deepseek_responses_effort_none_rejects_complete_tool_history_with
             _is_async=True,
             stream=False,
             protocol_context=_context(),
+            _deepseek_session_repository=session_repository,
             client=client,
         )
     await client.aclose()
@@ -211,6 +246,32 @@ async def test_deepseek_responses_uses_router_suffix_budget_before_http():
             _is_async=True,
             stream=False,
             protocol_context=_context_with_suffix_budget(0),
+            client=client,
+        )
+    await client.aclose()
+
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_rejects_unknown_previous_response_without_http():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_history_unrecoverable"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="next",
+            responses_api_request={"max_output_tokens": 32, "previous_response_id": "resp_missing"},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            _deepseek_session_repository=_InMemorySessionRepository(),
             client=client,
         )
     await client.aclose()
@@ -313,6 +374,7 @@ async def test_deepseek_responses_async_stream_uses_pure_decoder_and_completed_e
 @pytest.mark.asyncio
 async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_next_turn():
     requests: list[dict] = []
+    session_repository = _InMemorySessionRepository()
     sse = (
         "event: content_block_start\n"
         'data: {"index":0,"content_block":{"type":"thinking"}}\n\n'
@@ -333,7 +395,14 @@ async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_
         return httpx.Response(
             200,
             request=request,
-            json={"id": "resp_second", "content": [{"type": "text", "text": "done"}], "usage": {}},
+            json={
+                "id": "resp_second",
+                "content": [
+                    {"type": "thinking", "thinking": "follow up"},
+                    {"type": "text", "text": "done"},
+                ],
+                "usage": {},
+            },
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -345,6 +414,7 @@ async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_
         _is_async=True,
         stream=True,
         protocol_context=_context(),
+        _deepseek_session_repository=session_repository,
         client=client,
     )
     events = [event async for event in stream]
@@ -357,6 +427,7 @@ async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_
         _is_async=True,
         stream=False,
         protocol_context=_context(),
+        _deepseek_session_repository=session_repository,
         client=client,
     )
     await client.aclose()
@@ -364,6 +435,38 @@ async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_
     assert len(requests) == 2
     assert requests[1]["messages"][1]["content"][0] == {"type": "thinking", "thinking": "reason"}
     assert requests[1]["messages"][2]["content"][0]["tool_use_id"] == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_spend_log_session_requires_a_complete_atomic_manifest():
+    proxy_server_request = {"body": {}}
+    messages = (
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "reason"},
+                {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
+            ],
+        },
+    )
+
+    async def load_spend_logs(response_id: str) -> list[dict[str, object]]:
+        assert response_id == "resp_persisted"
+        return [{"request_id": "resp_persisted"}]
+
+    async def load_proxy_request(spend_log: dict[str, object]) -> dict[str, object]:
+        assert spend_log["request_id"] == "resp_persisted"
+        return proxy_server_request["body"]
+
+    repository = SpendLogDeepSeekResponsesSessionRepository(load_spend_logs, load_proxy_request)
+    repository.stage(proxy_server_request, "resp_persisted", messages)
+
+    loaded = await repository.load("resp_persisted")
+    assert loaded is not None
+    assert loaded.messages == messages
+    assert loaded.suffix_manifest is not None
+    proxy_server_request["body"]["_deepseek_anthropic_session"]["suffix_manifest"]["digest"] = "bad"
+    assert await repository.load("resp_persisted") is None
 
 
 def test_deepseek_responses_sync_stream_worker_forwards_events():

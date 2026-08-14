@@ -204,7 +204,9 @@ def _register_tool_results(
         pending_calls.discard(call_id)
 
 
-def _collect_tool_graph(messages: Sequence[dict[str, object]]) -> tuple[int | None, tuple[str, ...]]:
+def _collect_tool_graph(
+    messages: Sequence[dict[str, object]], *, allow_pending_calls: bool = False
+) -> tuple[int | None, tuple[str, ...]]:
     tool_uses: dict[str, int] = {}
     tool_results: set[str] = set()
     pending_calls: set[str] = set()
@@ -216,7 +218,7 @@ def _collect_tool_graph(messages: Sequence[dict[str, object]]) -> tuple[int | No
                 first_tool_use_index = first_use
         if message.get("role") == "user":
             _register_tool_results(message, tool_uses, tool_results, pending_calls)
-    if set(tool_uses) != tool_results:
+    if set(tool_uses) != tool_results and not allow_pending_calls:
         raise DeepSeekProtocolError("tool_history_incomplete")
     return first_tool_use_index, tuple(tool_uses)
 
@@ -291,6 +293,20 @@ def compile_deepseek_anthropic_history(
     )
 
 
+def deepseek_anthropic_session_manifest(messages: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    source_messages = tuple(deepcopy(dict(message)) for message in messages)
+    first_tool_use_index, call_ids = _collect_tool_graph(source_messages, allow_pending_calls=True)
+    if first_tool_use_index is None:
+        return None
+    suffix = _compile_tool_suffix(source_messages, first_tool_use_index, call_ids, None, None)
+    return {
+        "version": suffix.version,
+        "digest": suffix.digest,
+        "call_ids": list(suffix.call_ids),
+        "token_count": suffix.token_count,
+    }
+
+
 __all__ = [
     "CanonicalHistory",
     "DeepSeekProtocolError",
@@ -298,4 +314,5 @@ __all__ = [
     "DeepSeekUpstreamError",
     "ToolAssociatedCanonicalSuffix",
     "compile_deepseek_anthropic_history",
+    "deepseek_anthropic_session_manifest",
 ]
