@@ -281,10 +281,30 @@ def _stage_session(
     proxy_server_request: object,
     response_id: str,
     messages: tuple[dict[str, object], ...],
+    logging_obj: object | None = None,
 ) -> None:
     stage = getattr(session_repository, "stage", None)
     if callable(stage):
-        stage(proxy_server_request, response_id, messages)
+        payload = stage(proxy_server_request, response_id, messages)
+        if not isinstance(payload, Mapping):
+            return
+        # Keep the immutable session record attached to the parent logging
+        # object as well as proxy_server_request. This lets the normal
+        # SpendLog writer persist the response record and its manifest in one
+        # lifecycle, even when it snapshots request metadata late.
+        model_call_details = getattr(logging_obj, "model_call_details", None)
+        if isinstance(model_call_details, dict):
+            model_call_details["deepseek_session_record"] = deepcopy(dict(payload))
+            litellm_params = model_call_details.get("litellm_params")
+            if isinstance(litellm_params, dict):
+                proxy_request = litellm_params.get("proxy_server_request")
+                if isinstance(proxy_request, dict):
+                    body = proxy_request.get("body")
+                    if isinstance(body, dict):
+                        litellm_params["proxy_server_request"] = {
+                            **proxy_request,
+                            "body": {**body, "_deepseek_anthropic_session": deepcopy(dict(payload))},
+                        }
 
 
 def _bridge_optional_params(
@@ -666,7 +686,7 @@ class DeepSeekAnthropicResponsesBridge:
         )
         optional_params = _bridge_optional_params(responses_api_request, thinking, enabled)
         optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
-        optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.suffix_token_budget
+        optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.context_token_budget
         config = DeepSeekAnthropicMessagesConfig()
         request_body = config.transform_anthropic_messages_request(
             model=model,
@@ -762,6 +782,7 @@ class DeepSeekAnthropicResponsesBridge:
                         kwargs.get("proxy_server_request"),
                         response_id,
                         tuple(session_messages),
+                        kwargs.get("litellm_logging_obj"),
                     )
                 if accounting_tracker.claim_lifecycle():
                     await _dispatch_parent_success(logging_obj, response, is_stream=True)
@@ -805,6 +826,7 @@ class DeepSeekAnthropicResponsesBridge:
                 kwargs.get("proxy_server_request"),
                 response_obj.id,
                 tuple(session_messages),
+                kwargs.get("litellm_logging_obj"),
             )
         if not router_owns_accounting:
             await cls.finalize_router_success(

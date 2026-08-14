@@ -88,6 +88,23 @@ async def test_deepseek_sse_decoder_ignores_message_stop_after_failed_event():
 
 
 @pytest.mark.asyncio
+async def test_deepseek_sse_decoder_eof_emits_one_incomplete_terminal_event():
+    decoder = DeepSeekAnthropicResponsesSSEDecoder("deepseek-v4-pro", "resp_eof")
+    decoded = [
+        event
+        async for event in decoder.decode(
+            _lines([("content_block_start", {"index": 0, "content_block": {"type": "text"}})])
+        )
+    ]
+
+    assert [event["type"] for event in decoded] == [
+        "response.output_item.added",
+        "response.incomplete",
+    ]
+    assert decoded[-1]["response"]["status"] == "incomplete"
+
+
+@pytest.mark.asyncio
 async def test_deepseek_async_stream_cancellation_closes_response_and_propagates():
     class DelayedBody(httpx.AsyncByteStream):
         def __init__(self):
@@ -146,6 +163,36 @@ async def test_deepseek_async_stream_first_error_requests_router_fallback():
         await stream.__anext__()
     assert raised.value.is_pre_first_chunk is True
     assert stream._closed is True
+
+
+@pytest.mark.asyncio
+async def test_deepseek_async_stream_read_error_before_output_requests_router_fallback():
+    class BrokenBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadError("connection reset")
+            yield b""  # pragma: no cover
+
+        async def aclose(self):
+            return None
+
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://provider.invalid"),
+        stream=BrokenBody(),
+    )
+    stream = DeepSeekAnthropicResponsesAsyncStream(
+        response,
+        "deepseek-v4-pro",
+        "resp_read_error",
+        False,
+        httpx.AsyncClient(),
+        pre_output_fallback_enabled=True,
+    )
+
+    with pytest.raises(MidStreamFallbackError) as raised:
+        await stream.__anext__()
+    assert raised.value.is_pre_first_chunk is True
+    assert raised.value.original_exception.category == "stream_read_error"
 
 
 @pytest.mark.asyncio
@@ -342,6 +389,123 @@ async def test_router_stream_fallback_failure_finalizes_parent_once():
     assert len(logging_obj.failures) == 1
     assert len(logging_obj.async_failures) == 1
     assert tracker.claim_lifecycle() is False
+
+
+@pytest.mark.asyncio
+async def test_router_stream_cancellation_finalizes_parent_failure_once():
+    class Source:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise asyncio.CancelledError()
+
+        async def aclose(self):
+            return None
+
+    class Logging:
+        def __init__(self):
+            self.failures = []
+            self.async_failures = []
+            self.model_call_details = {}
+
+        def failure_handler(self, error, *args):
+            self.failures.append(error)
+
+        async def async_failure_handler(self, error, *args):
+            self.async_failures.append(error)
+
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.record_attempt(
+        build_attempt_snapshot(
+            model="deepseek-v4-pro",
+            deployment_id="primary-id",
+            usage={},
+            rates=AttemptRateSnapshot(),
+        )
+    )
+    logging_obj = Logging()
+    router = Router(model_list=[])
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "deepseek-v4-pro",
+            "stream": True,
+            "_deepseek_parent_accounting_tracker": tracker,
+            "litellm_logging_obj": logging_obj,
+        },
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in wrapped:
+            pass
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+    assert tracker.claim_lifecycle() is False
+
+
+@pytest.mark.asyncio
+async def test_router_stream_fallback_iterator_failure_continues_to_next_candidate():
+    class Source:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="before output",
+                model="deepseek-v4-pro",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self):
+            return None
+
+    class FailingFallback:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="backup failed before output",
+                model="backup-a",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self):
+            return None
+
+    class RouterWithTwoFallbacks(Router):
+        def __init__(self):
+            super().__init__(model_list=[])
+            self.calls = []
+
+        async def async_function_with_fallbacks_common_utils(self, **kwargs):
+            self.calls.append(tuple(kwargs.get("fallbacks", [])))
+            if len(self.calls) == 1:
+                return FailingFallback()
+            return _events_as_async_iterator([{"type": "response.completed", "response": {"status": "completed"}}])
+
+    async def _events_as_async_iterator(events):
+        for event in events:
+            yield event
+
+    router = RouterWithTwoFallbacks()
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "primary",
+            "stream": True,
+            "input": "question",
+            "fallbacks": ["backup-a", "backup-b"],
+        },
+    )
+
+    events = [event async for event in wrapped]
+    assert events == [{"type": "response.completed", "response": {"status": "completed"}}]
+    assert len(router.calls) == 2
+    assert router.calls[1] == ("backup-b",)
 
 
 def test_router_sync_responses_stream_fallback_retries_before_output():

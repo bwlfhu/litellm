@@ -199,6 +199,13 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                 data_lines.append(line[5:].lstrip())
         for event in self._flush_sse_event(event_name, data_lines):
             yield event
+        # A closed HTTP stream without message_stop is not a successful
+        # completion. Emit exactly one typed terminal event so accounting and
+        # Router fallback see the same state as an explicit incomplete stop.
+        if not self._terminal_emitted:
+            self._status = "incomplete"
+            self._terminal_emitted = True
+            yield {"type": "response.incomplete", "response": self._response("incomplete")}
 
 
 class DeepSeekAnthropicResponsesAsyncStream:
@@ -250,9 +257,25 @@ class DeepSeekAnthropicResponsesAsyncStream:
         except asyncio.CancelledError:
             await self.aclose()
             raise
-        except BaseException:
+        except MidStreamFallbackError:
             await self.aclose()
             raise
+        except Exception as error:
+            await self.aclose()
+            upstream_error = (
+                error
+                if isinstance(error, DeepSeekUpstreamError)
+                else DeepSeekUpstreamError("stream_read_error", None)
+            )
+            if self._pre_output_fallback_enabled and not self._decoder.output_started:
+                raise MidStreamFallbackError(
+                    message="DeepSeek Responses stream read failed before output",
+                    model=self._decoder.model,
+                    llm_provider="deepseek",
+                    original_exception=upstream_error,
+                    is_pre_first_chunk=True,
+                ) from error
+            raise upstream_error from error
 
     async def aclose(self) -> None:
         if self._closed:

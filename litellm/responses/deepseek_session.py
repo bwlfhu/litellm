@@ -103,13 +103,21 @@ class SpendLogDeepSeekResponsesSessionRepository:
         proxy_server_request: object,
         response_id: str,
         messages: Sequence[Mapping[str, object]],
-    ) -> None:
+    ) -> dict[str, object]:
+        payload = create_deepseek_responses_session(response_id, messages).payload()
         if not isinstance(proxy_server_request, dict):
-            return
+            return payload
         body = proxy_server_request.get("body")
         if not isinstance(body, dict):
-            return
-        body[_SESSION_RECORD_FIELD] = create_deepseek_responses_session(response_id, messages).payload()
+            return payload
+        # Replace the body atomically from the caller's perspective. The
+        # session manifest and response history are committed as one immutable
+        # payload before the standard SpendLog writer observes the request.
+        proxy_server_request["body"] = {
+            **body,
+            _SESSION_RECORD_FIELD: deepcopy(payload),
+        }
+        return payload
 
 
 __all__ = [
