@@ -3,12 +3,17 @@
 import json
 import time
 from copy import deepcopy
-from typing import Mapping, Sequence
+from typing import Mapping, NoReturn, Sequence
 
 import httpx
+from pydantic import TypeAdapter, ValidationError
 
 from litellm.litellm_core_utils.asyncify import run_async_function
-from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, compile_deepseek_anthropic_history
+from litellm.llms.deepseek.anthropic_protocol import (
+    DeepSeekProtocolError,
+    DeepSeekUpstreamError,
+    compile_deepseek_anthropic_history,
+)
 from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
 from litellm.llms.deepseek.responses_transport import (
     DeepSeekRawFailure,
@@ -40,6 +45,43 @@ class DeepSeekResponsesSessionStore:
     def load(cls, response_id: str) -> tuple[dict[str, object], ...] | None:
         history = cls._histories.get(response_id)
         return None if history is None else tuple(deepcopy(dict(message)) for message in history)
+
+
+_PROTOCOL_INTEGRITY_CODES = frozenset(
+    {
+        "reasoning_history_missing",
+        "reasoning_history_unrecoverable",
+        "reasoning_history_context_exhausted",
+        "reasoning_mode_conflict",
+        "tool_history_invalid",
+        "tool_result_orphaned",
+        "tool_history_incomplete",
+    }
+)
+_JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, object])
+
+
+def _error_code_from_upstream_body(body: str) -> str | None:
+    try:
+        parsed = _JSON_OBJECT_ADAPTER.validate_json(body)
+    except ValidationError:
+        return None
+    code = parsed.get("code")
+    if isinstance(code, str) and code in _PROTOCOL_INTEGRITY_CODES:
+        return code
+    nested_error = parsed.get("error")
+    if isinstance(nested_error, dict):
+        nested_code = _JSON_OBJECT_ADAPTER.validate_python(nested_error).get("code")
+        if isinstance(nested_code, str) and nested_code in _PROTOCOL_INTEGRITY_CODES:
+            return nested_code
+    return None
+
+
+def _raise_raw_failure(failure: DeepSeekRawFailure) -> NoReturn:
+    code = _error_code_from_upstream_body(failure.message)
+    if code is not None:
+        raise DeepSeekProtocolError(code)
+    raise DeepSeekUpstreamError(failure.category, failure.status_code)
 
 
 def _effort_to_thinking(reasoning: object) -> tuple[dict[str, object], bool]:
@@ -441,7 +483,7 @@ class DeepSeekAnthropicResponsesBridge:
         if isinstance(raw_result, DeepSeekRawFailure):
             if owns_client:
                 await http_client.aclose()
-            raise DeepSeekProtocolError("upstream_deepseek_error")
+            _raise_raw_failure(raw_result)
         if stream:
             return DeepSeekAnthropicResponsesAsyncStream(
                 raw_result.response,

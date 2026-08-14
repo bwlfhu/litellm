@@ -21,6 +21,15 @@ class DeepSeekProtocolError(DeepSeekProtocolNonFallbackError):
     pass
 
 
+class DeepSeekUpstreamError(ValueError):
+    def __init__(self, category: str, status_code: int | None):
+        self.category = category
+        self.status_code = status_code
+        self.retry_allowed = True
+        self.fallback_allowed = True
+        super().__init__(category)
+
+
 @dataclass(frozen=True, slots=True)
 class ToolAssociatedCanonicalSuffix:
     messages: tuple[dict[str, object], ...]
@@ -286,6 +295,7 @@ __all__ = [
     "CanonicalHistory",
     "DeepSeekProtocolError",
     "DeepSeekProtocolNonFallbackError",
+    "DeepSeekUpstreamError",
     "ToolAssociatedCanonicalSuffix",
     "compile_deepseek_anthropic_history",
 ]

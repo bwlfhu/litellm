@@ -5,7 +5,7 @@ import pytest
 
 import litellm
 from litellm.litellm_core_utils.asyncify import run_async_function
-from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError
+from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, DeepSeekUpstreamError
 from litellm.router_protocol import build_deployment_protocol_context
 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge, DeepSeekResponsesSessionStore
 
@@ -166,6 +166,60 @@ async def test_deepseek_responses_effort_none_rejects_complete_tool_history_with
             model="deepseek-v4-pro",
             input="next",
             responses_api_request={"previous_response_id": "resp_existing", "reasoning": {"effort": "none"}},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            client=client,
+        )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_only_marks_explicit_protocol_400_as_non_fallback_error():
+    requests: list[bytes] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.content)
+        return httpx.Response(
+            400,
+            request=request,
+            json={"error": {"code": "invalid_request"}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekUpstreamError) as raised:
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            client=client,
+        )
+    await client.aclose()
+
+    assert raised.value.fallback_allowed is True
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_protocol_integrity_400_is_not_fallback_eligible():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            request=request,
+            json={"error": {"code": "reasoning_history_missing"}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_history_missing"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
             custom_llm_provider="anthropic",
             _is_async=True,
             stream=False,
