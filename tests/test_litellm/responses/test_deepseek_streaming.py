@@ -105,6 +105,36 @@ async def test_deepseek_sse_decoder_eof_emits_one_incomplete_terminal_event():
 
 
 @pytest.mark.asyncio
+async def test_deepseek_async_stream_eof_before_output_requests_router_fallback():
+    class EmptyBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if False:
+                yield b""
+
+        async def aclose(self):
+            return None
+
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://provider.invalid"),
+        stream=EmptyBody(),
+    )
+    stream = DeepSeekAnthropicResponsesAsyncStream(
+        response,
+        "deepseek-v4-pro",
+        "resp_eof_fallback",
+        False,
+        httpx.AsyncClient(),
+        pre_output_fallback_enabled=True,
+    )
+
+    with pytest.raises(MidStreamFallbackError) as raised:
+        await stream.__anext__()
+    assert raised.value.is_pre_first_chunk is True
+    assert stream._closed is True
+
+
+@pytest.mark.asyncio
 async def test_deepseek_async_stream_cancellation_closes_response_and_propagates():
     class DelayedBody(httpx.AsyncByteStream):
         def __init__(self):

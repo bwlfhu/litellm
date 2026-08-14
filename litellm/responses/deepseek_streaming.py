@@ -239,12 +239,12 @@ class DeepSeekAnthropicResponsesAsyncStream:
             if is_terminal and isinstance(response, Mapping) and self._on_terminal is not None:
                 await self._on_terminal(event, self._decoder.output_started)
             if (
-                event.get("type") == "response.failed"
+                event.get("type") in {"response.failed", "response.incomplete"}
                 and not self._decoder.output_started
                 and self._pre_output_fallback_enabled
             ):
                 raise MidStreamFallbackError(
-                    message="DeepSeek Responses stream failed before output",
+                    message="DeepSeek Responses stream ended before output",
                     model=self._decoder.model,
                     llm_provider="deepseek",
                     original_exception=DeepSeekUpstreamError("stream_failed", None),
