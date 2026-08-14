@@ -80,8 +80,8 @@ Responses endpoint
 4. **历史所有者按路径确定**：原生 Messages 由客户端回传 content blocks；Responses 由显式 input 或可验证的本地 session history 提供；SpendLog 不是所有路径的隐式真相源
 5. **DeepSeek 无签名**：发往 DeepSeek Anthropic 的 thinking block 只包含 `type` 和 `thinking`，不伪造 Claude signature，也不把 reasoning 降级成 text
 6. **`redacted_thinking` 不可转换**：DeepSeek 官方明确不支持该 block，且 `data` 不可逆。无工具历史可按明确策略丢弃；工具相关历史必须返回不可恢复错误
-7. **工具会话完整性**：按完整对话识别 tool-associated turn，而不是只检查当前 assistant message。相关 turn 中保留的每个 assistant reasoning 都必须非空
-8. **顺序与配对**：thinking、visible text、tool call 以及后续 tool result 保持原始顺序；并行 tool calls 属于同一个 assistant turn，并按 call id 一一配对
+7. **工具会话完整性**：按 `tool_use.id <-> tool_result.tool_use_id` 建立调用图，不用 user message 位置推断 turn。每个含 tool call 的 assistant 节点都必须有非空明文 reasoning
+8. **顺序与配对**：thinking、visible text、tool call 以及后续 tool result 保持原始顺序；并行 tool calls 属于同一个 assistant 节点，每个 call id 在请求历史中唯一且恰好匹配一个 result
 9. **无状态边界**：不向 DeepSeek 上游发送 `previous_response_id`。只有代理已重建完整 history 时才展开为 wire input，否则返回明确 400
 10. **单一计费事实源**：provider usage 只归一化一次，所有日志、cost 和 metrics 读取同一个 `Usage`，不得分别累加别名字段
 
@@ -106,7 +106,9 @@ model_list:
 - **Messages consumer**：在按 provider 选 config 之前解析 protocol；命中时选择 `DeepSeekAnthropicMessagesConfig`
 - **Responses consumer**：在 `responses/main.py` 选择 native config/Chat bridge 之前解析 protocol；命中时选择 DeepSeek Anthropic Responses bridge strategy，不能依赖 Messages handler 再次选择
 
-Responses consumer 把解析后的不可变 protocol context 显式传入 request transformation、session handler、response transformation 和 streaming iterator。内部字段在构造 provider wire body 前删除，不写入 provider `metadata`。fallback 每次重新选择 deployment、重新调用 resolver，并覆盖上一 deployment 的 context
+Responses consumer 把解析后的不可变 protocol context 显式传入 request transformation、session handler、response transformation 和 streaming iterator。Router 内部持有选中 deployment 的权威快照；fallback 每次从新 deployment 的原始 `model_info` 重新调用 resolver，并以新快照替换旧 context，禁止合并或继承上一 deployment 的 protocol
+
+`reasoning_protocol` 是内部路由控制字段，不是 secret，但不能成为客户端可回传并影响路由的状态。实现一个返回副本的共享 model-info 出站 sanitizer，并同时用于 `/model/info`、`/v1/model/info`、`/v2/model/info`，包括 admin/debug 响应；deployment 配置 CRUD 可在受权配置对象中保留该字段，避免编辑时丢失。provider wire、普通 `metadata`、Responses response metadata、`proxy_server_request`、SpendLog 原始 metadata 和用户可见错误不得包含该字段。安全 route trace 可把 resolver 结果作为独立枚举标签记录，不能把整个 `model_info` 写入日志
 
 建议保留 `DeepSeekAnthropicMessagesConfig` 并提取一个可组合的 DeepSeek reasoning codec。`deepseek_anthropic` 不注册为可由客户端直接传入的公开 provider
 
@@ -115,12 +117,13 @@ Responses consumer 把解析后的不可变 protocol context 显式传入 reques
 在 `DeepSeekAnthropicMessagesConfig.transform_anthropic_messages_request()` 中执行无副作用的 decode、validate、encode：
 
 1. 从 Anthropic thinking block、顶层 `reasoning_content` 或 `provider_specific_fields.reasoning_content` 解码明文 reasoning；已有真实值优先，不重复写入
-2. 以 user message 为外层 turn 边界。某个 turn 只要出现 assistant tool call 或对应 user tool result，就标记为 tool-associated
-3. 对请求中保留的每个 tool-associated turn，验证其中所有 assistant 子轮次都有非空明文 reasoning。仅仅在首次请求声明 tools、但历史尚无 tool exchange 时不报错；普通无工具 turn 不强制
-4. 多个并行 tool calls 保留为同一个 assistant turn，并验证所有 tool result 的 call id 都能配对
-5. 明文完整时重建 thinking、text、tool_use block，移除 DeepSeek 不需要的 signature；输入对象不得原地修改
-6. 缺失明文或只有空格时返回稳定的 `reasoning_history_missing` 400，不注入占位符
-7. 继续执行现有 custom tool type 清理，不改变 hosted tool type、`thinking` 和 `output_config.effort`
+2. 每个 assistant message 是独立节点；同一 message 内的 text、thinking 和多个 `tool_use` 不拆分。建立全局 `tool_use.id -> assistant 节点` 索引，再按 `tool_result.tool_use_id` 建边，不使用 user message 作为外层边界
+3. `tool_use.id` 或 `tool_result.tool_use_id` 缺失、空白、重复时返回 `tool_history_invalid`；result 找不到 use 时返回 `tool_result_orphaned`；一个 use 对应多个 result 或请求结束时仍无 result 时返回 `tool_history_incomplete`
+4. 并行 calls 保持在原 assistant 节点并允许后续一个或多个 user message 中的 results 按 id 回配。混合 text/tool_use 仍是一个节点；连续 assistant tool 节点不合并，前一节点在出现后一节点前仍未完成时按 incomplete 拒绝
+5. 对图中每个含 tool use 的 assistant 节点验证非空明文 reasoning；普通 assistant 节点和仅仅声明了 `tools`、但尚无 tool exchange 的首轮请求不强制。校验结果附着到 assistant 节点和对应边，不扩大到任意 user message 边界
+6. 明文完整时重建 thinking、text、tool_use block，移除 DeepSeek 不需要的 signature；输入对象不得原地修改
+7. 缺失明文或只有空格时返回稳定的 `reasoning_history_missing` 400，不注入占位符
+8. 继续执行现有 custom tool type 清理，不改变 hosted tool type、`thinking` 和 `output_config.effort`
 
 `provider_specific_fields` 只作为兼容旧 ModelResponse 的恢复来源。恢复后不把该内部副本发送到 provider metadata
 
@@ -140,14 +143,43 @@ DeepSeek 不会产生受支持的 `redacted_thinking`。如果入站历史来自
 
 为 `deepseek_anthropic` 使用独立 bridge strategy，不把 DeepSeek 假装成支持 native Responses 的 provider：
 
+#### 5.4.1 明确 dispatch 边界
+
+在 [`litellm/responses/main.py:1090`](/home/allcam/projects/litellm/litellm/responses/main.py:1090) 进入通用 `LiteLLMCompletionTransformationHandler` 之前增加 protocol strategy 分支。命中 `deepseek_anthropic` 后不得调用 `litellm.completion()`、`litellm.acompletion()`、`litellm.anthropic_messages()` 或 Router public method；这些入口会再次解析 provider/路由，可能重新进入普通 Anthropic Chat signature 逻辑或造成二次 Router attempt
+
+实际调用链固定为：
+
+```text
+Responses endpoint
+-> Router 选定 deployment 并生成 protocol context
+-> DeepSeekAnthropicResponsesBridge.prepare_request()
+-> shared session reconstruction + canonical validator
+-> DeepSeekAnthropicMessagesConfig.transform_anthropic_messages_request()
+-> BaseLLMHTTPHandler.anthropic_messages_handler(_is_async=True)
+-> configured DeepSeek /v1/messages
+-> DeepSeekAnthropicResponsesBridge response/stream transformation
+```
+
+`prepare_request()` 输出新的 messages、Messages optional params、所选 `DeepSeekAnthropicMessagesConfig`、`GenericLiteLLMParams` 和当前 call 的 logging object。bridge 把这些值直接传给 [`BaseLLMHTTPHandler.anthropic_messages_handler()`](/home/allcam/projects/litellm/litellm/llms/custom_httpx/llm_http_handler.py:2407)，由现有环境校验、header、URL、签名、HTTP 错误映射和 logging 生命周期完成 wire 调用；不重新执行 Router。wire-level fake transport 必须断言唯一出站 URL 是已选 deployment 的 `/v1/messages`，body 含无签名 thinking，且 `reasoning_protocol` 不在 body/header/metadata 中
+
+#### 5.4.2 canonical 转换
+
 1. Responses `reasoning` input item 解码为 pending canonical reasoning，并附着到紧随其后的 assistant message/function call；不得变成 `output_text`
-2. 连续 function calls 合并为同一个 assistant turn，保留 reasoning、call id 和顺序；`function_call_output` 必须匹配已有 call
-3. 使用与路径 A 相同的会话 validator 和 reasoning codec，最终编译为 DeepSeek Anthropic `/v1/messages` body
+2. 连续 function calls 合并为同一个 assistant 节点，保留 reasoning、call id 和顺序；`function_call_output` 用与路径 A 相同的 id 图 validator 配对
+3. canonical history 最终只由 `DeepSeekAnthropicMessagesConfig` 编译成 DeepSeek Anthropic `/v1/messages` body，不再经过 Chat transformation
 4. 非流式上游 thinking 转成 `ModelResponse.choices[0].message.reasoning_content`，再生成 Responses `reasoning` output item；function call 和 visible message 分别生成标准 output item
-5. 为 `previous_response_id` 持久化/读取的完整 Responses output 必须包含 reasoning item。session handler 重建后再次通过同一 validator；查不到完整 reasoning 时返回 `reasoning_history_unrecoverable`
-6. 显式 input 已包含完整 reasoning 时无需依赖 session。仅有 response id 或 session id 不能恢复明文
-7. streaming iterator 累计 reasoning delta 并生成标准 reasoning events；完成时把同一累计结果交给 completed response/logging payload，不能只保存在 SSE wrapper 实例中
-8. `response.failed`、iterator exception 或不完整终态不得写入伪造的成功 session history；Pydantic/dict terminal response 使用同一安全读取逻辑
+5. streaming iterator 累计 reasoning delta 并生成标准 reasoning events；完成时把同一累计结果交给 completed response/logging payload，不能只保存在 SSE wrapper 实例中
+6. `response.failed`、iterator exception 或不完整终态不得写入伪造的成功 session history；Pydantic/dict terminal response 使用同一安全读取逻辑
+
+#### 5.4.3 sync/async session 与 streaming
+
+把现有 `async_responses_api_session_handler()` 拆成一个共享的 async reconstruction core 和一个纯函数 canonical validator。async bridge 直接 await core；sync bridge 使用仓库现有 [`run_async_function()`](/home/allcam/projects/litellm/litellm/litellm_core_utils/asyncify.py:70) 执行同一个 core，禁止维护第二套 session 拼接逻辑或使用裸 `asyncio.run()`
+
+为 `previous_response_id` 持久化/读取的完整 Responses output 必须包含 reasoning item。显式 input 自身已包含完整 canonical history 时不依赖 session；一旦请求需要 response id 补全历史，以下情况在 sync/async 都返回相同的 `reasoning_history_unrecoverable` 400：未配置 session DB、SpendLog 不存在、cold-storage object 缺失/不可读、response id 不存在、已存 output 缺 reasoning。现有“session 为空时只保留本轮新 input”的宽松分支不能用于 `deepseek_anthropic`
+
+当前低层 [`anthropic_messages_handler()`](/home/allcam/projects/litellm/litellm/llms/custom_httpx/llm_http_handler.py:2407) 只接受 `_is_async=True`，同步分支会抛错。非流式 sync bridge 用 `run_async_function()` 覆盖从低层 HTTP call 到完整 response transformation 的整个 coroutine。sync streaming 不能在临时 loop 中取得 async iterator 后关闭 loop；新增专用 sync Responses iterator，由一个 worker thread 持有同一 event loop 直至上游 iterator 完成/失败/取消，通过有界 queue 逐 event 转发，并在 close、客户端断开和异常时取消 task、关闭 response 和 join thread。HTTP proxy 的 async endpoint 继续直接消费 async iterator，不经过该 sync wrapper
+
+sync 与 async 都先调用同一个 `prepare_request()`，再调用同一个低层 Messages transport 和 response codec。测试必须分别覆盖非流式与流式两轮：第一轮 reasoning 被保存，第二轮由 `previous_response_id` 重建到同一 assistant 节点，最终 wire body 完全一致；并对无 DB、cold storage 缺失和未知 response id 做参数化等价断言
 
 需要检查 #27425 的 pending reasoning、并行 function call 和 session reconstruction diff，但只移植与当前类契约兼容的最小部分
 
@@ -177,7 +209,7 @@ DeepSeek 不会产生受支持的 `redacted_thinking`。如果入站历史来自
 
 错误策略：
 
-- `reasoning_history_missing` / `reasoning_history_unrecoverable`：本地校验和等价上游 DeepSeek 400 统一映射为公共 400；不做同 deployment retry，默认也不做透明跨协议 fallback
+- `reasoning_history_missing` / `reasoning_history_unrecoverable` / `tool_history_invalid` / `tool_result_orphaned` / `tool_history_incomplete`：本地校验和等价上游 DeepSeek 400 统一映射为公共 400；不做同 deployment retry，默认也不做透明跨协议 fallback
 - rate limit、timeout、5xx 等首 token 前错误：沿用 Router fallback policy
 - 已输出 reasoning/text 后的错误：只有 continuation input 能保留已输出 reasoning，且目标 protocol 可无损消费时才允许 fallback；否则返回原始 mid-stream error
 
@@ -198,10 +230,12 @@ DeepSeek 不会产生受支持的 `redacted_thinking`。如果入站历史来自
 
 | 阶段 | 源码落点 | 主要测试 |
 | --- | --- | --- |
-| shared trusted resolver | Router model info type、共享 protocol resolver | 两入口 selector 隔离测试 |
+| shared trusted resolver | Router model info type、共享 protocol resolver、model-info 出站 sanitizer | 两入口 selector 隔离、model-info/metadata 泄漏测试 |
+| canonical tool graph | 共享 reasoning codec/validator | call id 缺失、重复、孤儿、未完成、并行和连续 assistant 节点测试 |
 | 路径 A request/wire | `messages/handler.py`, `deepseek/messages/transformation.py` | 现有 DeepSeek Messages mapped test |
 | 路径 A response/stream | Anthropic Messages response/streaming logging path | 对应 Messages transformation/streaming mapped test |
-| 路径 B selector/bridge | `responses/main.py`, `responses/litellm_completion_transformation` | Responses handler、reasoning transformation、session tests |
+| 路径 B direct dispatch | `responses/main.py`、新 DeepSeek Responses bridge、`custom_httpx/llm_http_handler.py` | 禁止 completion/public Messages、单次低层 dispatch、wire body 测试 |
+| 路径 B session/stream | `responses/litellm_completion_transformation`、专用 sync iterator | sync/async reconstruction、存储错误等价、stream lifecycle 测试 |
 | 路径 C generic adapter | Anthropic `responses_adapters` transformation/streaming iterator | 现有 adapter mapped tests |
 | Router policy | Router retry/fallback 与 Responses streaming fallback | `test_router_aresponses_streaming_fallback.py` 及 order fallback tests |
 | usage/cost | `Usage` 调用点、现有 cost/logging 入口 | DeepSeek usage、Anthropic cost、SpendLog tests |
@@ -210,14 +244,18 @@ DeepSeek 不会产生受支持的 `redacted_thinking`。如果入站历史来自
 
 1. **Phase 0 route proof**：分别发 `/v1/messages` 和 `/v1/responses`，断言解析后的 provider、deployment id、protocol 和具体 handler；禁止只断言模型名
 2. **原生 Messages 两轮**：第一轮代理返回 thinking + 并行 tool_use；模拟 Claude Code 原样回传 content 和 tool_result；第二轮 wire body 必须含完整无签名 thinking
-3. **Messages 历史错误**：tool-associated turn 缺明文、空格、只有 redacted data 均返回稳定 400；无工具 turn 可按策略通过；输入对象不变
-4. **公共 Responses 显式历史**：reasoning item、多个 function call、function_call_output 经 bridge 后，DeepSeek wire 顺序与 call id 正确
-5. **公共 Responses session**：第一轮 output 中 reasoning 被持久化；第二轮 `previous_response_id` 能重建完整 assistant turn；存储缺失时明确失败
-6. **Responses streaming**：reasoning delta 同时进入对外 events 和 completed/logging payload；failed/incomplete 不产生成功历史
-7. **路径 C handler test**：`/v1/messages -> OpenAI Responses adapter` 的 thinking 不再成为 output_text；该测试不伪装成 DeepSeek route
-8. **Router 集成**：本地 reasoning 400 不重试/不透明 fallback；可重试首 token 前错误重新选择并重新编译；不兼容 Claude fallback 被跳过；fallback 失败保留原始错误
-9. **usage/cost**：缓存 alias 相等且只计费一次，SpendLog token/cost 与最终 Usage 一致
-10. **Claude 不回归**：没有 protocol 的 Claude deployment 仍执行原签名保护，客户端 metadata 不能绕过
+3. **Messages 历史错误**：tool-associated assistant 节点缺明文、空格、只有 redacted data 均返回稳定 400；无工具节点可按策略通过；输入对象不变
+4. **tool id 图边界**：覆盖缺失/重复 call id、孤儿/重复/缺失 result、多个 user result、并行 calls、混合 text/tool_use 和连续 assistant tool 节点；断言错误码与节点分组
+5. **公共 Responses direct wire**：对 `completion`、`acompletion`、public Messages 和 Router 二次入口设置 fail-fast spy；请求只能命中一次低层 Messages handler，唯一 wire body 含无签名 thinking
+6. **公共 Responses 显式历史**：reasoning item、多个 function call、function_call_output 经 bridge 后，DeepSeek wire 顺序与 call id 正确
+7. **公共 Responses session**：sync/async 各做两轮，第一轮 output 中 reasoning 被持久化；第二轮 `previous_response_id` 重建后的 canonical history 与 wire body 相同
+8. **session 失败等价**：sync/async 参数化覆盖无 DB、SpendLog 缺失、cold storage 缺失/不可读、未知 response id 和已存 output 缺 reasoning，断言相同 status/error code；完整显式 input 不误依赖 session
+9. **Responses streaming**：async 与 sync reasoning delta 同时进入对外 events 和 completed/logging payload；sync iterator 取消/异常会关闭 worker、loop 和 response；failed/incomplete 不产生成功历史
+10. **路径 C handler test**：`/v1/messages -> OpenAI Responses adapter` 的 thinking 不再成为 output_text；该测试不伪装成 DeepSeek route
+11. **Router 集成**：本地 reasoning/tool-history 400 不重试/不透明 fallback；可重试首 token 前错误重新选择并重新编译；不兼容 Claude fallback 被跳过；fallback 失败保留原始错误；新 attempt 的 protocol 只来自新 deployment
+12. **protocol 隔离**：`/model/info`、`/v1/model/info`、`/v2/model/info` 的普通/admin/debug 响应和 provider wire、metadata、proxy request、SpendLog 均不含 `reasoning_protocol`；客户端同名字段不能启用逻辑
+13. **usage/cost**：缓存 alias 相等且只计费一次，SpendLog token/cost 与最终 Usage 一致
+14. **Claude 不回归**：没有 protocol 的 Claude deployment 仍执行原签名保护，客户端 metadata 不能绕过
 
 ## 7. 分阶段提交与验证
 
@@ -238,7 +276,7 @@ DeepSeek 不会产生受支持的 `redacted_thinking`。如果入站历史来自
 - `fix(responses): preserve reasoning through tool sessions`
 - `test(responses): cover deepseek reasoning session and fallback`
 
-实现独立入口 selector、bridge strategy、session 和 streaming 状态。Phase 1 通过不代表 Phase 2 可以上线
+实现独立入口 selector、低层 Messages direct dispatch、共享 sync/async session reconstruction 和专用 sync streaming 生命周期。Phase 1 通过不代表 Phase 2 可以上线
 
 ### Phase 3：通用 Messages-to-Responses adapter
 
@@ -254,4 +292,4 @@ DeepSeek 不会产生受支持的 `redacted_thinking`。如果入站历史来自
 
 ## 9. 完成判定
 
-只有以下条件全部满足才允许构建镜像：两个入口都从受信 model info 解析 protocol；原生 Messages 两轮和公共 Responses/session 两轮均保留完整 reasoning；tool-associated turn 缺失或 redacted reasoning 明确失败；fallback 只在可无损重编译时执行；缓存只计费一次；dict/Pydantic、streaming、SpendLog 和 Claude signature 回归测试通过；仓库不包含线上敏感配置
+只有以下条件全部满足才允许构建镜像：两个入口都从受信 model info 解析 protocol 且公开响应/日志不泄漏该字段；公共 Responses 不经过 completion/public Messages/二次 Router；原生 Messages 两轮和 sync/async Responses session 两轮均保留完整 reasoning；call-id 图的缺失、重复、孤儿和未完成状态明确失败；fallback 只在可无损重编译时执行并替换 deployment protocol context；缓存只计费一次；dict/Pydantic、sync/async streaming、SpendLog 和 Claude signature 回归测试通过；仓库不包含线上敏感配置
