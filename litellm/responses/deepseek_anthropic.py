@@ -15,6 +15,10 @@ from litellm.llms.deepseek.responses_transport import (
     DeepSeekResponsesRawTransport,
     freeze_deepseek_request,
 )
+from litellm.responses.deepseek_streaming import (
+    DeepSeekAnthropicResponsesAsyncStream,
+    DeepSeekAnthropicResponsesSyncStream,
+)
 from litellm.router_protocol import DeploymentProtocolContext
 from litellm.types.llms.openai import ResponseInputParam, ResponsesAPIOptionalRequestParams, ResponsesAPIResponse
 from litellm.types.router import GenericLiteLLMParams
@@ -344,7 +348,7 @@ class DeepSeekAnthropicResponsesBridge:
         stream: bool | None,
         protocol_context: DeploymentProtocolContext,
         **kwargs: object,
-    ) -> ResponsesAPIResponse:
+    ) -> object:
         if _is_async:
             return cls._async_handle(
                 model=model,
@@ -354,7 +358,19 @@ class DeepSeekAnthropicResponsesBridge:
                 stream=stream,
                 protocol_context=protocol_context,
                 kwargs=kwargs,
-            )  # type: ignore[return-value]
+            )
+        if stream:
+            return DeepSeekAnthropicResponsesSyncStream(
+                cls._async_handle(
+                    model=model,
+                    input=input,
+                    responses_api_request=responses_api_request,
+                    custom_llm_provider=custom_llm_provider,
+                    stream=True,
+                    protocol_context=protocol_context,
+                    kwargs=kwargs,
+                )
+            )
         return run_async_function(
             cls._async_handle,
             model=model,
@@ -377,8 +393,8 @@ class DeepSeekAnthropicResponsesBridge:
         stream: bool | None,
         protocol_context: DeploymentProtocolContext,
         kwargs: Mapping[str, object],
-    ) -> ResponsesAPIResponse:
-        del custom_llm_provider, stream, protocol_context
+    ) -> object:
+        del custom_llm_provider, protocol_context
         reasoning = responses_api_request.get("reasoning")
         thinking, enabled = _effort_to_thinking(reasoning)
         previous_response_id = responses_api_request.get("previous_response_id")
@@ -415,12 +431,20 @@ class DeepSeekAnthropicResponsesBridge:
         )
         http_client, owns_client = _http_client_from_kwargs(kwargs)
         raw_result = await DeepSeekResponsesRawTransport(http_client).send(
-            freeze_deepseek_request(url=url, headers=headers, body=request_body, stream=False)
+            freeze_deepseek_request(url=url, headers=headers, body=request_body, stream=stream is True)
         )
         if isinstance(raw_result, DeepSeekRawFailure):
             if owns_client:
                 await http_client.aclose()
             raise DeepSeekProtocolError("upstream_deepseek_error")
+        if stream:
+            return DeepSeekAnthropicResponsesAsyncStream(
+                raw_result.response,
+                model,
+                f"resp_ds_{int(time.time() * 1000)}",
+                owns_client,
+                http_client,
+            )
         payload = await _read_raw_payload(raw_result.response, owns_client, http_client)
         if not isinstance(payload, Mapping):
             raise DeepSeekProtocolError("upstream_response_invalid")

@@ -173,3 +173,65 @@ async def test_deepseek_responses_effort_none_rejects_complete_tool_history_with
             client=client,
         )
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_async_stream_uses_pure_decoder_and_completed_event():
+    sse = (
+        "event: message_start\n"
+        'data: {"message":{"usage":{"input_tokens":2}}}\n\n'
+        "event: content_block_start\n"
+        'data: {"index":0,"content_block":{"type":"thinking"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"index":0,"delta":{"type":"thinking_delta","thinking":"reason"}}\n\n'
+        "event: message_stop\n"
+        "data: {}\n\n"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"}, content=sse)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context(),
+        client=client,
+    )
+    events = [event async for event in stream]
+    await client.aclose()
+
+    assert [event["type"] for event in events] == [
+        "response.output_item.added",
+        "response.reasoning_summary_text.delta",
+        "response.completed",
+    ]
+    assert events[-1]["response"]["status"] == "completed"
+
+
+def test_deepseek_responses_sync_stream_worker_forwards_events():
+    sse = b"event: message_stop\ndata: {}\n\n"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, content=sse)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream = DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=False,
+        stream=True,
+        protocol_context=_context(),
+        client=client,
+    )
+    events = list(stream)
+    stream.close()
+    run_async_function(client.aclose)
+
+    assert events[0]["type"] == "response.completed"
