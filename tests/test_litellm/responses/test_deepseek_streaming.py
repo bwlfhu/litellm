@@ -12,6 +12,11 @@ from litellm.responses.deepseek_streaming import (
     DeepSeekAnthropicResponsesSSEDecoder,
     DeepSeekAnthropicResponsesSyncStream,
 )
+from litellm.responses.deepseek_accounting import (
+    AttemptRateSnapshot,
+    DeepSeekParentAccountingTracker,
+    build_attempt_snapshot,
+)
 
 
 async def _lines(events: list[tuple[str, dict]]) -> object:
@@ -258,3 +263,128 @@ async def test_router_retries_deepseek_stream_before_the_first_output_event():
 
     assert router.fallback_calls == 1
     assert events == [{"type": "response.completed", "response": {"status": "completed"}}]
+
+
+@pytest.mark.asyncio
+async def test_router_stream_fallback_failure_finalizes_parent_once():
+    class Source:
+        def __init__(self):
+            self._raised = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._raised:
+                raise StopAsyncIteration
+            self._raised = True
+            raise MidStreamFallbackError(
+                message="before output",
+                model="deepseek-v4-pro",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self):
+            return None
+
+    class Logging:
+        def __init__(self):
+            self.failures = []
+            self.async_failures = []
+            self.model_call_details = {}
+
+        def failure_handler(self, error, *args):
+            self.failures.append(error)
+
+        async def async_failure_handler(self, error, *args):
+            self.async_failures.append(error)
+
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.record_attempt(
+        build_attempt_snapshot(
+            model="deepseek-v4-pro",
+            deployment_id="primary-id",
+            usage={},
+            rates=AttemptRateSnapshot(),
+        )
+    )
+    logging_obj = Logging()
+
+    async def failed_fallback():
+        raise RuntimeError("fallback unavailable")
+        yield  # pragma: no cover
+
+    class RouterWithFailedFallback(Router):
+        def __init__(self):
+            super().__init__(model_list=[])
+
+        async def async_function_with_fallbacks_common_utils(self, **kwargs):
+            return failed_fallback()
+
+    router = RouterWithFailedFallback()
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "deepseek-v4-pro",
+            "stream": True,
+            "input": "question",
+            "original_generic_function": lambda **kwargs: None,
+            "_deepseek_parent_accounting_tracker": tracker,
+            "litellm_logging_obj": logging_obj,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="fallback unavailable"):
+        async for _ in wrapped:
+            pass
+
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+    assert tracker.claim_lifecycle() is False
+
+
+def test_router_sync_responses_stream_fallback_retries_before_output():
+    class Source:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise MidStreamFallbackError(
+                message="before output",
+                model="deepseek-v4-pro",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        def close(self):
+            self.closed = True
+
+    class RouterWithFallback(Router):
+        def __init__(self):
+            super().__init__(model_list=[])
+            self.fallback_calls = 0
+
+        async def async_function_with_fallbacks_common_utils(self, **kwargs):
+            self.fallback_calls += 1
+            return iter([{"type": "response.completed", "response": {"status": "completed"}}])
+
+    source = Source()
+    router = RouterWithFallback()
+    wrapped = router._responses_streaming_iterator(
+        response=source,
+        initial_kwargs={
+            "model": "deepseek-v4-pro",
+            "stream": True,
+            "input": "question",
+            "fallbacks": ["backup"],
+        },
+        original_function=lambda **kwargs: None,
+    )
+
+    assert list(wrapped) == [{"type": "response.completed", "response": {"status": "completed"}}]
+    assert router.fallback_calls == 1
+    assert source.closed is True

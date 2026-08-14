@@ -273,6 +273,19 @@ def _cost_value_as_float(value: Union[str, int, float, None]) -> Optional[float]
         return None
 
 
+def _has_deepseek_parent_accounting(response: object) -> bool:
+    """Return whether a Responses result was finalized by the DeepSeek bridge.
+
+    Router fallback chains can cross from a DeepSeek deployment to a native
+    Responses provider. The shared parent tracker is present for the whole
+    request, but a native provider must retain ownership of its own logging
+    and cost lifecycle. The bridge's private accounting marker is therefore
+    the authoritative result-side capability for the DeepSeek finalizer.
+    """
+    hidden_params = getattr(response, "_hidden_params", None)
+    return isinstance(hidden_params, dict) and isinstance(hidden_params.get("deepseek_parent_accounting"), dict)
+
+
 _PreRoutingStrategyT = TypeVar("_PreRoutingStrategyT")
 
 
@@ -2572,8 +2585,33 @@ class Router:
                             yield fallback_item
                     else:
                         yield fallback_response
-                except Exception as fallback_error:
+                except BaseException as fallback_error:
                     verbose_router_logger.error(f"Responses streaming fallback also failed: {fallback_error}")
+                    # A DeepSeek stream deliberately defers parent failure
+                    # finalization while the first event is still pending so
+                    # Router can retry.  If that retry fails while being
+                    # created or iterated, no terminal callback runs; close
+                    # the one parent lifecycle here before surfacing the
+                    # original failure (including local cancellation).
+                    accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+                    if accounting_tracker is not None:
+                        from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
+
+                        if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                            from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+
+                            try:
+                                await DeepSeekAnthropicResponsesBridge.finalize_router_failure(
+                                    tracker=accounting_tracker,
+                                    logging_obj=initial_kwargs.get("litellm_logging_obj"),
+                                    error=fallback_error,
+                                    is_async=True,
+                                )
+                            except BaseException as finalize_error:
+                                verbose_router_logger.debug(
+                                    "Responses streaming fallback failure finalization failed: %s",
+                                    finalize_error,
+                                )
                     if (
                         isinstance(fallback_error, MidStreamFallbackError)
                         and fallback_error.original_exception is not None
@@ -2600,6 +2638,136 @@ class Router:
                             )
 
         return FallbackResponsesStreamWrapper(stream_with_fallbacks())
+
+    def _responses_streaming_iterator(
+        self,
+        response: object,
+        initial_kwargs: Dict[str, Any],
+        original_function: Callable,
+    ) -> object:
+        """Wrap a synchronous Responses stream with Router fallback handling.
+
+        DeepSeek's sync bridge runs its decoder in a worker thread and raises
+        ``MidStreamFallbackError`` from ``__next__``.  The normal Responses
+        iterator has the same error contract, so keep the retry compilation in
+        the async fallback engine while exposing a synchronous iterator to the
+        caller.  This also gives the worker a single ``close`` path that waits
+        for its cancelled task before returning.
+        """
+        from litellm.exceptions import MidStreamFallbackError
+
+        source_iterator = response
+        router_self = self
+
+        class SyncFallbackResponsesStream:
+            def __init__(self, generator: Generator[Any, None, None]):
+                self._generator = generator
+                self._closed = False
+                self._hidden_params = dict(getattr(source_iterator, "_hidden_params", {}) or {})
+
+            def __iter__(self) -> "SyncFallbackResponsesStream":
+                return self
+
+            def __next__(self) -> Any:
+                return next(self._generator)
+
+            def close(self) -> None:
+                if self._closed:
+                    return
+                self._closed = True
+                close = getattr(self._generator, "close", None)
+                if callable(close):
+                    close()
+
+        def stream_with_fallbacks() -> Generator[Any, None, None]:
+            fallback_response: object | None = None
+            try:
+                for item in source_iterator:  # type: ignore[operator]
+                    yield item
+            except MidStreamFallbackError as error:
+                try:
+                    model_group = cast(str, initial_kwargs.get("model"))
+                    fallbacks: Optional[List] = initial_kwargs.get("fallbacks", router_self.fallbacks)
+                    context_window_fallbacks: Optional[List] = initial_kwargs.get(
+                        "context_window_fallbacks", router_self.context_window_fallbacks
+                    )
+                    content_policy_fallbacks: Optional[List] = initial_kwargs.get(
+                        "content_policy_fallbacks", router_self.content_policy_fallbacks
+                    )
+                    if error.is_pre_first_chunk or not error.generated_content:
+                        initial_kwargs["input"] = initial_kwargs.get("input")
+                    else:
+                        initial_kwargs["input"] = Router._build_responses_continuation_input(
+                            initial_kwargs.get("input"), error.generated_content
+                        )
+                    async def async_original_function(**call_kwargs: object) -> object:
+                        return original_function(**call_kwargs)
+
+                    initial_kwargs["original_function"] = router_self._ageneric_api_call_with_fallbacks_helper
+                    initial_kwargs["original_generic_function"] = async_original_function
+                    router_self._update_kwargs_before_fallbacks(
+                        model=model_group,
+                        kwargs=initial_kwargs,
+                        metadata_variable_name="litellm_metadata",
+                    )
+                    fallback_response = run_async_function(
+                        router_self.async_function_with_fallbacks_common_utils,
+                        e=error,
+                        disable_fallbacks=False,
+                        fallbacks=fallbacks,
+                        context_window_fallbacks=context_window_fallbacks,
+                        content_policy_fallbacks=content_policy_fallbacks,
+                        model_group=model_group,
+                        args=(),
+                        kwargs=initial_kwargs,
+                        include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
+                    )
+                    if hasattr(fallback_response, "__next__"):
+                        prepared_hidden_params = Router._prepare_fallback_hidden_params(fallback_response)
+                        for fallback_item in fallback_response:  # type: ignore[operator]
+                            Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
+                            yield fallback_item
+                    else:
+                        yield fallback_response
+                except BaseException as fallback_error:
+                    verbose_router_logger.error(f"Responses sync streaming fallback also failed: {fallback_error}")
+                    accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+                    if accounting_tracker is not None:
+                        from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
+
+                        if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                            from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+
+                            try:
+                                run_async_function(
+                                    DeepSeekAnthropicResponsesBridge.finalize_router_failure,
+                                    tracker=accounting_tracker,
+                                    logging_obj=initial_kwargs.get("litellm_logging_obj"),
+                                    error=fallback_error,
+                                    is_async=False,
+                                )
+                            except BaseException as finalize_error:
+                                verbose_router_logger.debug(
+                                    "Responses sync fallback failure finalization failed: %s", finalize_error
+                                )
+                    if isinstance(fallback_error, MidStreamFallbackError) and fallback_error.original_exception is not None:
+                        raise fallback_error.original_exception from fallback_error
+                    raise
+            finally:
+                close = getattr(source_iterator, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except BaseException as close_error:
+                        verbose_router_logger.debug("Responses sync source close failed: %s", close_error)
+                close_fallback = getattr(fallback_response, "close", None)
+                if callable(close_fallback):
+                    try:
+                        close_fallback()
+                    except BaseException as close_error:
+                        verbose_router_logger.debug("Responses sync fallback close failed: %s", close_error)
+
+        return SyncFallbackResponsesStream(stream_with_fallbacks())
 
     def _completion_streaming_iterator(
         self,
@@ -4677,7 +4845,7 @@ class Router:
                 response=response,
                 initial_kwargs=fallback_kwargs,
             )
-        if accounting_tracker.has_attempts:
+        if accounting_tracker.has_attempts and _has_deepseek_parent_accounting(response):
             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
             await DeepSeekAnthropicResponsesBridge.finalize_router_success(
@@ -4697,10 +4865,17 @@ class Router:
 
         from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
         from litellm.responses.deepseek_streaming import DeepSeekAnthropicResponsesSyncStream
+        from litellm.litellm_core_utils.core_helpers import safe_deep_copy
 
         accounting_tracker = DeepSeekParentAccountingTracker()
         kwargs["_deepseek_parent_accounting_tracker"] = accounting_tracker
         kwargs["_deepseek_parent_accounting_owner"] = True
+        fallback_kwargs: Dict[str, Any] = kwargs.copy()
+        if isinstance(fallback_kwargs.get("litellm_metadata"), dict):
+            fallback_kwargs["litellm_metadata"] = safe_deep_copy(fallback_kwargs["litellm_metadata"])
+        if isinstance(fallback_kwargs.get("metadata"), dict):
+            fallback_kwargs["metadata"] = safe_deep_copy(fallback_kwargs["metadata"])
+        fallback_kwargs["original_generic_function"] = original_function
         try:
             response = self._generic_api_call_with_fallbacks(original_function=original_function, **kwargs)
         except BaseException as error:
@@ -4715,7 +4890,11 @@ class Router:
                     is_async=False,
                 )
             raise
-        if not isinstance(response, DeepSeekAnthropicResponsesSyncStream) and accounting_tracker.has_attempts:
+        if (
+            not isinstance(response, DeepSeekAnthropicResponsesSyncStream)
+            and accounting_tracker.has_attempts
+            and _has_deepseek_parent_accounting(response)
+        ):
             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
             run_async_function(
@@ -4723,6 +4902,12 @@ class Router:
                 tracker=accounting_tracker,
                 response=response,
                 logging_obj=kwargs.get("litellm_logging_obj"),
+            )
+        if kwargs.get("stream") and hasattr(response, "__next__"):
+            return self._responses_streaming_iterator(
+                response=response,
+                initial_kwargs=fallback_kwargs,
+                original_function=original_function,
             )
         return response
 
