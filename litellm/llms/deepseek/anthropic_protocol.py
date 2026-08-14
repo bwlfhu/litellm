@@ -152,6 +152,19 @@ def _suffix_token_count(messages: Sequence[dict[str, object]]) -> int:
     return ceil(len(encoded) / 4)
 
 
+def validate_deepseek_anthropic_context_budget(
+    request: Mapping[str, object], max_context_tokens: int | None
+) -> None:
+    if max_context_tokens is None or max_context_tokens <= 0:
+        return
+    encoded = dumps(dict(request), ensure_ascii=True, separators=(",", ":"), default=str).encode()
+    input_tokens = ceil(len(encoded) / 4)
+    max_tokens = request.get("max_tokens")
+    output_reserve = max_tokens if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) else 0
+    if input_tokens + max(output_reserve, 0) > max_context_tokens:
+        raise DeepSeekProtocolError("reasoning_history_context_exhausted")
+
+
 def _generation_thinking_enabled(thinking: object) -> bool:
     if thinking is None:
         return True
@@ -315,4 +328,5 @@ __all__ = [
     "ToolAssociatedCanonicalSuffix",
     "compile_deepseek_anthropic_history",
     "deepseek_anthropic_session_manifest",
+    "validate_deepseek_anthropic_context_budget",
 ]

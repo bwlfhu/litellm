@@ -1,5 +1,8 @@
 """Router-authored protocol capabilities for provider-specific request paths."""
 
+from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -35,6 +38,11 @@ class DeploymentProtocolContext:
 
     def is_router_provenanced(self) -> bool:
         return self._provenance is _ROUTER_PROVENANCE
+
+
+_ACTIVE_ROUTER_PROTOCOL_CONTEXT: ContextVar[DeploymentProtocolContext | None] = ContextVar(
+    "active_router_protocol_context", default=None
+)
 
 
 def _non_negative_rate(value: object) -> float:
@@ -87,6 +95,18 @@ def _build_deployment_protocol_context(
     )
 
 
+@contextmanager
+def _activate_router_protocol_context(context: object) -> Generator[None, None, None]:
+    if not isinstance(context, DeploymentProtocolContext) or not context.is_router_provenanced():
+        yield
+        return
+    token = _ACTIVE_ROUTER_PROTOCOL_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _ACTIVE_ROUTER_PROTOCOL_CONTEXT.reset(token)
+
+
 def resolve_deployment_protocol(
     context: object,
     *,
@@ -116,6 +136,8 @@ def protocol_context_from_kwargs(
 ) -> DeploymentProtocolContext | None:
     candidate = kwargs.get("_litellm_deployment_protocol_context")
     if not isinstance(candidate, DeploymentProtocolContext):
+        return None
+    if _ACTIVE_ROUTER_PROTOCOL_CONTEXT.get() is not candidate:
         return None
     if resolve_deployment_protocol(candidate, deployment_id=deployment_id, attempt_id=attempt_id) is None:
         return None

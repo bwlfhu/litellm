@@ -4574,7 +4574,10 @@ class Router:
             if custom_llm_provider is not None:
                 response_kwargs["custom_llm_provider"] = custom_llm_provider
 
-            response = original_generic_function(**response_kwargs)
+            from litellm.router_protocol import _activate_router_protocol_context
+
+            with _activate_router_protocol_context(kwargs.get("_litellm_deployment_protocol_context")):
+                response = original_generic_function(**response_kwargs)
 
             rpm_semaphore = self._get_client(
                 deployment=deployment,
@@ -4713,14 +4716,17 @@ class Router:
             except Exception:
                 custom_llm_provider = None
 
-            response = original_function(
-                **{
-                    **data,
-                    "custom_llm_provider": custom_llm_provider,
-                    "caching": self.cache_responses,
-                    **kwargs,
-                }
-            )
+            from litellm.router_protocol import _activate_router_protocol_context
+
+            with _activate_router_protocol_context(kwargs.get("_litellm_deployment_protocol_context")):
+                response = original_function(
+                    **{
+                        **data,
+                        "custom_llm_provider": custom_llm_provider,
+                        "caching": self.cache_responses,
+                        **kwargs,
+                    }
+                )
 
             self.success_calls[model_name] += 1
             verbose_router_logger.info(f"{handler_name}(model={model_name})\033[32m 200 OK\033[0m")

@@ -614,6 +614,9 @@ def anthropic_messages_handler(
         anthropic_messages_optional_request_params["_deepseek_reasoning_suffix_token_budget"] = (
             protocol_context.suffix_token_budget
         )
+        anthropic_messages_optional_request_params["_deepseek_reasoning_context_token_budget"] = (
+            protocol_context.suffix_token_budget
+        )
 
     return base_llm_http_handler.anthropic_messages_handler(
         model=model,

@@ -614,6 +614,7 @@ class DeepSeekAnthropicResponsesBridge:
         )
         optional_params = _bridge_optional_params(responses_api_request, thinking, enabled)
         optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
+        optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.suffix_token_budget
         config = DeepSeekAnthropicMessagesConfig()
         request_body = config.transform_anthropic_messages_request(
             model=model,

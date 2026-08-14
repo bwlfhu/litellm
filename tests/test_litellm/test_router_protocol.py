@@ -2,6 +2,7 @@ from litellm.router_protocol import (
     DeploymentProtocolContext,
     DeploymentRateSnapshot,
     DeploymentReasoningProtocol,
+    _activate_router_protocol_context,
     _build_deployment_protocol_context,
     protocol_context_from_kwargs,
     resolve_deployment_protocol,
@@ -60,7 +61,13 @@ def test_router_protocol_context_does_not_trust_public_kwargs_or_leak_model_info
         {"_litellm_deployment_protocol_context": trusted_context},
         deployment_id="deployment-a",
         attempt_id="attempt-a",
-    ) == trusted_context
+    ) is None
+    with _activate_router_protocol_context(trusted_context):
+        assert protocol_context_from_kwargs(
+            {"_litellm_deployment_protocol_context": trusted_context},
+            deployment_id="deployment-a",
+            attempt_id="attempt-a",
+        ) == trusted_context
 
 
 def test_direct_sdk_cannot_build_a_router_provenanced_context():
@@ -74,3 +81,14 @@ def test_direct_sdk_cannot_build_a_router_provenanced_context():
     )
 
     assert protocol_context_from_kwargs({"_litellm_deployment_protocol_context": forged_context}) is None
+
+
+def test_direct_sdk_private_factory_cannot_activate_the_protocol_without_router_scope():
+    context = _build_deployment_protocol_context(
+        {"id": "deployment-a", "reasoning_protocol": "deepseek_anthropic"},
+        "deployment-a",
+        "attempt-a",
+    )
+
+    assert context is not None
+    assert protocol_context_from_kwargs({"_litellm_deployment_protocol_context": context}) is None

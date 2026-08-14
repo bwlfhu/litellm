@@ -1,4 +1,5 @@
 import litellm
+import pytest
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
@@ -226,6 +227,24 @@ def test_deepseek_anthropic_messages_rejects_suffix_over_router_budget():
         assert error.code == "reasoning_history_context_exhausted"
     else:
         raise AssertionError("suffix over the router budget must not reach the provider")
+
+
+def test_deepseek_anthropic_messages_rejects_full_context_over_router_budget():
+    config = DeepSeekAnthropicMessagesConfig()
+
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_history_context_exhausted"):
+        config.transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[{"role": "user", "content": "x" * 128}],
+            anthropic_messages_optional_request_params={
+                "max_tokens": 16,
+                "thinking": {"type": "enabled"},
+                "_deepseek_reasoning_suffix_token_budget": 4096,
+                "_deepseek_reasoning_context_token_budget": 32,
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
 
 
 def test_deepseek_canonical_history_preserves_parallel_tool_reasoning_and_digest():

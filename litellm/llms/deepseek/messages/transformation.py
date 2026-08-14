@@ -11,7 +11,10 @@ from litellm.llms.anthropic.experimental_pass_through.messages.transformation im
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 
-from litellm.llms.deepseek.anthropic_protocol import compile_deepseek_anthropic_history
+from litellm.llms.deepseek.anthropic_protocol import (
+    compile_deepseek_anthropic_history,
+    validate_deepseek_anthropic_context_budget,
+)
 
 
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
@@ -122,8 +125,11 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     ) -> Dict:
         request_params = dict(anthropic_messages_optional_request_params)
         suffix_budget = request_params.pop("_deepseek_reasoning_suffix_token_budget", None)
+        context_budget = request_params.pop("_deepseek_reasoning_context_token_budget", None)
         if not isinstance(suffix_budget, int):
             suffix_budget = None
+        if not isinstance(context_budget, int):
+            context_budget = None
         canonical = compile_deepseek_anthropic_history(
             messages,
             request_params.get("thinking"),
@@ -144,4 +150,5 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             anthropic_messages_request["output_config"] = deepseek_output_config
         if "tools" in anthropic_messages_request:
             anthropic_messages_request["tools"] = self._sanitize_tools_for_deepseek(anthropic_messages_request["tools"])
+        validate_deepseek_anthropic_context_budget(anthropic_messages_request, context_budget)
         return anthropic_messages_request
