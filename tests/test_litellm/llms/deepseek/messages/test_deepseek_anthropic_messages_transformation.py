@@ -197,6 +197,37 @@ def test_deepseek_anthropic_messages_preserves_thinking_and_sanitizes_custom_too
     assert request["tools"][1]["type"] == "web_search_20260209"
 
 
+def test_deepseek_anthropic_messages_rejects_suffix_over_router_budget():
+    config = DeepSeekAnthropicMessagesConfig()
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "reason"},
+                {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "value"}]},
+    ]
+
+    try:
+        config.transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=messages,
+            anthropic_messages_optional_request_params={
+                "max_tokens": 32,
+                "thinking": {"type": "enabled"},
+                "_deepseek_reasoning_suffix_token_budget": 0,
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+    except DeepSeekProtocolError as error:
+        assert error.code == "reasoning_history_context_exhausted"
+    else:
+        raise AssertionError("suffix over the router budget must not reach the provider")
+
+
 def test_deepseek_canonical_history_preserves_parallel_tool_reasoning_and_digest():
     messages = [
         {"role": "user", "content": "question"},

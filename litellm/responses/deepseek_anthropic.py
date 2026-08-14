@@ -477,8 +477,13 @@ class DeepSeekAnthropicResponsesBridge:
         session_history = _load_session_history(previous_response_id)
         new_messages = _responses_input_to_messages(input, responses_api_request.get("instructions"))
         all_messages = session_history + tuple(new_messages)
-        canonical = compile_deepseek_anthropic_history(all_messages, thinking)
+        canonical = compile_deepseek_anthropic_history(
+            all_messages,
+            thinking,
+            max_suffix_tokens=protocol_context.suffix_token_budget,
+        )
         optional_params = _bridge_optional_params(responses_api_request, thinking, enabled)
+        optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
         config = DeepSeekAnthropicMessagesConfig()
         request_body = config.transform_anthropic_messages_request(
             model=model,

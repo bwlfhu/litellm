@@ -20,6 +20,20 @@ def _context():
     return context
 
 
+def _context_with_suffix_budget(suffix_token_budget: int):
+    context = _build_deployment_protocol_context(
+        {
+            "id": "deployment-a",
+            "reasoning_protocol": "deepseek_anthropic",
+            "deepseek_reasoning_suffix_token_budget": suffix_token_budget,
+        },
+        "deployment-a",
+        "attempt-a",
+    )
+    assert context is not None
+    return context
+
+
 def _unexpected_public_entrypoint(**kwargs):
     raise AssertionError("completion entrypoint must not be used")
 
@@ -173,6 +187,35 @@ async def test_deepseek_responses_effort_none_rejects_complete_tool_history_with
             client=client,
         )
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_uses_router_suffix_budget_before_http():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_history_context_exhausted"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input=[
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "reason"}]},
+                {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "value"},
+            ],
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context_with_suffix_budget(0),
+            client=client,
+        )
+    await client.aclose()
+
+    assert requests == []
 
 
 @pytest.mark.asyncio

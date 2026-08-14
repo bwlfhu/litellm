@@ -610,6 +610,10 @@ def anthropic_messages_handler(
                 **thinking_param,
                 "display": "summarized",
             }
+    if protocol_context is not None:
+        anthropic_messages_optional_request_params["_deepseek_reasoning_suffix_token_budget"] = (
+            protocol_context.suffix_token_budget
+        )
 
     return base_llm_http_handler.anthropic_messages_handler(
         model=model,
