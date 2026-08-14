@@ -85,7 +85,7 @@ Responses endpoint
 9. **工具会话完整性**：按 `tool_use.id <-> tool_result.tool_use_id` 建立调用图，不用 user message 位置推断 turn。工具会话中从首次 tool use 开始的 assistant 历史后缀都必须有非空明文 reasoning，包括不含 tool call 的普通 assistant 节点
 10. **顺序与配对**：thinking、visible text、tool call 以及后续 tool result 保持原始顺序；并行 tool calls 属于同一个 assistant 节点，每个 call id 在请求历史中唯一且恰好匹配一个 result
 11. **无状态边界**：不向 DeepSeek 上游发送 `previous_response_id`。只有代理已重建完整 history 时才展开为 wire input，否则返回明确 400
-12. **单一计费事实源**：provider usage 只归一化一次，所有日志、cost 和 metrics 读取同一个 `Usage`，不得分别累加别名字段
+12. **单一计费事实源**：每个 provider attempt 的 usage 只归一化一次并绑定其 rate snapshot；parent Usage 聚合这些 normalized attempt usage，cost 按 attempt 独立计算后求和，所有日志和 metrics 不得分别累加别名字段
 
 ## 5. 实施方案
 
@@ -128,9 +128,10 @@ Responses consumer 把解析后的不可变 protocol context 显式传入 reques
 6. Responses session 一旦出现 tool use，就以原子记录持久化完整的 `ToolAssociatedCanonicalSuffix` 和其完整性信息；`history_reasoning_required` 只是索引/快速拒绝标记，不能作为历史完整性的证明。历史裁剪只能删除该 suffix 之前的前缀，不能删除 suffix 内任一 assistant、reasoning、tool_use 或 tool_result 节点；客户端自持的 Messages 历史只能按其实际回传内容判断，代理不能恢复客户端已删除的旧 tool exchange
 7. 当 `history_reasoning_required=true` 时，无论本轮生成开关如何，都先验证 suffix 的版本、边界、digest、首个 tool use、每个 reasoning、tool_use/tool_result 配对和末端 assistant 后缀，再从 Anthropic thinking block、顶层 `reasoning_content` 或 `provider_specific_fields.reasoning_content` 恢复完整历史 reasoning。flag 仍在但 suffix、首个 tool use、任一 reasoning 或任一 tool_result 被裁掉时，直接返回 `reasoning_history_unrecoverable`；缺失或空白但结构仍可定位时返回 `reasoning_history_missing`，只有 redacted data 时返回 `reasoning_history_unrecoverable`
 8. `history_reasoning_required=true && generation_thinking_enabled=false` 返回 `reasoning_mode_conflict` 400，不向上游发请求。这样既不丢历史，也不假设 DeepSeek 接受“关闭本轮 thinking 但回放工具 reasoning”的组合
-9. 无工具历史且本轮 thinking disabled 时，可以省略普通 assistant 的可选 reasoning，并在 wire 中设置 `thinking.type=disabled`；原始输入对象、visible content 和 tool graph 不得修改
-10. 允许请求时，按历史义务重建所需 thinking、text、tool_use block，移除 DeepSeek 不需要的 signature；`output_config.effort` 只调节本轮生成强度，不取消历史回放义务
-11. 继续执行现有 custom tool type 清理，不改变 hosted tool type
+9. 在编译 wire 前估算完整 `ToolAssociatedCanonicalSuffix` 的 token 数，连同本轮输入和 provider context window 保留量检查上限。suffix 自身或合并后的历史超过预算时返回 `reasoning_history_context_exhausted`，该错误不可 fallback，响应明确要求客户端开启新会话或显式重置工具会话；不得把它交给上游再产生模糊 context-window 400
+10. 无工具历史且本轮 thinking disabled 时，可以省略普通 assistant 的可选 reasoning，并在 wire 中设置 `thinking.type=disabled`；原始输入对象、visible content 和 tool graph 不得修改
+11. 允许请求时，按历史义务重建所需 thinking、text、tool_use block，移除 DeepSeek 不需要的 signature；`output_config.effort` 只调节本轮生成强度，不取消历史回放义务
+12. 继续执行现有 custom tool type 清理，不改变 hosted tool type
 
 `provider_specific_fields` 只作为兼容旧 ModelResponse 的恢复来源。恢复后不把该内部副本发送到 provider metadata
 
@@ -175,7 +176,7 @@ Responses endpoint
 
 1. `_prepare_anthropic_messages_wire_request(config: BaseAnthropicMessagesConfig, ...) -> PreparedAnthropicMessagesWireRequest`：复用环境校验、header 过滤、所选 config 的 transform、URL、签名、序列化和 timeout 解析；DeepSeek Path B 传入 `DeepSeekAnthropicMessagesConfig`，原生 Claude 传入选定的普通 Anthropic config。每个 attempt 返回冻结的 prebuilt body bytes/URL/headers/signed body/timeout，单个 attempt 内 config transform 只能发生一次。生成后该 attempt 的 body bytes、headers、签名和 URL 均不可变
 2. `ClaudeAnthropicMessagesTransport`：原生 `/v1/messages` 继续保留 Claude 现有的签名恢复策略。签名类 400 可以触发第二次 attempt，但必须从不可变 canonical history 的深拷贝派生一个新的 attempt candidate，只在 candidate 上删除无效 Claude thinking block，再用选定的 Claude config 重新调用 `_prepare_anthropic_messages_wire_request()`；不得原地修改 canonical history、public input 或已发送的 frozen request，也不得把该可变恢复策略暴露给 DeepSeek Path B
-3. `DeepSeekResponsesRawTransport`：公共 `/v1/responses` 使用不调用 `raise_for_status()` 且不启用隐式连接重试的专用低层发送路径，只发送一次冻结的 HTTP 请求，并返回强类型 `DeepSeekRawTransportResult`。成功结果包含 `status_code`、不可变 `headers`、`body_bytes` 或异步 `stream` 句柄及唯一 `close()`；400/其他 HTTP 状态作为结果交给 Responses owner，不转换成通用异常。`ConnectError` 和取消分别返回带 `kind`、原始错误、request count 和 close 状态的 typed failure/cancellation result；请求次数固定为一次，响应或 stream 必须由 owner 关闭且只关闭一次。不得调用现有会自动 `raise_for_status()` 或连接重试的 `AsyncHTTPHandler.post()` 默认路径，不得调用 `transform_anthropic_messages_request_on_http_error()`、删除 thinking block、重签名、原地修改 prebuilt request、更新 `logging_obj.model_call_details`、重复 `pre_call` 或写 retry body。该 transport 不调用 `update_from_kwargs`、Anthropic response transform、agentic hooks、fake stream、success/failure hook、Usage、cost 或 SpendLog；上游 400 原样交给 Responses accounting owner
+3. `DeepSeekResponsesRawTransport`：公共 `/v1/responses` 使用不调用 `raise_for_status()` 且不启用隐式连接重试的专用低层发送路径，只发送一次冻结的 HTTP 请求，并返回强类型 `DeepSeekRawTransportResult`。成功结果包含 `status_code`、不可变 `headers`、`body_bytes` 或异步 `stream` 句柄及唯一 `close()`；400/其他 HTTP 状态作为结果交给 Responses owner，不转换成通用异常。上游发送的 cancelled/failed 事件可以作为 typed result，但本地任务或客户端取消必须在 `finally` 完成 response/stream close 后继续抛出 `asyncio.CancelledError`，不能转换成正常结果。同步 worker 必须把取消传播到 worker task，等待其清理完成后再向调用方传播取消。请求次数固定为一次，响应或 stream 必须由 owner 关闭且只关闭一次。不得调用现有会自动 `raise_for_status()` 或连接重试的 `AsyncHTTPHandler.post()` 默认路径，不得调用 `transform_anthropic_messages_request_on_http_error()`、删除 thinking block、重签名、原地修改 prebuilt request、更新 `logging_obj.model_call_details`、重复 `pre_call` 或写 retry body。该 transport 不调用 `update_from_kwargs`、Anthropic response transform、agentic hooks、fake stream、success/failure hook、Usage、cost 或 SpendLog；上游 400 原样交给 Responses accounting owner
 
 原生 Messages handler 只复用共享的 request preparation，并通过 `ClaudeAnthropicMessagesTransport` 保留现有签名恢复和重新 prepare 行为，再继续执行原有 Anthropic response transform、stream wrapper 和 finalize，保持路径 A 行为。Responses bridge 复用同一 request preparation，但只能调用 `DeepSeekResponsesRawTransport`；每个选定 attempt 由 Responses logging owner 在 raw transport 前执行一次 provider pre-call，并直接解析 raw JSON，不重新执行 Router，也不进入 Anthropic finalize
 
@@ -192,7 +193,7 @@ wire-level fake transport 必须断言 DeepSeek config transform 和首个 HTTP 
 5. session/input 出现工具历史时设置 `history_reasoning_required=true` 并始终恢复、校验 reasoning；若当前 effort 为 `none`，返回 `reasoning_mode_conflict` 400，不删除 reasoning、不调用 raw transport
 6. canonical history 最终只由 `DeepSeekAnthropicMessagesConfig` 编译一次 DeepSeek Anthropic `/v1/messages` body，不再经过 Chat transformation 或完整 Anthropic Messages handler
 7. 非流式上游 thinking 转成 `ModelResponse.choices[0].message.reasoning_content`，再生成 Responses `reasoning` output item；function call 和 visible message 分别生成标准 output item
-8. `DeepSeekAnthropicResponsesSSEDecoder` 累计 reasoning delta 并生成标准 reasoning events；完成时把同一累计结果交给 completed response/logging payload，不能只保存在 decoder 实例中。该 decoder 不得进入 Anthropic pass-through iterator 或 success handler
+8. `DeepSeekAnthropicResponsesSSEDecoder` 累计 reasoning delta 并生成标准 reasoning events；首个对外 reasoning/text/tool event 到达时设置不可回退的 `output_started=true`。此后 iterator error 只能关闭并原样结束当前 stream，不能进入 Router `MidStreamFallbackError`；完成时把同一累计结果交给 completed response/logging payload，不能只保存在 decoder 实例中。该 decoder 不得进入 Anthropic pass-through iterator 或 success handler
 9. `response.failed`、iterator exception 或不完整终态不得写入伪造的成功 session history；Pydantic/dict terminal response 使用同一安全读取逻辑
 
 #### 5.4.3 sync/async session 与 streaming
@@ -201,13 +202,13 @@ wire-level fake transport 必须断言 DeepSeek config transform 和首个 HTTP 
 
 为 `previous_response_id` 持久化/读取的完整 Responses output 必须包含 reasoning item、完整 `ToolAssociatedCanonicalSuffix` 和版本/digest manifest，并与 response record 原子提交。显式 input 自身已包含完整 canonical history 时不依赖 session；一旦请求需要 response id 补全历史，以下情况在 sync/async 都返回相同的 `reasoning_history_unrecoverable` 400：未配置 session DB、SpendLog 不存在、cold-storage object 缺失/不可读、response id 不存在、已存 output 缺 reasoning、suffix manifest 缺失/不匹配或 suffix 任一节点被裁剪。现有“session 为空时只保留本轮新 input”的宽松分支不能用于 `deepseek_anthropic`
 
-DeepSeek raw transport 只提供 async 网络实现。非流式 sync bridge 用 `run_async_function()` 覆盖从共享 request preparation、`DeepSeekResponsesRawTransport` 到 Responses response transformation 的整个 coroutine，不调用完整 Messages handler。sync streaming 不能在临时 loop 中取得 raw async stream 后关闭 loop；新增专用 sync Responses iterator，由一个 worker thread 持有同一 event loop 直至上游 response/iterator 完成、失败或取消，通过有界 queue 逐 event 转发，并在 close、客户端断开和异常时取消 task、关闭 response 和 join thread。HTTP proxy 的 async endpoint 继续直接消费 DeepSeek raw async stream，不经过该 sync wrapper
+DeepSeek raw transport 只提供 async 网络实现。非流式 sync bridge 用 `run_async_function()` 覆盖从共享 request preparation、`DeepSeekResponsesRawTransport` 到 Responses response transformation 的整个 coroutine，不调用完整 Messages handler。sync streaming 不能在临时 loop 中取得 raw async stream 后关闭 loop；新增专用 sync Responses iterator，由一个 worker thread 持有同一 event loop 直至上游 response/iterator 完成、失败或取消，通过有界 queue 逐 event 转发，并在 close、客户端断开和异常时取消 task、等待 worker 完成 response/stream close 和 join thread；本地取消不得转换成正常终态，清理完成后必须向同步调用方重新抛出取消。HTTP proxy 的 async endpoint 继续直接消费 DeepSeek raw async stream，不经过该 sync wrapper
 
 sync 与 async 都先调用同一个 canonical `prepare_request()`，再调用同一个 wire preparation、`DeepSeekResponsesRawTransport` 和 Responses response codec。测试必须分别覆盖非流式与流式两轮：第一轮 reasoning 被保存，第二轮由 `previous_response_id` 重建到同一 assistant 节点，最终 wire body 完全一致；并对无 DB、cold storage 缺失和未知 response id 做参数化等价断言
 
 #### 5.4.4 父调用日志与计费生命周期
 
-public `/v1/responses` 外层是该调用唯一的 accounting owner。bridge 持有一个 parent `LiteLLMLoggingObj`、`litellm_call_id` 和每次尝试的 attempt id，不创建嵌套 public call 或第二个 endpoint logging context。每个 provider attempt 可以有一次内部 pre-call 和一次 raw request，但不产生独立 SpendLog、cost hook 或最终 response Usage；Responses bridge 收集每个 attempt 实际产生的 provider usage，在 parent owner 内只归一化一次聚合 `Usage`，只执行一次最终 success/failure hook、aggregate cost calculation 和 parent SpendLog write
+public `/v1/responses` 外层是该调用唯一的 accounting owner。bridge 持有一个 parent `LiteLLMLoggingObj`、`litellm_call_id` 和每次尝试的 attempt id，不创建嵌套 public call 或第二个 endpoint logging context。每个 provider attempt 可以有一次内部 pre-call 和一次 raw request，并生成一个不可变 `AttemptAccountingSnapshot(model, deployment, rate_snapshot, normalized_usage, attempt_cost)`，但不产生独立 SpendLog、cost hook 或最终 response Usage。每个 attempt 使用其自身 model/deployment/cache 费率快照独立计算 cost；Responses bridge 只在 parent owner 内按 attempt cost 求和、按 normalized usage 聚合一次 `Usage`，只执行一次最终 success/failure hook 和 parent SpendLog write。parent SpendLog 只保存合计和脱敏 attempt 摘要，不保存 reasoning 或完整 provider metadata
 
 非流式成功、首 token 前失败、流中失败和正常 completed 都遵守同一不变量：
 
@@ -218,10 +219,10 @@ one public Responses parent call
 = one aggregate cost calculation
 = one normalized aggregate response Usage
 
-每个 attempt 只允许一个内部 request/pre-call/usage snapshot。首 token 前 fallback、部分输出后 fallback 和 fallback 失败都把已实际发生且可计费的 attempt usage 纳入 parent aggregate；没有 provider usage 的连接失败不虚构 token/cost。不得把 partial 与 fallback usage 取最大值、重复合并或分别写成独立 SpendLog
+每个 attempt 只允许一个内部 request/pre-call/usage snapshot。首 token 前 fallback、部分输出后 fallback 和 fallback 失败都把已实际发生且可计费的 attempt usage 纳入 parent aggregate；每个 attempt 按自己的 rate snapshot 计价后再求和，不使用最终 deployment 的费率回算历史 attempt。没有 provider usage 的连接失败不虚构 token/cost。不得把 partial 与 fallback usage 取最大值、重复合并或分别写成独立 SpendLog
 ```
 
-raw transport 不读取或记录 usage；streaming completed payload、callback payload 和 parent SpendLog 必须引用 Responses bridge 归一化的同一份最终 aggregate Usage 数值。无 fallback 的成功路径只有一个 attempt；fallback 路径允许多个 attempt request/pre-call，但 parent success/failure hook、aggregate cost calculator、SpendLog writer 和 response usage normalization 各只执行一次。测试分别覆盖首 token 前 fallback、部分输出后 fallback 和 fallback 失败，断言没有 child accounting、漏记或重复计费，也不得残留成功 SpendLog 或 Anthropic finalize/agentic hook
+raw transport 不读取或记录 usage；streaming completed payload、callback payload 和 parent SpendLog 必须引用 Responses bridge 归一化的同一份最终 aggregate Usage 数值。无 fallback 的成功路径只有一个 attempt；fallback 路径允许多个 attempt request/pre-call，但每个 attempt 独立 cost calculation 后 parent success/failure hook、aggregate cost sum、SpendLog writer 和 response usage normalization 各只执行一次。测试分别覆盖首 token 前 fallback、部分输出后 fallback 和 fallback 失败，使用主/备 deployment 不同 model、cache-read 费率的 fixture，断言没有 child accounting、漏记或重复计费，也不得残留成功 SpendLog 或 Anthropic finalize/agentic hook
 
 需要检查 #27425 的 pending reasoning、并行 function call 和 session reconstruction diff，但只移植与当前类契约兼容的最小部分
 
@@ -240,7 +241,8 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 | Provider `prompt_cache_hit_tokens=N` | 只传给 `Usage` 一次 |
 | `prompt_tokens_details.cached_tokens` | 由 `Usage` 派生，必须等于 `N` |
 | `_cache_read_input_tokens` / Anthropic `cache_read_input_tokens` | 同一 `N` 的别名视图，不是新增 token |
-| SpendLog、Prometheus、cost | 只读标准 Usage，不再加总两个别名 |
+| SpendLog、Prometheus | 只读 parent aggregate Usage，不再加总两个别名 |
+| cost | 读取每个 attempt 的标准 Usage 和 rate snapshot 独立计价，再求和，不使用最终 deployment 费率回算 |
 | 未缓存 input | `prompt_tokens - cached_tokens - cache_creation_tokens`，下限为 0 |
 
 回归测试必须断言 `cached_tokens == cache_read_input_tokens == N`，并用已知费率验证 cache read 只计费一次。缺少 provider cache-write 字段时不虚构 `cache_creation_input_tokens`
@@ -249,13 +251,13 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 
 先区分 retry 和 fallback：400 默认不做同 deployment retry，但非流式外层 Router 仍可能按 order/fallback 配置尝试其他 deployment；Responses 流中的 400 当前明确不触发 mid-stream fallback。协议完整性错误不能依赖 bridge 返回普通 400 来阻止路由，因为 Router 通用 fallback 会捕获普通异常
 
-定义内部可识别的 `DeepSeekProtocolNonFallbackError`（`category=protocol_integrity`、`retry_allowed=false`、`fallback_allowed=false`、public status=400）。bridge 对 `reasoning_history_missing`、`reasoning_history_unrecoverable`、`reasoning_mode_conflict`、`tool_history_invalid`、`tool_result_orphaned` 和 `tool_history_incomplete` 统一抛出该 typed error；公共 endpoint 最外层再将它映射为结构化 400。`async_function_with_fallbacks()`、同步对应路径和其他 retry/fallback 判定点必须在通用异常捕获之前识别该 category，并直接返回 primary error，禁止调用同 model group 的 higher-order deployment 和跨 group fallback。上游 DeepSeek 等价 400 解析后也必须映射到同一 category；只有 rate limit、timeout、5xx 等明确可重试错误沿用 Router fallback policy
+定义内部可识别的 `DeepSeekProtocolNonFallbackError`（`category=protocol_integrity`、`retry_allowed=false`、`fallback_allowed=false`、public status=400）。bridge 对 `reasoning_history_missing`、`reasoning_history_unrecoverable`、`reasoning_history_context_exhausted`、`reasoning_mode_conflict`、`tool_history_invalid`、`tool_result_orphaned` 和 `tool_history_incomplete` 统一抛出该 typed error；公共 endpoint 最外层再将它映射为结构化 400。`async_function_with_fallbacks()`、同步对应路径和其他 retry/fallback 判定点必须在通用异常捕获之前识别该 category，并直接返回 primary error，禁止调用同 model group 的 higher-order deployment 和跨 group fallback。上游 DeepSeek 等价 400 解析后也必须映射到同一 category；只有 rate limit、timeout、5xx 等明确可重试错误沿用 Router fallback policy
 
 错误策略：
 
-- `reasoning_history_missing` / `reasoning_history_unrecoverable` / `reasoning_mode_conflict` / `tool_history_invalid` / `tool_result_orphaned` / `tool_history_incomplete`：本地校验和等价上游 DeepSeek 400 统一映射为 `DeepSeekProtocolNonFallbackError`，再映射为公共 400；不做同 deployment retry，也不调用同 group 或跨 group fallback。校验顺序是 tool graph、历史 suffix 完整性、历史 reasoning、模式冲突，因此 disabled/none 不能掩盖已经损坏的历史
+- `reasoning_history_missing` / `reasoning_history_unrecoverable` / `reasoning_history_context_exhausted` / `reasoning_mode_conflict` / `tool_history_invalid` / `tool_result_orphaned` / `tool_history_incomplete`：本地校验和等价上游 DeepSeek 400 统一映射为 `DeepSeekProtocolNonFallbackError`，再映射为公共 400；不做同 deployment retry，也不调用同 group 或跨 group fallback。校验顺序是 tool graph、历史 suffix 完整性、suffix token 预算、历史 reasoning、模式冲突，因此 disabled/none 不能掩盖已经损坏或超限的历史
 - rate limit、timeout、5xx 等首 token 前错误：沿用 Router fallback policy
-- 已输出 reasoning/text 后的错误：只有 continuation input 能保留已输出 reasoning，且目标 protocol 可无损消费时才允许 fallback；否则返回原始 mid-stream error
+- DeepSeek Responses 在首个对外 reasoning、text 或 tool delta 后设置 `output_started=true`；此后任何上游失败都禁止进入通用 `MidStreamFallbackError` 或第二 deployment，关闭当前 stream 并原样返回原始 mid-stream error。只有首个对外 event 之前的错误，才可从不可变原始 public input 按既定 policy fallback；不能用只含文本的 continuation input 续接 DeepSeek reasoning/tool 状态
 
 每个 fallback attempt 都从不可变的原始 public request 重建 canonical input，再根据新 deployment 的 protocol 重新编码。不得复用已经为上一 provider 编译的 wire messages
 
@@ -296,14 +298,14 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 6. **tool id 图边界**：覆盖缺失/重复 call id、孤儿/重复/缺失 result、多个 user result、并行 calls、混合 text/tool_use 和连续 assistant tool 节点；断言错误码与节点分组
 7. **公共 Responses raw wire**：对 `completion`、`acompletion`、public/full Messages handler、Anthropic response finalize/agentic hook 和 Router 二次入口设置 fail-fast spy；prepare、config transform、raw HTTP 各命中一次，唯一 wire body 含无签名 thinking
 8. **Responses effort 映射**：参数化断言 `none -> disabled`、`low/high/max -> enabled + 同值 output_config.effort`、omitted -> enabled + high；`medium/xhigh`、空值和错误类型返回参数 400。已有完整工具历史加 none 返回 `reasoning_mode_conflict` 且 raw HTTP 为零
-9. **父调用 accounting**：一次 Responses parent call 只有一个最终 hook、一个 aggregate Usage normalization、一个 aggregate cost 和一个 parent SpendLog；每个 attempt 仅有一个内部 request/pre-call/usage snapshot，不产生 child accounting。参数化覆盖无 fallback、首 token 前 fallback、部分输出后 fallback 和 fallback 失败，断言没有漏记、重复计费或 Anthropic finalize
+9. **父调用 accounting**：一次 Responses parent call 只有一个最终 hook、一个 aggregate Usage normalization、一个 aggregate cost 和一个 parent SpendLog；每个 attempt 仅有一个内部 request/pre-call/usage snapshot，不产生 child accounting。参数化覆盖无 fallback、首 token 前 fallback、部分输出后 fallback 和 fallback 失败，使用主/备 deployment 不同 model、cache-read 费率验证按 attempt 计价后求和，断言没有漏记、重复计费或 Anthropic finalize
 10. **公共 Responses 显式历史**：reasoning item、多个 function call、function_call_output 经 bridge 后，DeepSeek wire 顺序与 call id 正确
 11. **公共 Responses session**：sync/async 各做两轮，第一轮 output 中 reasoning、完整 `ToolAssociatedCanonicalSuffix`、call-id 图和完整性 digest 被原子持久化；第二轮 `previous_response_id` 重建后的 canonical history 与 wire body 相同
 12. **session 失败等价**：sync/async 参数化覆盖无 DB、SpendLog 缺失、cold storage 缺失/不可读、未知 response id、已存 output 缺 reasoning，以及 flag 尚在但首个 tool use、任一 reasoning、tool_use 或 tool_result 被裁掉，断言相同 `reasoning_history_unrecoverable` status/error code；完整显式 input 不误依赖 session
-13. **Responses streaming**：async 与 sync 使用同一个纯 SSE decoder，reasoning delta 同时进入对外 events 和 completed/logging payload；对 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 和 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ` 设置 fail-fast spy，三者均不得调用，也不得产生 `/v1/messages` pass-through 成功记录；sync iterator 取消/异常会关闭 worker、loop 和 response；failed/incomplete 不产生成功历史
+13. **Responses streaming**：async 与 sync 使用同一个纯 SSE decoder，reasoning delta 同时进入对外 events 和 completed/logging payload；对 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 和 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ` 设置 fail-fast spy，三者均不得调用，也不得产生 `/v1/messages` pass-through 成功记录；首个 reasoning/text/tool delta 后上游失败且配置 fallback 时，断言没有第二 deployment 请求并原样结束流；sync iterator 取消/异常会把取消传播到 worker task，完成 close 后再向调用方传播；failed/incomplete 不产生成功历史
 14. **路径 C handler test**：`/v1/messages -> OpenAI Responses adapter` 的 thinking 不再成为 output_text；该测试不伪装成 DeepSeek route
-15. **Router/provenance 集成**：本地 `DeepSeekProtocolNonFallbackError` 不重试/不 fallback；测试同 model group 的 higher-order deployment 和跨 group fallback 均未调用；可重试首 token 前错误重新选择并重新编译；新 attempt 的 protocol context 只来自新 deployment；direct SDK 伪造 `model_info` 或内部 kwarg 不能命中 DeepSeek config
-16. **raw transport retry 隔离**：模拟 DeepSeek 400、`ConnectError` 和取消，断言使用 typed result/failure、无 `raise_for_status()`、无隐式重试、请求 bytes 不变、response/stream close 恰好一次，未调用 `transform_anthropic_messages_request_on_http_error()`、重签名、retry logging 或 `logging_obj` body mutation；错误由 Responses owner 统一处理且每次只有一个 failure lifecycle
+15. **Router/provenance 集成**：本地 `DeepSeekProtocolNonFallbackError` 不重试/不 fallback；测试同 model group 的 higher-order deployment 和跨 group fallback 均未调用；首 token 前错误可以重新选择并重新编译，首个 reasoning/text/tool delta 后错误不得进入 `MidStreamFallbackError` 或发起第二 deployment；新 attempt 的 protocol context 只来自新 deployment；direct SDK 伪造 `model_info` 或内部 kwarg 不能命中 DeepSeek config
+16. **raw transport retry 隔离**：模拟 DeepSeek 400、`ConnectError`、上游 cancelled event 和本地 `asyncio.CancelledError`，断言前 3 类使用 typed result/failure，最后一类在 close 完成后继续 re-raise、无 `raise_for_status()`、无隐式重试、请求 bytes 不变、response/stream close 恰好一次；未调用 `transform_anthropic_messages_request_on_http_error()`、重签名、retry logging 或 `logging_obj` body mutation；错误由 Responses owner 统一处理且每次只有一个 failure lifecycle
 17. **protocol 隔离**：`/model/info`、`/v1/model/info`、`/v2/model/info` 的普通/admin/debug 响应和 provider wire、metadata、proxy request、SpendLog 均不含 `reasoning_protocol` 或 protocol context；客户端同名字段不能启用逻辑
 18. **usage/cost**：缓存 alias 相等且只计费一次，SpendLog token/cost 与最终 Usage 一致
 19. **Claude 不回归**：没有可信 protocol context 的 Claude deployment 仍执行原签名保护，客户端 metadata/model_info 不能绕过
@@ -325,11 +327,11 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 
 1. 增加带 provenance 的 Router 私有 `DeploymentProtocolContext` 和两个入口 resolver，先完成 model-info 出站 sanitizer
 2. 定义 canonical assistant/history 类型、`generation_thinking_enabled` 与 `history_reasoning_required` 两个状态
-3. 实现 tool-use/tool-result call-id 图校验、普通 assistant 后缀 reasoning 校验、完整 `ToolAssociatedCanonicalSuffix` 原子持久化和 `redacted_thinking` 不可恢复错误
+3. 实现 tool-use/tool-result call-id 图校验、普通 assistant 后缀 reasoning 校验、完整 `ToolAssociatedCanonicalSuffix` 原子持久化、suffix token 预算检查和 `redacted_thinking` 不可恢复错误
 4. 固化 Messages thinking 与 Responses effort 的参数解析、错误码和模式冲突规则
 5. 先写纯函数和 session 完整性测试，覆盖 disabled/none、普通 assistant 后缀、并行 tool call、孤儿 result、suffix 裁剪和 direct SDK 伪造 context
 
-**Step 1 门禁**：resolver 不能被客户端字段触发；所有历史结构错误、suffix 不完整、缺失 reasoning 和破坏性 disabled/none 切换都在发出 HTTP 请求前得到稳定结果；完整 suffix 与 digest 原子保存/读取，输入对象保持不变
+**Step 1 门禁**：resolver 不能被客户端字段触发；所有历史结构错误、suffix 不完整、suffix 超出 token 预算、缺失 reasoning 和破坏性 disabled/none 切换都在发出 HTTP 请求前得到稳定结果；完整 suffix 与 digest 原子保存/读取，输入对象保持不变
 
 ### Step 2：先完成原生 `/v1/messages`（Phase 1）
 
@@ -348,7 +350,7 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 2. 原生 Messages 继续使用 `ClaudeAnthropicMessagesTransport` 的可变签名恢复；签名类 400 后从 canonical history 深拷贝出 attempt candidate，清理 candidate 上的 Claude thinking，再重新 prepare，不能复用已发送的 frozen request 或修改原始 history
 3. 为 Path B 增加独立 `DeepSeekResponsesRawTransport`，只负责发送一次冻结请求和返回 raw response/stream，不进入 Anthropic response finalize 或 accounting hook
 4. DeepSeek Path B 使用不自动 `raise_for_status()`、不隐式连接重试的低层发送路径，返回 typed raw result/failure；明确禁止 `transform_anthropic_messages_request_on_http_error()`、删 thinking、重签名和 retry logging
-5. 增加互斥测试：Claude signature 类 400 第二次重新 prepare 后成功；DeepSeek 对等 400、`ConnectError` 和取消均只发送一次冻结 body，且无 body mutation、重复 pre-call 或 SpendLog
+5. 增加互斥测试：Claude signature 类 400 第二次重新 prepare 后成功；DeepSeek 对等 400、`ConnectError`、上游 cancelled event 和本地取消均只发送一次冻结 body，且分别验证 typed result、取消 re-raise、close 和无 body mutation、重复 pre-call 或 SpendLog
 
 **Step 3 门禁**：DeepSeek config transform 和首个 HTTP request 各一次，DeepSeek raw transport 不改变请求且失败由调用方接管；Claude signature recovery 第二次请求来自新的 prepare；原生 Messages 既有 handler 测试全部通过
 
@@ -368,19 +370,19 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 
 1. 新增 `DeepSeekAnthropicResponsesSSEDecoder`，只处理 SSE framing、reasoning/text/tool delta 和 Responses event 编码
 2. 禁止创建 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 或 global pass-through success handler；不得标记 `/v1/messages` route
-3. 为 sync streaming 使用持有 event loop 的 worker iterator，覆盖取消、客户端断开、上游 failed/incomplete 和资源关闭
+3. 为 sync streaming 使用持有 event loop 的 worker iterator，覆盖取消、客户端断开、上游 failed/incomplete 和资源关闭；本地取消必须传播到 worker task，等待 close 完成后再向调用方 re-raise
 4. 确保 reasoning delta 同时进入对外 event、completed response、session history 和唯一 accounting payload
 5. 增加异步/同步流式测试和三个 pass-through 组件的 fail-fast spy
 
 建议提交：`fix(responses): decode deepseek anthropic streams without pass-through logging`、`test(responses): cover deepseek anthropic stream lifecycle`
 
-**Step 5 门禁**：stream completed、首 token 前失败、流中失败和取消路径均只有一个 parent 终态生命周期；fallback attempt 只产生内部 usage snapshot，无重复 success handler、child SpendLog 或 child cost
+**Step 5 门禁**：stream completed、首 token 前失败、流中失败和取消路径均只有一个 parent 终态生命周期；首个对外 event 后不发生 mid-stream fallback；fallback attempt 只产生内部 usage snapshot，无重复 success handler、child SpendLog 或 child cost
 
 ### Step 6：接入 Router fallback、Usage 和可观测性
 
 1. 在 Router 通用异常捕获前接入 `DeepSeekProtocolNonFallbackError` 分类，覆盖 async/sync、同 group higher-order 和跨 group fallback 判定点
 2. fallback 每次从原始 public request 和新 deployment context 重新编译，禁止复用旧 wire body
-3. 固化 parent SpendLog 聚合模型：按实际 provider attempt 汇总 Usage/cost 一次，失败连接不虚构 token，partial 与 fallback 不重复合并
+3. 固化 parent SpendLog 聚合模型：为每个 provider attempt 保存脱敏 model/deployment/rate snapshot 和 normalized usage，按该 attempt 的费率独立计算 cost 后求和；失败连接不虚构 token，partial 与 fallback 不重复合并
 4. 统一 `prompt_cache_hit_tokens`、`cached_tokens` 和 `cache_read_input_tokens` 的 Usage 来源，验证只计费一次
 5. 验证 model info、metadata、proxy request、SpendLog 和 provider wire 不泄漏 `reasoning_protocol`
 6. 增加 fallback、usage/cost、dict/Pydantic terminal response 和 Claude 不回归测试
@@ -399,10 +401,10 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 
 ## 8. 发布、监控与回滚
 
-按 endpoint 分开灰度：先启用路径 A，再启用路径 B。deployment 配置中的 `model_info.reasoning_protocol` 只由 Router 私有 factory 解析，运行时仅带 provenance 的 protocol context 能开启逻辑。监控 missing/unrecoverable reasoning、reasoning mode conflict 400、fallback/skip 原因、`response.failed`/completed、cache read tokens、SpendLog cost 和 `dict object has no attribute usage`
+按 endpoint 分开灰度：先启用路径 A，再启用路径 B。deployment 配置中的 `model_info.reasoning_protocol` 只由 Router 私有 factory 解析，运行时仅带 provenance 的 protocol context 能开启逻辑。监控 missing/unrecoverable reasoning、reasoning history context exhausted、reasoning mode conflict 400、fallback/skip 原因、首个 event 后禁止 mid-stream fallback、`response.failed`/completed、cache read tokens、按 attempt 费率聚合的 SpendLog cost 和 `dict object has no attribute usage`
 
 删除 deployment 的 `reasoning_protocol` 可关闭新逻辑，但旧路径仍可能复现已知 400，因此这只是行为回滚，不代表故障恢复。源码提交保持阶段独立，必要时按 endpoint 回滚；不得改动 Claude deployment 或外部密钥配置
 
 ## 9. 完成判定
 
-只有以下条件全部满足才允许构建镜像：两个入口只接受 Router-provenanced protocol context 且公开响应/日志不泄漏内部字段；generation thinking 与 history reasoning obligation 分离，工具历史不能用 disabled/none 绕过；完整 `ToolAssociatedCanonicalSuffix` 与 digest 原子持久化，任一 suffix 节点被裁剪都在预检阶段拒绝；Responses effort 的 none/low/high/max/omitted 映射通过；公共 Responses 只执行一次 config transform 和 DeepSeek raw HTTP，不经过 completion/public/full Messages handler、Anthropic finalize 或二次 Router；DeepSeek raw transport 使用不自动 raise/status retry 的 typed result，400、ConnectError、取消的 close 和 failure lifecycle 正确；Responses streaming 使用纯 SSE decoder 且不触发 Anthropic pass-through iterator、success handler 或 `/v1/messages` accounting；Claude 可在签名恢复时从 canonical 深拷贝重新 prepare，原始 history 不变；`DeepSeekProtocolNonFallbackError` 在 sync/async Router 的同 group 和跨 group fallback 判定点均被拦截；原生 Messages 两轮和 sync/async Responses session 两轮均保留完整 reasoning；call-id 图错误明确失败；每个 Responses parent call 只有一次最终 hook、aggregate Usage、cost 和 parent SpendLog，各 attempt 仅有内部 snapshot；fallback 只在可无损重编译时执行并替换 deployment protocol context；缓存只计费一次；dict/Pydantic、sync/async streaming 和 Claude signature 回归测试通过；仓库不包含线上敏感配置
+只有以下条件全部满足才允许构建镜像：两个入口只接受 Router-provenanced protocol context 且公开响应/日志不泄漏内部字段；generation thinking 与 history reasoning obligation 分离，工具历史不能用 disabled/none 绕过；完整 `ToolAssociatedCanonicalSuffix` 与 digest 原子持久化，任一 suffix 节点被裁剪或 token 预算超限都在预检阶段以不可 fallback 错误拒绝；Responses effort 的 none/low/high/max/omitted 映射通过；公共 Responses 只执行一次 config transform 和 DeepSeek raw HTTP，不经过 completion/public/full Messages handler、Anthropic finalize 或二次 Router；DeepSeek raw transport 使用不自动 raise/status retry 的 typed result，400、ConnectError、上游 cancelled event 和本地取消的 close、re-raise 与 failure lifecycle 正确；Responses streaming 使用纯 SSE decoder 且不触发 Anthropic pass-through iterator、success handler 或 `/v1/messages` accounting，首个对外 reasoning/text/tool event 后绝不 mid-stream fallback；Claude 可在签名恢复时从 canonical 深拷贝重新 prepare，原始 history 不变；`DeepSeekProtocolNonFallbackError` 在 sync/async Router 的同 group 和跨 group fallback 判定点均被拦截；原生 Messages 两轮和 sync/async Responses session 两轮均保留完整 reasoning；call-id 图错误明确失败；每个 Responses parent call 只有一次最终 hook、aggregate Usage 和 parent SpendLog，cost 按各 attempt 的 model/deployment/rate snapshot 独立计算后求和，各 attempt 仅有内部 snapshot；fallback 只在可无损重编译时执行并替换 deployment protocol context；缓存只计费一次；dict/Pydantic、sync/async streaming 和 Claude signature 回归测试通过；仓库不包含线上敏感配置
