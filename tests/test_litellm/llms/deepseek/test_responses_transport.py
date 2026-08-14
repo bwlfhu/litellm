@@ -17,7 +17,12 @@ async def test_deepseek_raw_transport_sends_frozen_body_once_without_status_rais
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request.content)
-        return httpx.Response(400, request=request, content=b"invalid thinking")
+        return httpx.Response(
+            400,
+            request=request,
+            headers={"x-request-id": "test-request"},
+            content=b'{"error":{"code":"reasoning_history_missing"}}',
+        )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     request = freeze_deepseek_request(
@@ -30,6 +35,8 @@ async def test_deepseek_raw_transport_sends_frozen_body_once_without_status_rais
 
     assert isinstance(result, DeepSeekRawFailure)
     assert result.status_code == 400
+    assert result.headers["x-request-id"] == "test-request"
+    assert result.body == b'{"error":{"code":"reasoning_history_missing"}}'
     assert requests == [request.body]
     assert request.body == freeze_deepseek_request(
         url=request.url,

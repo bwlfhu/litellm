@@ -61,6 +61,24 @@ async def test_deepseek_sse_decoder_failed_event_does_not_emit_success():
 
 
 @pytest.mark.asyncio
+async def test_deepseek_sse_decoder_ignores_message_stop_after_failed_event():
+    decoder = DeepSeekAnthropicResponsesSSEDecoder("deepseek-v4-pro", "resp_4")
+    decoded = [
+        event
+        async for event in decoder.decode(
+            _lines(
+                [
+                    ("error", {"type": "upstream", "message": "failed"}),
+                    ("message_stop", {}),
+                ]
+            )
+        )
+    ]
+
+    assert [event["type"] for event in decoded] == ["response.failed"]
+
+
+@pytest.mark.asyncio
 async def test_deepseek_async_stream_cancellation_closes_response_and_propagates():
     class DelayedBody(httpx.AsyncByteStream):
         def __init__(self):

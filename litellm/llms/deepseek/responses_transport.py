@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping
 
@@ -27,6 +27,8 @@ class DeepSeekRawFailure:
     category: str
     message: str
     status_code: int | None = None
+    headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    body: bytes = b""
 
 
 DeepSeekRawTransportResult = DeepSeekRawResponse | DeepSeekRawFailure
@@ -69,6 +71,8 @@ class DeepSeekResponsesRawTransport:
                     category="upstream_http_error",
                     message=body.decode(errors="replace"),
                     status_code=response.status_code,
+                    headers=MappingProxyType(dict(response.headers)),
+                    body=bytes(body),
                 )
             return DeepSeekRawResponse(response=response)
         except asyncio.CancelledError:

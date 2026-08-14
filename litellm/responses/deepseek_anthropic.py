@@ -49,7 +49,7 @@ _PROTOCOL_INTEGRITY_CODES = frozenset(
 _JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, object])
 
 
-def _error_code_from_upstream_body(body: str) -> str | None:
+def _error_code_from_upstream_body(body: bytes) -> str | None:
     try:
         parsed = _JSON_OBJECT_ADAPTER.validate_json(body)
     except ValidationError:
@@ -66,7 +66,7 @@ def _error_code_from_upstream_body(body: str) -> str | None:
 
 
 def _raise_raw_failure(failure: DeepSeekRawFailure) -> NoReturn:
-    code = _error_code_from_upstream_body(failure.message)
+    code = _error_code_from_upstream_body(failure.body)
     if code is not None:
         raise DeepSeekProtocolError(code)
     raise DeepSeekUpstreamError(failure.category, failure.status_code)

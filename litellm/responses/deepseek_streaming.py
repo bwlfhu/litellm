@@ -25,6 +25,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
         self._tool_calls: dict[int, dict[str, object]] = {}
         self._usage: dict[str, int] = {}
         self._status = "completed"
+        self._terminal_emitted = False
 
     def _response(self, status: str) -> dict[str, object]:
         output: list[dict[str, object]] = []
@@ -141,8 +142,11 @@ class DeepSeekAnthropicResponsesSSEDecoder:
         return []
 
     def _decode_event(self, event_name: str, payload: Mapping[str, object]) -> list[dict[str, object]]:
+        if self._terminal_emitted:
+            return []
         if event_name in {"error", "message_error"}:
             self._status = "failed"
+            self._terminal_emitted = True
             return [{"type": "response.failed", "response": self._response("failed"), "error": dict(payload)}]
         if event_name == "message_start":
             usage = payload.get("message")
@@ -162,7 +166,9 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                 self._status = "incomplete"
             return []
         if event_name == "message_stop":
-            return [{"type": "response.completed", "response": self._response(self._status)}]
+            self._terminal_emitted = True
+            event_type = "response.incomplete" if self._status == "incomplete" else "response.completed"
+            return [{"type": event_type, "response": self._response(self._status)}]
         return []
 
     def _flush_sse_event(self, event_name: str, data_lines: list[str]) -> list[dict[str, object]]:
