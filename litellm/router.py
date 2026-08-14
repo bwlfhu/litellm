@@ -3059,7 +3059,7 @@ class Router:
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
         from litellm.router_protocol import (
-            build_deployment_protocol_context,
+            _build_deployment_protocol_context,
             sanitize_model_info,
         )
 
@@ -3067,7 +3067,7 @@ class Router:
         model_info = raw_model_info.copy()
         deployment_id = model_info.get("id")
         attempt_id = kwargs.get("litellm_call_id") or kwargs.get("litellm_trace_id") or deployment_id
-        protocol_context = build_deployment_protocol_context(
+        protocol_context = _build_deployment_protocol_context(
             raw_model_info,
             deployment_id,
             attempt_id,

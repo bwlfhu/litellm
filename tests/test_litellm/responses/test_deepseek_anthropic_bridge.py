@@ -6,13 +6,13 @@ import pytest
 import litellm
 from litellm.litellm_core_utils.asyncify import run_async_function
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, DeepSeekUpstreamError
-from litellm.router_protocol import build_deployment_protocol_context
+from litellm.router_protocol import _build_deployment_protocol_context
 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge, DeepSeekResponsesSessionStore
 
 
 def _context():
-    context = build_deployment_protocol_context(
-        {"id": "deployment-a", "reasoning_protocol": "deepseek_anthropic"},
+    context = _build_deployment_protocol_context(
+        {"id": "deployment-a", "reasoning_protocol": "deepseek_anthropic", "max_input_tokens": 4096},
         "deployment-a",
         "attempt-a",
     )
