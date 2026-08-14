@@ -1848,7 +1848,7 @@ class Logging(LiteLLMLoggingBaseClass):
                     )
             elif standard_logging_object is not None:
                 self.model_call_details["standard_logging_object"] = standard_logging_object
-            else:
+            elif not self.model_call_details.get("_deepseek_parent_accounting"):
                 self.model_call_details["response_cost"] = None
 
             result = self._transform_usage_objects(result=result)
@@ -2451,7 +2451,7 @@ class Logging(LiteLLMLoggingBaseClass):
             try:
                 if self.model_call_details.get("cache_hit", False) is True:
                     self.model_call_details["response_cost"] = 0.0
-                else:
+                elif not self.model_call_details.get("_deepseek_parent_accounting"):
                     # check if base_model set on azure
                     _get_base_model_from_metadata(model_call_details=self.model_call_details)
                     # base_model defaults to None if not set on model_info
@@ -2705,7 +2705,10 @@ class Logging(LiteLLMLoggingBaseClass):
         # chunks already delivered; the router stashes that recovered usage as
         # ``combined_usage_object`` and pre-computes its cost, so preserve it
         # here instead of zeroing the spend on an otherwise-failed request.
-        if self.model_call_details.get("combined_usage_object") is None:
+        if (
+            self.model_call_details.get("combined_usage_object") is None
+            and not self.model_call_details.get("_deepseek_parent_accounting")
+        ):
             self.model_call_details["response_cost"] = 0
 
         if hasattr(exception, "headers") and isinstance(exception.headers, dict):

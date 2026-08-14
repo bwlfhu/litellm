@@ -283,6 +283,11 @@ def _stage_session(
     messages: tuple[dict[str, object], ...],
     logging_obj: object | None = None,
 ) -> None:
+    model_call_details = getattr(logging_obj, "model_call_details", None)
+    if not isinstance(proxy_server_request, dict) and isinstance(model_call_details, dict):
+        litellm_params = model_call_details.get("litellm_params")
+        if isinstance(litellm_params, dict):
+            proxy_server_request = litellm_params.get("proxy_server_request")
     stage = getattr(session_repository, "stage", None)
     if callable(stage):
         payload = stage(proxy_server_request, response_id, messages)
@@ -292,19 +297,20 @@ def _stage_session(
         # object as well as proxy_server_request. This lets the normal
         # SpendLog writer persist the response record and its manifest in one
         # lifecycle, even when it snapshots request metadata late.
-        model_call_details = getattr(logging_obj, "model_call_details", None)
         if isinstance(model_call_details, dict):
             model_call_details["deepseek_session_record"] = deepcopy(dict(payload))
             litellm_params = model_call_details.get("litellm_params")
             if isinstance(litellm_params, dict):
                 proxy_request = litellm_params.get("proxy_server_request")
-                if isinstance(proxy_request, dict):
-                    body = proxy_request.get("body")
-                    if isinstance(body, dict):
-                        litellm_params["proxy_server_request"] = {
-                            **proxy_request,
-                            "body": {**body, "_deepseek_anthropic_session": deepcopy(dict(payload))},
-                        }
+                if not isinstance(proxy_request, dict):
+                    proxy_request = {}
+                body = proxy_request.get("body")
+                if not isinstance(body, dict):
+                    body = {}
+                litellm_params["proxy_server_request"] = {
+                    **proxy_request,
+                    "body": {**body, "_deepseek_anthropic_session": deepcopy(dict(payload))},
+                }
 
 
 def _bridge_optional_params(
@@ -493,6 +499,7 @@ def _apply_parent_accounting_to_logging(
             response_usage
         )
     model_call_details["response_cost"] = accounting.cost
+    model_call_details["_deepseek_parent_accounting"] = True
     model_call_details["deepseek_parent_accounting"] = summary
 
 

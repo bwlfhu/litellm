@@ -37,6 +37,38 @@ def test_get_combined_callback_list_preserves_insertion_order(logging_obj):
     ) == ["prometheus", "langfuse", "datadog", "otel", "s3", "gcs_bucket", "arize", "logfire"]
 
 
+@pytest.mark.asyncio
+async def test_deepseek_parent_accounting_cost_is_not_recalculated(logging_obj):
+    result = ModelResponse(model="deepseek-v4-pro", choices=[], usage={"prompt_tokens": 1, "completion_tokens": 1})
+    logging_obj.model_call_details = {
+        "litellm_params": {"metadata": {}, "proxy_server_request": {}},
+        "response_cost": 1.25,
+        "_deepseek_parent_accounting": True,
+    }
+    logging_obj._get_assembled_streaming_response = MagicMock(return_value=result)
+    logging_obj._response_cost_calculator = MagicMock(return_value=99.0)
+    logging_obj._build_standard_logging_payload = MagicMock(return_value={})
+    logging_obj.get_combined_callback_list = MagicMock(return_value=[])
+
+    await logging_obj.async_success_handler(result=result)
+
+    assert logging_obj.model_call_details["response_cost"] == 1.25
+    logging_obj._response_cost_calculator.assert_not_called()
+
+
+def test_deepseek_parent_accounting_cost_is_not_zeroed_on_failure(logging_obj):
+    logging_obj.model_call_details = {
+        "litellm_params": {"metadata": {}, "proxy_server_request": {}},
+        "response_cost": 1.25,
+        "_deepseek_parent_accounting": True,
+    }
+
+    with patch("litellm.litellm_core_utils.litellm_logging.get_standard_logging_object_payload", return_value={}):
+        logging_obj._failure_handler_helper_fn(ValueError("upstream"), "traceback")
+
+    assert logging_obj.model_call_details["response_cost"] == 1.25
+
+
 def test_get_masked_api_base(logging_obj):
     api_base = "https://api.openai.com/v1"
     masked_api_base = logging_obj._get_masked_api_base(api_base)
