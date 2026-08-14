@@ -173,10 +173,14 @@ Responses endpoint
 
 从当前 handler 提取两个内部、强类型且不可从 public API 选择的 primitive：
 
-1. `_prepare_anthropic_messages_wire_request(...) -> PreparedAnthropicMessagesWireRequest`：复用环境校验、header 过滤、`DeepSeekAnthropicMessagesConfig` transform、URL、签名、序列化和 timeout 解析；返回冻结的 prebuilt body/URL/headers/signed body/timeout，config transform 只能发生一次
-2. `_async_anthropic_messages_raw_transport(prepared_request, ...) -> httpx.Response`：只执行现有 HTTP error retry 和网络发送，返回未做 provider response transform/finalize 的 raw response；不调用 `update_from_kwargs`、`pre_call`、Anthropic response transform、agentic hooks、fake stream、success/failure hook、Usage、cost 或 SpendLog
+1. `_prepare_anthropic_messages_wire_request(...) -> PreparedAnthropicMessagesWireRequest`：复用环境校验、header 过滤、`DeepSeekAnthropicMessagesConfig` transform、URL、签名、序列化和 timeout 解析；返回冻结的 prebuilt body bytes/URL/headers/signed body/timeout，config transform 只能发生一次。生成后 body bytes、headers、签名和 URL 均不可变
+2. `_async_anthropic_messages_raw_transport(prepared_request, ...) -> httpx.Response`：DeepSeek Path B 只发送一次冻结的 HTTP 请求并返回未做 provider response transform/finalize 的 raw response；初始实现明确禁用所有会改变请求体的 HTTP error retry。不得调用 `transform_anthropic_messages_request_on_http_error()`、删除 thinking block、重签名、原地修改 prebuilt request、更新 `logging_obj.model_call_details`、重复 `pre_call` 或写 retry body。未来若增加连接类 retry，也只能重放完全相同的 body bytes、headers、签名和 URL，且不得重复任何 logging/accounting 生命周期。该 primitive 不调用 `update_from_kwargs`、Anthropic response transform、agentic hooks、fake stream、success/failure hook、Usage、cost 或 SpendLog；上游 400（包括 signature 类 400）原样交给 Responses accounting owner
 
-原生 Messages handler 改为组合这两个 primitive，再继续执行原有 Anthropic response transform、stream wrapper 和 finalize，保持路径 A 行为。Responses bridge 也组合相同 primitive，但由 Responses logging owner 在 raw transport 前执行一次 provider pre-call，并直接解析 raw JSON 或用 config streaming iterator 解码 SSE；不重新执行 Router，也不进入 Anthropic finalize。wire-level fake transport 必须断言 config transform 和 HTTP request 各一次，唯一出站 URL 是已选 deployment 的 `/v1/messages`，body 含所需无签名 thinking，且内部 protocol 字段不在 body/header/metadata 中
+原生 Messages handler 改为组合这两个 primitive，再继续执行原有 Anthropic response transform、stream wrapper 和 finalize，保持路径 A 行为。Responses bridge 也组合相同 primitive，但由 Responses logging owner 在 raw transport 前执行一次 provider pre-call，并直接解析 raw JSON；不重新执行 Router，也不进入 Anthropic finalize
+
+Responses streaming 必须使用独立的 `DeepSeekAnthropicResponsesSSEDecoder` 纯 SSE decoder。它只负责 Anthropic SSE framing、reasoning/text/tool delta 累计和 Responses event 编码，不得实例化 `BaseAnthropicMessagesStreamingIterator`，不得调用 `PassThroughStreamingHandler` 或 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ`，不得标记 `/v1/messages` pass-through route，也不得执行任何 success/failure logging、Usage、cost 或 SpendLog。完成事件中的累计 reasoning 由 Responses bridge 交给唯一 accounting owner；decoder 本身不保存跨请求 session，也不拥有终态生命周期
+
+wire-level fake transport 必须断言 config transform 和 HTTP request 各一次，唯一出站 URL 是已选 deployment 的 `/v1/messages`，body 含所需无签名 thinking，且内部 protocol 字段不在 body/header/metadata 中。streaming 测试还必须对 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 和 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ` 设置 fail-fast spy，断言三者均未调用；签名类 400 测试必须断言实际请求 body bytes 与 frozen prepared body 完全一致、请求次数为一次、config transform 只调用一次，并且没有 body mutation、重签名、retry logging 或成功 SpendLog。若未来启用连接类重试，测试必须对每个 attempt 断言 body bytes、headers、签名和 URL 完全一致
 
 #### 5.4.2 canonical 转换
 
@@ -187,7 +191,7 @@ Responses endpoint
 5. session/input 出现工具历史时设置 `history_reasoning_required=true` 并始终恢复、校验 reasoning；若当前 effort 为 `none`，返回 `reasoning_mode_conflict` 400，不删除 reasoning、不调用 raw transport
 6. canonical history 最终只由 `DeepSeekAnthropicMessagesConfig` 编译一次 DeepSeek Anthropic `/v1/messages` body，不再经过 Chat transformation 或完整 Anthropic Messages handler
 7. 非流式上游 thinking 转成 `ModelResponse.choices[0].message.reasoning_content`，再生成 Responses `reasoning` output item；function call 和 visible message 分别生成标准 output item
-8. streaming iterator 累计 reasoning delta 并生成标准 reasoning events；完成时把同一累计结果交给 completed response/logging payload，不能只保存在 SSE wrapper 实例中
+8. `DeepSeekAnthropicResponsesSSEDecoder` 累计 reasoning delta 并生成标准 reasoning events；完成时把同一累计结果交给 completed response/logging payload，不能只保存在 decoder 实例中。该 decoder 不得进入 Anthropic pass-through iterator 或 success handler
 9. `response.failed`、iterator exception 或不完整终态不得写入伪造的成功 session history；Pydantic/dict terminal response 使用同一安全读取逻辑
 
 #### 5.4.3 sync/async session 与 streaming
@@ -291,12 +295,13 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 10. **公共 Responses 显式历史**：reasoning item、多个 function call、function_call_output 经 bridge 后，DeepSeek wire 顺序与 call id 正确
 11. **公共 Responses session**：sync/async 各做两轮，第一轮 output 中 reasoning 与 `history_reasoning_required` 被持久化；第二轮 `previous_response_id` 重建后的 canonical history 与 wire body 相同
 12. **session 失败等价**：sync/async 参数化覆盖无 DB、SpendLog 缺失、cold storage 缺失/不可读、未知 response id 和已存 output 缺 reasoning，断言相同 status/error code；完整显式 input 不误依赖 session
-13. **Responses streaming**：async 与 sync reasoning delta 同时进入对外 events 和 completed/logging payload；sync iterator 取消/异常会关闭 worker、loop 和 response；failed/incomplete 不产生成功历史
+13. **Responses streaming**：async 与 sync 使用同一个纯 SSE decoder，reasoning delta 同时进入对外 events 和 completed/logging payload；对 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 和 `GLOBAL_PASS_THROUGH_SUCCESS_HANDLER_OBJ` 设置 fail-fast spy，三者均不得调用，也不得产生 `/v1/messages` pass-through 成功记录；sync iterator 取消/异常会关闭 worker、loop 和 response；failed/incomplete 不产生成功历史
 14. **路径 C handler test**：`/v1/messages -> OpenAI Responses adapter` 的 thinking 不再成为 output_text；该测试不伪装成 DeepSeek route
 15. **Router/provenance 集成**：本地 reasoning/tool-history 400 不重试/不透明 fallback；可重试首 token 前错误重新选择并重新编译；新 attempt 的 protocol context 只来自新 deployment；direct SDK 伪造 `model_info` 或内部 kwarg 不能命中 DeepSeek config
-16. **protocol 隔离**：`/model/info`、`/v1/model/info`、`/v2/model/info` 的普通/admin/debug 响应和 provider wire、metadata、proxy request、SpendLog 均不含 `reasoning_protocol` 或 protocol context；客户端同名字段不能启用逻辑
-17. **usage/cost**：缓存 alias 相等且只计费一次，SpendLog token/cost 与最终 Usage 一致
-18. **Claude 不回归**：没有可信 protocol context 的 Claude deployment 仍执行原签名保护，客户端 metadata/model_info 不能绕过
+16. **raw transport retry 隔离**：模拟 DeepSeek signature 类 400，断言只发出一次 HTTP 请求、wire body bytes 完全不变、config transform 只调用一次，未调用 `transform_anthropic_messages_request_on_http_error()`、重签名、retry logging 或 `logging_obj` body mutation；错误由 Responses owner 统一处理且不产生成功 SpendLog
+17. **protocol 隔离**：`/model/info`、`/v1/model/info`、`/v2/model/info` 的普通/admin/debug 响应和 provider wire、metadata、proxy request、SpendLog 均不含 `reasoning_protocol` 或 protocol context；客户端同名字段不能启用逻辑
+18. **usage/cost**：缓存 alias 相等且只计费一次，SpendLog token/cost 与最终 Usage 一致
+19. **Claude 不回归**：没有可信 protocol context 的 Claude deployment 仍执行原签名保护，客户端 metadata/model_info 不能绕过
 
 ## 7. 分阶段提交与验证
 
@@ -333,4 +338,4 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 
 ## 9. 完成判定
 
-只有以下条件全部满足才允许构建镜像：两个入口只接受 Router-provenanced protocol context 且公开响应/日志不泄漏内部字段；generation thinking 与 history reasoning obligation 分离，工具历史不能用 disabled/none 绕过；Responses effort 的 none/low/high/max/omitted 映射通过；公共 Responses 只执行一次 config transform 和 raw HTTP，不经过 completion/public/full Messages handler、Anthropic finalize 或二次 Router；原生 Messages 两轮和 sync/async Responses session 两轮均保留完整 reasoning；call-id 图错误明确失败；每个 Responses attempt 只有一次最终 hook、Usage、cost 和 SpendLog；fallback 只在可无损重编译时执行并替换 deployment protocol context；缓存只计费一次；dict/Pydantic、sync/async streaming 和 Claude signature 回归测试通过；仓库不包含线上敏感配置
+只有以下条件全部满足才允许构建镜像：两个入口只接受 Router-provenanced protocol context 且公开响应/日志不泄漏内部字段；generation thinking 与 history reasoning obligation 分离，工具历史不能用 disabled/none 绕过；Responses effort 的 none/low/high/max/omitted 映射通过；公共 Responses 只执行一次 config transform 和 raw HTTP，不经过 completion/public/full Messages handler、Anthropic finalize 或二次 Router；Responses streaming 使用纯 SSE decoder 且不触发 Anthropic pass-through iterator、success handler 或 `/v1/messages` accounting；DeepSeek raw transport 对 signature 类 400 只发送一次冻结请求，不做 body-mutating retry、重签名或 retry logging；原生 Messages 两轮和 sync/async Responses session 两轮均保留完整 reasoning；call-id 图错误明确失败；每个 Responses attempt 只有一次最终 hook、Usage、cost 和 SpendLog；fallback 只在可无损重编译时执行并替换 deployment protocol context；缓存只计费一次；dict/Pydantic、sync/async streaming 和 Claude signature 回归测试通过；仓库不包含线上敏感配置
