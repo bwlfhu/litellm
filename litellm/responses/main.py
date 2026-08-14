@@ -55,10 +55,10 @@ else:
     ResponseText = str  # Fallback for ResponseText import
 from litellm.litellm_core_utils.get_litellm_params import get_litellm_params
 from litellm.llms.openai.data_residency import infer_openai_data_residency
+from litellm.router_protocol import protocol_context_from_kwargs, sanitize_model_info
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.responses.main import *
 from litellm.types.router import GenericLiteLLMParams
-from litellm.router_protocol import protocol_context_from_kwargs
 from litellm.utils import (
     ProviderConfigManager,
     client,
@@ -78,6 +78,38 @@ from .streaming_iterator import BaseResponsesAPIStreamingIterator
 base_llm_http_handler = BaseLLMHTTPHandler()
 litellm_completion_transformation_handler = LiteLLMCompletionTransformationHandler()
 #################################################
+
+
+def _initialize_deepseek_anthropic_responses_logging(
+    *,
+    logging_obj: LiteLLMLoggingObj,
+    kwargs: dict[str, Any],
+    model: str,
+    user: Optional[str],
+    responses_api_request: ResponsesAPIOptionalRequestParams,
+    custom_llm_provider: Optional[str],
+    is_async: bool,
+    litellm_call_id: Optional[str],
+    api_base: Optional[str],
+) -> None:
+    raw_model_info = kwargs.get("model_info")
+    model_info = sanitize_model_info(raw_model_info) if isinstance(raw_model_info, dict) else {}
+    logging_obj.update_from_kwargs(
+        kwargs=kwargs,
+        model=model,
+        user=user,
+        optional_params=dict(responses_api_request),
+        litellm_params={
+            **responses_api_request,
+            "aresponses": is_async,
+            "litellm_call_id": litellm_call_id,
+            "model_info": model_info,
+            "data_residency": infer_openai_data_residency(custom_llm_provider, api_base),
+            "metadata": (kwargs["litellm_metadata"] if "litellm_metadata" in kwargs else kwargs.get("metadata")),
+            "proxy_server_request": kwargs.get("proxy_server_request"),
+        },
+        custom_llm_provider=custom_llm_provider,
+    )
 
 
 def _has_file_search_tool(tools: Optional[Any]) -> bool:
@@ -1092,6 +1124,17 @@ def responses(
         if protocol_context is not None and protocol_context.protocol.value == "deepseek_anthropic":
             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
+            _initialize_deepseek_anthropic_responses_logging(
+                logging_obj=litellm_logging_obj,
+                kwargs=kwargs,
+                model=model,
+                user=user,
+                responses_api_request=response_api_optional_params,
+                custom_llm_provider=custom_llm_provider,
+                is_async=_is_async,
+                litellm_call_id=litellm_call_id,
+                api_base=litellm_params.api_base,
+            )
             return DeepSeekAnthropicResponsesBridge.response_api_handler(
                 model=model,
                 input=input,

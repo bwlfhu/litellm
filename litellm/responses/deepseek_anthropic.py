@@ -3,6 +3,8 @@
 import json
 import time
 from copy import deepcopy
+from datetime import datetime
+from inspect import isawaitable
 from typing import Mapping, NoReturn
 
 import httpx
@@ -20,20 +22,20 @@ from litellm.llms.deepseek.responses_transport import (
     DeepSeekResponsesRawTransport,
     freeze_deepseek_request,
 )
-from litellm.responses.deepseek_streaming import (
-    DeepSeekAnthropicResponsesAsyncStream,
-    DeepSeekAnthropicResponsesSyncStream,
-)
 from litellm.responses.deepseek_accounting import (
     AttemptRateSnapshot,
     ParentAccounting,
     build_attempt_snapshot,
 )
 from litellm.responses.deepseek_session import SpendLogDeepSeekResponsesSessionRepository
+from litellm.responses.deepseek_streaming import (
+    DeepSeekAnthropicResponsesAsyncStream,
+    DeepSeekAnthropicResponsesSyncStream,
+)
+from litellm.responses.utils import ResponseAPILoggingUtils
 from litellm.router_protocol import DeploymentProtocolContext
 from litellm.types.llms.openai import ResponseInputParam, ResponsesAPIOptionalRequestParams, ResponsesAPIResponse
 from litellm.types.router import GenericLiteLLMParams
-
 
 _PROTOCOL_INTEGRITY_CODES = frozenset(
     {
@@ -306,6 +308,12 @@ def _http_client_from_kwargs(kwargs: Mapping[str, object]) -> tuple[httpx.AsyncC
     return httpx.AsyncClient(), True
 
 
+def _log_parent_pre_call(logging_obj: object, input_value: str | ResponseInputParam) -> None:
+    pre_call = getattr(logging_obj, "pre_call", None)
+    if callable(pre_call):
+        pre_call(input=input_value, api_key="", additional_args={})
+
+
 async def _read_raw_payload(response: httpx.Response, owns_client: bool, client: httpx.AsyncClient) -> object:
     try:
         return json.loads((await response.aread()).decode())
@@ -371,7 +379,6 @@ def _anthropic_response_to_responses(
                 )
                 assistant_content.append(deepcopy(dict(block)))
     response_status = "incomplete" if payload.get("stop_reason") in {"max_tokens", "length"} else "completed"
-    usage = accounting.usage
     response = ResponsesAPIResponse(
         id=response_id,
         created_at=int(time.time()),
@@ -381,17 +388,123 @@ def _anthropic_response_to_responses(
         status=response_status,
         previous_response_id=previous_response_id,
         reasoning=request.get("reasoning") if isinstance(request.get("reasoning"), Mapping) else None,
-        usage={
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "total_tokens": usage.total_tokens,
-            "input_tokens_details": {"cached_tokens": usage.cache_read_input_tokens},
-            "cost": accounting.cost,
-        },
+        usage=_responses_usage(accounting),
     )
     if assistant_content:
         response._hidden_params["deepseek_assistant_content"] = assistant_content
     return response
+
+
+def _accounting_rates(protocol_context: DeploymentProtocolContext) -> AttemptRateSnapshot:
+    rates = protocol_context.rate_snapshot
+    return AttemptRateSnapshot(
+        input_cost_per_token=rates.input_cost_per_token,
+        output_cost_per_token=rates.output_cost_per_token,
+        cache_read_input_cost_per_token=rates.cache_read_input_cost_per_token,
+        cache_creation_input_cost_per_token=rates.cache_creation_input_cost_per_token,
+    )
+
+
+def _parent_accounting(
+    *,
+    model: str,
+    protocol_context: DeploymentProtocolContext,
+    usage: Mapping[str, object],
+) -> ParentAccounting:
+    return ParentAccounting().add_attempt(
+        build_attempt_snapshot(
+            model=model,
+            deployment_id=protocol_context.deployment_id,
+            usage=usage,
+            rates=_accounting_rates(protocol_context),
+        )
+    )
+
+
+def _responses_usage(accounting: ParentAccounting) -> dict[str, object]:
+    usage = accounting.usage
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "input_tokens_details": {"cached_tokens": usage.cache_read_input_tokens},
+        "cost": accounting.cost,
+    }
+
+
+def _apply_parent_accounting(
+    response: ResponsesAPIResponse,
+    accounting: ParentAccounting,
+    logging_obj: object,
+) -> None:
+    summary = accounting.spend_log_summary()
+    response._hidden_params["response_cost"] = accounting.cost
+    response._hidden_params["deepseek_parent_accounting"] = summary
+    model_call_details = getattr(logging_obj, "model_call_details", None)
+    if not isinstance(model_call_details, dict):
+        return
+    model_call_details["combined_usage_object"] = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
+        response.usage
+    )
+    model_call_details["response_cost"] = accounting.cost
+    model_call_details["deepseek_parent_accounting"] = summary
+
+
+def _stream_terminal_response(
+    payload: Mapping[str, object],
+    *,
+    model: str,
+    previous_response_id: object,
+    request: ResponsesAPIOptionalRequestParams,
+    accounting: ParentAccounting,
+) -> ResponsesAPIResponse:
+    response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"resp_ds_{int(time.time() * 1000)}"
+    output = payload.get("output") if isinstance(payload.get("output"), list) else []
+    status = payload.get("status") if isinstance(payload.get("status"), str) else "failed"
+    return ResponsesAPIResponse(
+        id=response_id,
+        created_at=int(time.time()),
+        model=model,
+        object="response",
+        output=deepcopy(output),
+        status=status,
+        previous_response_id=previous_response_id if isinstance(previous_response_id, str) else None,
+        reasoning=request.get("reasoning") if isinstance(request.get("reasoning"), Mapping) else None,
+        usage=_responses_usage(accounting),
+    )
+
+
+async def _dispatch_parent_success(
+    logging_obj: object,
+    response: ResponsesAPIResponse,
+    *,
+    is_stream: bool,
+) -> None:
+    dispatch = getattr(logging_obj, "dispatch_success_handlers", None)
+    if not callable(dispatch):
+        return
+    if is_stream:
+        logging_obj.stream = False
+    result = dispatch(response)
+    if isawaitable(result):
+        await result
+
+
+async def _dispatch_stream_failure(logging_obj: object, category: str, is_async: bool) -> None:
+    error = DeepSeekUpstreamError(category, None)
+    traceback_exception = "DeepSeek Responses stream terminal failure"
+    start_time = getattr(logging_obj, "start_time", None)
+    failure_handler = getattr(logging_obj, "failure_handler", None)
+    if callable(failure_handler):
+        failure_handler(error, traceback_exception, start_time, datetime.now())
+    if not is_async:
+        return
+    async_failure_handler = getattr(logging_obj, "async_failure_handler", None)
+    if not callable(async_failure_handler):
+        return
+    result = async_failure_handler(error, traceback_exception, start_time, datetime.now())
+    if isawaitable(result):
+        await result
 
 
 def _responses_output_to_assistant_content(output: object) -> list[dict[str, object]]:
@@ -445,6 +558,7 @@ class DeepSeekAnthropicResponsesBridge:
                 custom_llm_provider=custom_llm_provider,
                 stream=stream,
                 protocol_context=protocol_context,
+                is_async=True,
                 kwargs=kwargs,
             )
         if stream:
@@ -456,6 +570,7 @@ class DeepSeekAnthropicResponsesBridge:
                     custom_llm_provider=custom_llm_provider,
                     stream=True,
                     protocol_context=protocol_context,
+                    is_async=False,
                     kwargs=kwargs,
                 )
             )
@@ -467,6 +582,7 @@ class DeepSeekAnthropicResponsesBridge:
             custom_llm_provider=custom_llm_provider,
             stream=stream,
             protocol_context=protocol_context,
+            is_async=False,
             kwargs=kwargs,
         )
 
@@ -480,6 +596,7 @@ class DeepSeekAnthropicResponsesBridge:
         custom_llm_provider: str | None,
         stream: bool | None,
         protocol_context: DeploymentProtocolContext,
+        is_async: bool,
         kwargs: Mapping[str, object],
     ) -> object:
         del custom_llm_provider
@@ -524,6 +641,7 @@ class DeepSeekAnthropicResponsesBridge:
             litellm_params=dict(kwargs),
         )
         http_client, owns_client = _http_client_from_kwargs(kwargs)
+        _log_parent_pre_call(kwargs.get("litellm_logging_obj"), input)
         raw_result = await DeepSeekResponsesRawTransport(http_client).send(
             freeze_deepseek_request(url=url, headers=headers, body=request_body, stream=stream is True)
         )
@@ -534,10 +652,33 @@ class DeepSeekAnthropicResponsesBridge:
         if stream:
             response_id = f"resp_ds_{int(time.time() * 1000)}"
 
-            async def save_completed_stream(response: Mapping[str, object]) -> None:
-                if response.get("status") != "completed":
+            async def handle_stream_terminal(event: Mapping[str, object]) -> None:
+                raw_response = event.get("response")
+                if not isinstance(raw_response, Mapping):
                     return
-                assistant_content = _responses_output_to_assistant_content(response.get("output"))
+                raw_usage = raw_response.get("usage") if isinstance(raw_response.get("usage"), Mapping) else {}
+                accounting = _parent_accounting(
+                    model=model,
+                    protocol_context=protocol_context,
+                    usage=raw_usage,
+                )
+                response = _stream_terminal_response(
+                    raw_response,
+                    model=model,
+                    previous_response_id=previous_response_id,
+                    request=responses_api_request,
+                    accounting=accounting,
+                )
+                logging_obj = kwargs.get("litellm_logging_obj")
+                _apply_parent_accounting(response, accounting, logging_obj)
+                if event.get("type") != "response.completed":
+                    await _dispatch_stream_failure(
+                        logging_obj,
+                        "stream_incomplete" if event.get("type") == "response.incomplete" else "stream_failed",
+                        is_async,
+                    )
+                    return
+                assistant_content = _responses_output_to_assistant_content(raw_response.get("output"))
                 if assistant_content:
                     session_messages = list(canonical.messages)
                     session_messages.append({"role": "assistant", "content": assistant_content})
@@ -547,6 +688,7 @@ class DeepSeekAnthropicResponsesBridge:
                         response_id,
                         tuple(session_messages),
                     )
+                await _dispatch_parent_success(logging_obj, response, is_stream=True)
 
             return DeepSeekAnthropicResponsesAsyncStream(
                 raw_result.response,
@@ -554,26 +696,16 @@ class DeepSeekAnthropicResponsesBridge:
                 response_id,
                 owns_client,
                 http_client,
-                save_completed_stream,
+                handle_stream_terminal,
             )
         payload = await _read_raw_payload(raw_result.response, owns_client, http_client)
         if not isinstance(payload, Mapping):
             raise DeepSeekProtocolError("upstream_response_invalid")
         raw_usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
-        model_info = kwargs.get("model_info") if isinstance(kwargs.get("model_info"), Mapping) else {}
-        rates = AttemptRateSnapshot(
-            input_cost_per_token=float(model_info.get("input_cost_per_token", 0) or 0),
-            output_cost_per_token=float(model_info.get("output_cost_per_token", 0) or 0),
-            cache_read_input_cost_per_token=float(model_info.get("cache_read_input_cost_per_token", 0) or 0),
-            cache_creation_input_cost_per_token=float(model_info.get("cache_creation_input_cost_per_token", 0) or 0),
-        )
-        accounting = ParentAccounting().add_attempt(
-            build_attempt_snapshot(
-                model=model,
-                deployment_id=protocol_context.deployment_id,
-                usage=raw_usage,
-                rates=rates,
-            )
+        accounting = _parent_accounting(
+            model=model,
+            protocol_context=protocol_context,
+            usage=raw_usage,
         )
         response_obj = _anthropic_response_to_responses(
             payload,
@@ -582,9 +714,9 @@ class DeepSeekAnthropicResponsesBridge:
             responses_api_request,
             accounting,
         )
-        response_obj._hidden_params["deepseek_parent_accounting"] = accounting.spend_log_summary()
+        _apply_parent_accounting(response_obj, accounting, kwargs.get("litellm_logging_obj"))
         assistant_content = response_obj._hidden_params.get("deepseek_assistant_content")
-        if isinstance(assistant_content, list):
+        if response_obj.status == "completed" and isinstance(assistant_content, list):
             session_messages = list(canonical.messages)
             session_messages.append({"role": "assistant", "content": assistant_content})
             _stage_session(
@@ -593,6 +725,7 @@ class DeepSeekAnthropicResponsesBridge:
                 response_obj.id,
                 tuple(session_messages),
             )
+        await _dispatch_parent_success(kwargs.get("litellm_logging_obj"), response_obj, is_stream=False)
         return response_obj
 
 

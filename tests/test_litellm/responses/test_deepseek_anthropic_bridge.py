@@ -6,12 +6,12 @@ import pytest
 import litellm
 from litellm.litellm_core_utils.asyncify import run_async_function
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, DeepSeekUpstreamError
-from litellm.router_protocol import _build_deployment_protocol_context
 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 from litellm.responses.deepseek_session import (
     SpendLogDeepSeekResponsesSessionRepository,
     create_deepseek_responses_session,
 )
+from litellm.router_protocol import _build_deployment_protocol_context
 
 
 def _context():
@@ -38,6 +38,23 @@ def _context_with_suffix_budget(suffix_token_budget: int):
     return context
 
 
+def _context_with_rates():
+    context = _build_deployment_protocol_context(
+        {
+            "id": "deployment-a",
+            "reasoning_protocol": "deepseek_anthropic",
+            "max_input_tokens": 4096,
+            "input_cost_per_token": 0.1,
+            "output_cost_per_token": 0.2,
+            "cache_read_input_cost_per_token": 0.01,
+        },
+        "deployment-a",
+        "attempt-a",
+    )
+    assert context is not None
+    return context
+
+
 def _unexpected_public_entrypoint(**kwargs):
     raise AssertionError("completion entrypoint must not be used")
 
@@ -52,6 +69,30 @@ class _InMemorySessionRepository:
     def stage(self, proxy_server_request: object, response_id: str, messages: tuple[dict[str, object], ...]) -> None:
         del proxy_server_request
         self._sessions[response_id] = create_deepseek_responses_session(response_id, messages)
+
+
+class _RecordingResponsesLogging:
+    def __init__(self):
+        self.stream = True
+        self.model_call_details: dict[str, object] = {}
+        self.pre_calls: list[object] = []
+        self.successes: list[object] = []
+        self.failures: list[object] = []
+        self.async_failures: list[object] = []
+
+    def pre_call(self, *, input: object, api_key: str, additional_args: dict[str, object]) -> None:
+        assert api_key == ""
+        assert additional_args == {}
+        self.pre_calls.append(input)
+
+    async def dispatch_success_handlers(self, response: object) -> None:
+        self.successes.append(response)
+
+    def failure_handler(self, error: object, *args: object) -> None:
+        self.failures.append(error)
+
+    async def async_failure_handler(self, error: object, *args: object) -> None:
+        self.async_failures.append(error)
 
 
 @pytest.mark.asyncio
@@ -91,6 +132,46 @@ async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_
     assert requests[0]["thinking"] == {"type": "enabled"}
     assert getattr(response.output[0], "type", None) == "reasoning"
     assert getattr(response.output[1], "type", None) == "message"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_non_stream_parent_accounting_uses_router_rate_snapshot():
+    logging_obj = _RecordingResponsesLogging()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_ds_accounted",
+                "content": [{"type": "text", "text": "answer"}],
+                "usage": {"input_tokens": 12, "output_tokens": 3, "cache_read_input_tokens": 4},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context_with_rates(),
+        litellm_logging_obj=logging_obj,
+        model_info={"input_cost_per_token": 999},
+        client=client,
+    )
+    await client.aclose()
+
+    assert len(logging_obj.pre_calls) == 1
+    assert response.usage.cost == pytest.approx(1.44)
+    assert response._hidden_params["response_cost"] == pytest.approx(1.44)
+    assert logging_obj.model_call_details["response_cost"] == pytest.approx(1.44)
+    assert logging_obj.model_call_details["combined_usage_object"].prompt_tokens == 12
+    assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
+    assert logging_obj.successes == [response]
+    assert logging_obj.failures == []
 
 
 def test_deepseek_responses_sync_bridge_uses_same_raw_reconstruction_core():
@@ -435,6 +516,148 @@ async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_
     assert len(requests) == 2
     assert requests[1]["messages"][1]["content"][0] == {"type": "thinking", "thinking": "reason"}
     assert requests[1]["messages"][2]["content"][0]["tool_use_id"] == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_stream_records_one_parent_accounting_snapshot():
+    session_repository = _InMemorySessionRepository()
+    logging_obj = _RecordingResponsesLogging()
+    sse = (
+        "event: message_start\n"
+        'data: {"message":{"usage":{"input_tokens":10}}}\n\n'
+        "event: content_block_start\n"
+        'data: {"index":0,"content_block":{"type":"text"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"index":0,"delta":{"type":"text_delta","text":"answer"}}\n\n'
+        "event: message_delta\n"
+        'data: {"usage":{"output_tokens":4,"cache_read_input_tokens":2}}\n\n'
+        "event: message_stop\n"
+        "data: {}\n\n"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, content=sse)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context_with_rates(),
+        _deepseek_session_repository=session_repository,
+        litellm_logging_obj=logging_obj,
+        model_info={
+            "input_cost_per_token": 999,
+            "output_cost_per_token": 999,
+            "cache_read_input_cost_per_token": 999,
+        },
+        client=client,
+    )
+    events = [event async for event in stream]
+    await client.aclose()
+
+    response = logging_obj.successes[0]
+    assert [event["type"] for event in events][-1] == "response.completed"
+    assert len(logging_obj.pre_calls) == 1
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.failures == []
+    assert response.usage.input_tokens == 10
+    assert response.usage.output_tokens == 4
+    assert response.usage.input_tokens_details.cached_tokens == 2
+    assert response.usage.cost == pytest.approx(1.62)
+    assert response._hidden_params["response_cost"] == pytest.approx(1.62)
+    assert logging_obj.model_call_details["response_cost"] == pytest.approx(1.62)
+    assert logging_obj.model_call_details["combined_usage_object"].prompt_tokens == 10
+    assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempts"][0]["rates"] == {
+        "input_cost_per_token": 0.1,
+        "output_cost_per_token": 0.2,
+        "cache_read_input_cost_per_token": 0.01,
+        "cache_creation_input_cost_per_token": 0.0,
+    }
+    assert await session_repository.load(events[-1]["response"]["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_stream_failure_records_parent_failure_without_session():
+    session_repository = _InMemorySessionRepository()
+    logging_obj = _RecordingResponsesLogging()
+    sse = (
+        "event: message_start\n"
+        'data: {"message":{"usage":{"input_tokens":7}}}\n\n'
+        "event: error\n"
+        'data: {"type":"upstream"}\n\n'
+        "event: message_stop\n"
+        "data: {}\n\n"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, content=sse)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context_with_rates(),
+        _deepseek_session_repository=session_repository,
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+    events = [event async for event in stream]
+    await client.aclose()
+
+    assert [event["type"] for event in events] == ["response.failed"]
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+    assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
+    assert session_repository._sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_stream_incomplete_records_parent_failure_without_session():
+    session_repository = _InMemorySessionRepository()
+    logging_obj = _RecordingResponsesLogging()
+    sse = (
+        "event: message_start\n"
+        'data: {"message":{"usage":{"input_tokens":7}}}\n\n'
+        "event: message_delta\n"
+        'data: {"delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":2}}\n\n'
+        "event: message_stop\n"
+        "data: {}\n\n"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, content=sse)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context_with_rates(),
+        _deepseek_session_repository=session_repository,
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+    events = [event async for event in stream]
+    await client.aclose()
+
+    assert [event["type"] for event in events] == ["response.incomplete"]
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+    assert logging_obj.model_call_details["response_cost"] == pytest.approx(1.1)
+    assert session_repository._sessions == {}
 
 
 @pytest.mark.asyncio

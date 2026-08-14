@@ -37,6 +37,7 @@ def test_deepseek_parent_accounting_aggregates_attempt_rates_and_cache_alias_onc
     summary = parent.spend_log_summary()
     assert summary["attempt_count"] == 2
     assert summary["cache_read_input_tokens"] == 60
+    assert summary["attempts"][0]["rates"]["cache_read_input_cost_per_token"] == 0.25
     assert "reasoning_protocol" not in summary
 
 

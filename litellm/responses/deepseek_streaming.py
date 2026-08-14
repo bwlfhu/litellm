@@ -9,8 +9,7 @@ from typing import Awaitable, Callable, Mapping
 
 import httpx
 
-
-DeepSeekStreamCompletionHandler = Callable[[Mapping[str, object]], Awaitable[None]]
+DeepSeekStreamTerminalHandler = Callable[[Mapping[str, object]], Awaitable[None]]
 
 
 class DeepSeekAnthropicResponsesSSEDecoder:
@@ -207,7 +206,7 @@ class DeepSeekAnthropicResponsesAsyncStream:
         response_id: str,
         owns_client: bool,
         client: httpx.AsyncClient,
-        on_completed: DeepSeekStreamCompletionHandler | None = None,
+        on_terminal: DeepSeekStreamTerminalHandler | None = None,
     ):
         self._response = response
         self._decoder = DeepSeekAnthropicResponsesSSEDecoder(model, response_id)
@@ -215,7 +214,7 @@ class DeepSeekAnthropicResponsesAsyncStream:
         self._client = client
         self._events = self._decoder.decode(response.aiter_lines())
         self._closed = False
-        self._on_completed = on_completed
+        self._on_terminal = on_terminal
 
     def __aiter__(self) -> "DeepSeekAnthropicResponsesAsyncStream":
         return self
@@ -224,12 +223,10 @@ class DeepSeekAnthropicResponsesAsyncStream:
         try:
             event = await self._events.__anext__()
             response = event.get("response")
-            if (
-                event.get("type") == "response.completed"
-                and isinstance(response, Mapping)
-                and self._on_completed is not None
-            ):
-                await self._on_completed(response)
+            if event.get("type") in {"response.completed", "response.failed", "response.incomplete"} and isinstance(
+                response, Mapping
+            ) and self._on_terminal is not None:
+                await self._on_terminal(event)
             return event
         except StopAsyncIteration:
             await self.aclose()

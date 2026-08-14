@@ -3,6 +3,10 @@
 from dataclasses import dataclass
 from typing import Mapping
 
+from pydantic import TypeAdapter, ValidationError
+
+_USAGE_DETAILS_ADAPTER = TypeAdapter(dict[str, object])
+
 
 @dataclass(frozen=True, slots=True)
 class AttemptRateSnapshot:
@@ -70,6 +74,12 @@ class ParentAccounting:
                     "output_tokens": attempt.usage.output_tokens,
                     "cache_read_input_tokens": attempt.usage.cache_read_input_tokens,
                     "cost": attempt.cost,
+                    "rates": {
+                        "input_cost_per_token": attempt.rates.input_cost_per_token,
+                        "output_cost_per_token": attempt.rates.output_cost_per_token,
+                        "cache_read_input_cost_per_token": attempt.rates.cache_read_input_cost_per_token,
+                        "cache_creation_input_cost_per_token": attempt.rates.cache_creation_input_cost_per_token,
+                    },
                 }
                 for attempt in self.attempts
             ),
@@ -77,22 +87,34 @@ class ParentAccounting:
 
 
 def normalize_deepseek_usage(usage: Mapping[str, object]) -> NormalizedUsage:
-    input_tokens = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
-    output_tokens = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
-    cache_read = int(
+    input_tokens = _token_count(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
+    output_tokens = _token_count(usage.get("output_tokens", usage.get("completion_tokens", 0)))
+    nested_cached_tokens = _cached_tokens_from_details(usage.get("input_tokens_details"))
+    cache_read = _token_count(
         usage.get(
             "cache_read_input_tokens",
-            usage.get("prompt_cache_hit_tokens", usage.get("cached_tokens", 0)),
+            usage.get("prompt_cache_hit_tokens", usage.get("cached_tokens", nested_cached_tokens)),
         )
-        or 0
     )
-    cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+    cache_creation = _token_count(usage.get("cache_creation_input_tokens", 0))
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_input_tokens=cache_read,
         cache_creation_input_tokens=cache_creation,
     )
+
+
+def _token_count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _cached_tokens_from_details(value: object) -> int:
+    try:
+        details = _USAGE_DETAILS_ADAPTER.validate_python(value)
+    except ValidationError:
+        return 0
+    return _token_count(details.get("cached_tokens"))
 
 
 def calculate_attempt_cost(usage: NormalizedUsage, rates: AttemptRateSnapshot) -> float:
