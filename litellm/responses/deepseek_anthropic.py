@@ -104,9 +104,7 @@ def _reasoning_text(item: Mapping[str, object]) -> str | None:
     summary = item.get("summary")
     if isinstance(summary, list):
         texts = [
-            value.get("text")
-            for value in summary
-            if isinstance(value, Mapping) and isinstance(value.get("text"), str)
+            value.get("text") for value in summary if isinstance(value, Mapping) and isinstance(value.get("text"), str)
         ]
         joined = "".join(texts)
         if joined.strip():
@@ -114,9 +112,7 @@ def _reasoning_text(item: Mapping[str, object]) -> str | None:
     content = item.get("content")
     if isinstance(content, list):
         texts = [
-            value.get("text")
-            for value in content
-            if isinstance(value, Mapping) and isinstance(value.get("text"), str)
+            value.get("text") for value in content if isinstance(value, Mapping) and isinstance(value.get("text"), str)
         ]
         joined = "".join(texts)
         if joined.strip():
@@ -500,8 +496,8 @@ def _apply_parent_accounting_to_logging(
     if not isinstance(model_call_details, dict):
         return
     if response_usage is not None:
-        model_call_details["combined_usage_object"] = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-            response_usage
+        model_call_details["combined_usage_object"] = (
+            ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(response_usage)
         )
     model_call_details["response_cost"] = accounting.cost
     model_call_details["_deepseek_parent_accounting"] = True
