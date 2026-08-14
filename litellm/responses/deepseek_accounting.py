@@ -86,6 +86,30 @@ class ParentAccounting:
         }
 
 
+@dataclass(slots=True)
+class DeepSeekParentAccountingTracker:
+    _accounting: ParentAccounting = ParentAccounting()
+    _finalized: bool = False
+
+    @property
+    def accounting(self) -> ParentAccounting:
+        return self._accounting
+
+    @property
+    def has_attempts(self) -> bool:
+        return bool(self._accounting.attempts)
+
+    def record_attempt(self, snapshot: AttemptAccountingSnapshot) -> ParentAccounting:
+        self._accounting = self._accounting.add_attempt(snapshot)
+        return self._accounting
+
+    def claim_lifecycle(self) -> bool:
+        if self._finalized:
+            return False
+        self._finalized = True
+        return True
+
+
 def normalize_deepseek_usage(usage: Mapping[str, object]) -> NormalizedUsage:
     input_tokens = _token_count(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
     output_tokens = _token_count(usage.get("output_tokens", usage.get("completion_tokens", 0)))
@@ -147,6 +171,7 @@ def build_attempt_snapshot(
 __all__ = [
     "AttemptAccountingSnapshot",
     "AttemptRateSnapshot",
+    "DeepSeekParentAccountingTracker",
     "NormalizedUsage",
     "ParentAccounting",
     "build_attempt_snapshot",

@@ -5,7 +5,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from inspect import isawaitable
-from typing import Mapping, NoReturn
+from typing import Mapping
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
@@ -24,6 +24,7 @@ from litellm.llms.deepseek.responses_transport import (
 )
 from litellm.responses.deepseek_accounting import (
     AttemptRateSnapshot,
+    DeepSeekParentAccountingTracker,
     ParentAccounting,
     build_attempt_snapshot,
 )
@@ -67,11 +68,16 @@ def _error_code_from_upstream_body(body: bytes) -> str | None:
     return None
 
 
-def _raise_raw_failure(failure: DeepSeekRawFailure) -> NoReturn:
+def _raw_failure_exception(failure: DeepSeekRawFailure) -> DeepSeekProtocolError | DeepSeekUpstreamError:
     code = _error_code_from_upstream_body(failure.body)
     if code is not None:
-        raise DeepSeekProtocolError(code)
-    raise DeepSeekUpstreamError(failure.category, failure.status_code)
+        return DeepSeekProtocolError(code)
+    return DeepSeekUpstreamError(
+        failure.category,
+        failure.status_code,
+        raw_headers=failure.headers,
+        raw_body=failure.body,
+    )
 
 
 def _effort_to_thinking(reasoning: object) -> tuple[dict[str, object], bool]:
@@ -410,8 +416,9 @@ def _parent_accounting(
     model: str,
     protocol_context: DeploymentProtocolContext,
     usage: Mapping[str, object],
+    tracker: DeepSeekParentAccountingTracker,
 ) -> ParentAccounting:
-    return ParentAccounting().add_attempt(
+    return tracker.record_attempt(
         build_attempt_snapshot(
             model=model,
             deployment_id=protocol_context.deployment_id,
@@ -419,6 +426,15 @@ def _parent_accounting(
             rates=_accounting_rates(protocol_context),
         )
     )
+
+
+def _accounting_tracker(kwargs: Mapping[str, object]) -> DeepSeekParentAccountingTracker:
+    tracker = kwargs.get("_deepseek_parent_accounting_tracker")
+    return tracker if isinstance(tracker, DeepSeekParentAccountingTracker) else DeepSeekParentAccountingTracker()
+
+
+def _router_owns_parent_accounting(kwargs: Mapping[str, object]) -> bool:
+    return kwargs.get("_deepseek_parent_accounting_owner") is True
 
 
 def _responses_usage(accounting: ParentAccounting) -> dict[str, object]:
@@ -440,12 +456,22 @@ def _apply_parent_accounting(
     summary = accounting.spend_log_summary()
     response._hidden_params["response_cost"] = accounting.cost
     response._hidden_params["deepseek_parent_accounting"] = summary
+    _apply_parent_accounting_to_logging(accounting, logging_obj, response.usage)
+
+
+def _apply_parent_accounting_to_logging(
+    accounting: ParentAccounting,
+    logging_obj: object,
+    response_usage: object | None = None,
+) -> None:
+    summary = accounting.spend_log_summary()
     model_call_details = getattr(logging_obj, "model_call_details", None)
     if not isinstance(model_call_details, dict):
         return
-    model_call_details["combined_usage_object"] = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-        response.usage
-    )
+    if response_usage is not None:
+        model_call_details["combined_usage_object"] = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
+            response_usage
+        )
     model_call_details["response_cost"] = accounting.cost
     model_call_details["deepseek_parent_accounting"] = summary
 
@@ -490,8 +516,7 @@ async def _dispatch_parent_success(
         await result
 
 
-async def _dispatch_stream_failure(logging_obj: object, category: str, is_async: bool) -> None:
-    error = DeepSeekUpstreamError(category, None)
+async def _dispatch_parent_failure(logging_obj: object, error: BaseException, is_async: bool) -> None:
     traceback_exception = "DeepSeek Responses stream terminal failure"
     start_time = getattr(logging_obj, "start_time", None)
     failure_handler = getattr(logging_obj, "failure_handler", None)
@@ -537,6 +562,33 @@ def _responses_output_to_assistant_content(output: object) -> list[dict[str, obj
 
 
 class DeepSeekAnthropicResponsesBridge:
+    @classmethod
+    async def finalize_router_success(
+        cls,
+        *,
+        tracker: DeepSeekParentAccountingTracker,
+        response: ResponsesAPIResponse,
+        logging_obj: object,
+    ) -> None:
+        if not tracker.claim_lifecycle():
+            return
+        _apply_parent_accounting(response, tracker.accounting, logging_obj)
+        await _dispatch_parent_success(logging_obj, response, is_stream=False)
+
+    @classmethod
+    async def finalize_router_failure(
+        cls,
+        *,
+        tracker: DeepSeekParentAccountingTracker,
+        logging_obj: object,
+        error: BaseException,
+        is_async: bool,
+    ) -> None:
+        if not tracker.claim_lifecycle():
+            return
+        _apply_parent_accounting_to_logging(tracker.accounting, logging_obj)
+        await _dispatch_parent_failure(logging_obj, error, is_async)
+
     @classmethod
     def response_api_handler(
         cls,
@@ -642,6 +694,8 @@ class DeepSeekAnthropicResponsesBridge:
             litellm_params=dict(kwargs),
         )
         http_client, owns_client = _http_client_from_kwargs(kwargs)
+        accounting_tracker = _accounting_tracker(kwargs)
+        router_owns_accounting = _router_owns_parent_accounting(kwargs)
         _log_parent_pre_call(kwargs.get("litellm_logging_obj"), input)
         raw_result = await DeepSeekResponsesRawTransport(http_client).send(
             freeze_deepseek_request(url=url, headers=headers, body=request_body, stream=stream is True)
@@ -649,11 +703,25 @@ class DeepSeekAnthropicResponsesBridge:
         if isinstance(raw_result, DeepSeekRawFailure):
             if owns_client:
                 await http_client.aclose()
-            _raise_raw_failure(raw_result)
+            _parent_accounting(
+                model=model,
+                protocol_context=protocol_context,
+                usage={},
+                tracker=accounting_tracker,
+            )
+            error = _raw_failure_exception(raw_result)
+            if not router_owns_accounting:
+                await cls.finalize_router_failure(
+                    tracker=accounting_tracker,
+                    logging_obj=kwargs.get("litellm_logging_obj"),
+                    error=error,
+                    is_async=is_async,
+                )
+            raise error
         if stream:
             response_id = f"resp_ds_{int(time.time() * 1000)}"
 
-            async def handle_stream_terminal(event: Mapping[str, object]) -> None:
+            async def handle_stream_terminal(event: Mapping[str, object], output_started: bool) -> None:
                 raw_response = event.get("response")
                 if not isinstance(raw_response, Mapping):
                     return
@@ -662,6 +730,7 @@ class DeepSeekAnthropicResponsesBridge:
                     model=model,
                     protocol_context=protocol_context,
                     usage=raw_usage,
+                    tracker=accounting_tracker,
                 )
                 response = _stream_terminal_response(
                     raw_response,
@@ -673,11 +742,16 @@ class DeepSeekAnthropicResponsesBridge:
                 logging_obj = kwargs.get("litellm_logging_obj")
                 _apply_parent_accounting(response, accounting, logging_obj)
                 if event.get("type") != "response.completed":
-                    await _dispatch_stream_failure(
-                        logging_obj,
-                        "stream_incomplete" if event.get("type") == "response.incomplete" else "stream_failed",
-                        is_async,
-                    )
+                    if not (router_owns_accounting and not output_started):
+                        await cls.finalize_router_failure(
+                            tracker=accounting_tracker,
+                            logging_obj=logging_obj,
+                            error=DeepSeekUpstreamError(
+                                "stream_incomplete" if event.get("type") == "response.incomplete" else "stream_failed",
+                                None,
+                            ),
+                            is_async=is_async,
+                        )
                     return
                 assistant_content = _responses_output_to_assistant_content(raw_response.get("output"))
                 if assistant_content:
@@ -689,7 +763,8 @@ class DeepSeekAnthropicResponsesBridge:
                         response_id,
                         tuple(session_messages),
                     )
-                await _dispatch_parent_success(logging_obj, response, is_stream=True)
+                if accounting_tracker.claim_lifecycle():
+                    await _dispatch_parent_success(logging_obj, response, is_stream=True)
 
             return DeepSeekAnthropicResponsesAsyncStream(
                 raw_result.response,
@@ -708,6 +783,7 @@ class DeepSeekAnthropicResponsesBridge:
             model=model,
             protocol_context=protocol_context,
             usage=raw_usage,
+            tracker=accounting_tracker,
         )
         response_obj = _anthropic_response_to_responses(
             payload,
@@ -716,7 +792,6 @@ class DeepSeekAnthropicResponsesBridge:
             responses_api_request,
             accounting,
         )
-        _apply_parent_accounting(response_obj, accounting, kwargs.get("litellm_logging_obj"))
         assistant_content = response_obj._hidden_params.get("deepseek_assistant_content")
         if response_obj.status == "completed" and isinstance(assistant_content, list):
             session_messages = list(canonical.messages)
@@ -727,7 +802,12 @@ class DeepSeekAnthropicResponsesBridge:
                 response_obj.id,
                 tuple(session_messages),
             )
-        await _dispatch_parent_success(kwargs.get("litellm_logging_obj"), response_obj, is_stream=False)
+        if not router_owns_accounting:
+            await cls.finalize_router_success(
+                tracker=accounting_tracker,
+                response=response_obj,
+                logging_obj=kwargs.get("litellm_logging_obj"),
+            )
         return response_obj
 
 

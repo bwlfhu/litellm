@@ -12,7 +12,7 @@ import httpx
 from litellm.exceptions import MidStreamFallbackError
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekUpstreamError
 
-DeepSeekStreamTerminalHandler = Callable[[Mapping[str, object]], Awaitable[None]]
+DeepSeekStreamTerminalHandler = Callable[[Mapping[str, object], bool], Awaitable[None]]
 
 
 class DeepSeekAnthropicResponsesSSEDecoder:
@@ -227,6 +227,10 @@ class DeepSeekAnthropicResponsesAsyncStream:
     async def __anext__(self) -> dict[str, object]:
         try:
             event = await self._events.__anext__()
+            is_terminal = event.get("type") in {"response.completed", "response.failed", "response.incomplete"}
+            response = event.get("response")
+            if is_terminal and isinstance(response, Mapping) and self._on_terminal is not None:
+                await self._on_terminal(event, self._decoder.output_started)
             if (
                 event.get("type") == "response.failed"
                 and not self._decoder.output_started
@@ -239,11 +243,6 @@ class DeepSeekAnthropicResponsesAsyncStream:
                     original_exception=DeepSeekUpstreamError("stream_failed", None),
                     is_pre_first_chunk=True,
                 )
-            response = event.get("response")
-            if event.get("type") in {"response.completed", "response.failed", "response.incomplete"} and isinstance(
-                response, Mapping
-            ) and self._on_terminal is not None:
-                await self._on_terminal(event)
             return event
         except StopAsyncIteration:
             await self.aclose()

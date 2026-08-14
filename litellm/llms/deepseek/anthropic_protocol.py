@@ -22,11 +22,20 @@ class DeepSeekProtocolError(DeepSeekProtocolNonFallbackError):
 
 
 class DeepSeekUpstreamError(ValueError):
-    def __init__(self, category: str, status_code: int | None):
+    def __init__(
+        self,
+        category: str,
+        status_code: int | None,
+        *,
+        raw_headers: Mapping[str, str] | None = None,
+        raw_body: bytes = b"",
+    ):
         self.category = category
         self.status_code = status_code
         self.retry_allowed = True
         self.fallback_allowed = True
+        self.raw_headers = dict(raw_headers or {})
+        self.raw_body = bytes(raw_body)
         super().__init__(category)
 
 
