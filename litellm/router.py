@@ -32,6 +32,7 @@ from typing import (
     Iterator,
     List,
     Literal,
+    Mapping,
     Optional,
     Set,
     Tuple,
@@ -96,6 +97,7 @@ from litellm.router_strategy.tag_based_routing import (
     is_valid_deployment_tag,
 )
 from litellm.router_protocol import (
+    DeploymentProtocolContext,
     _activate_router_protocol_context,
     _build_deployment_protocol_context,
     sanitize_model_info,
@@ -286,6 +288,16 @@ def _has_deepseek_parent_accounting(response: object) -> bool:
     """
     hidden_params = getattr(response, "_hidden_params", None)
     return isinstance(hidden_params, dict) and isinstance(hidden_params.get("deepseek_parent_accounting"), dict)
+
+
+def _has_deepseek_protocol_context(kwargs: Mapping[str, object]) -> bool:
+    if "_litellm_deployment_protocol_context" not in kwargs:
+        # Direct unit-level stream wrappers may omit Router provenance; an
+        # already-populated DeepSeek tracker is sufficient in that internal
+        # path. Router requests always carry the key from deployment selection.
+        return True
+    context = kwargs.get("_litellm_deployment_protocol_context")
+    return isinstance(context, DeploymentProtocolContext) and context.is_router_provenanced()
 
 
 _PreRoutingStrategyT = TypeVar("_PreRoutingStrategyT")
@@ -2596,7 +2608,7 @@ class Router:
                     # the one parent lifecycle here before surfacing the
                     # original failure (including local cancellation).
                     accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
-                    if accounting_tracker is not None:
+                    if accounting_tracker is not None and _has_deepseek_protocol_context(initial_kwargs):
                         from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
 
                         if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
@@ -2735,7 +2747,7 @@ class Router:
                 except BaseException as fallback_error:
                     verbose_router_logger.error(f"Responses sync streaming fallback also failed: {fallback_error}")
                     accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
-                    if accounting_tracker is not None:
+                    if accounting_tracker is not None and _has_deepseek_protocol_context(initial_kwargs):
                         from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
 
                         if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
