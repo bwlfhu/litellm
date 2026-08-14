@@ -28,6 +28,7 @@ from typing import (
     Dict,
     FrozenSet,
     Generator,
+    Iterable,
     Iterator,
     List,
     Literal,
@@ -2412,7 +2413,7 @@ class Router:
             _get_openai_response_types,
         )
 
-        source_iterator = response
+        source_iterator = cast(Iterable[Any], response)
 
         # Pre-resolve the set of terminal stream event types so the
         # per-chunk type check inside FallbackResponsesStreamWrapper
@@ -2683,7 +2684,7 @@ class Router:
         def stream_with_fallbacks() -> Generator[Any, None, None]:
             fallback_response: object | None = None
             try:
-                for item in source_iterator:  # type: ignore[operator]
+                for item in source_iterator:
                     yield item
             except MidStreamFallbackError as error:
                 try:
