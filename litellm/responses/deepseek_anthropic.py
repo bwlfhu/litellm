@@ -19,6 +19,11 @@ from litellm.responses.deepseek_streaming import (
     DeepSeekAnthropicResponsesAsyncStream,
     DeepSeekAnthropicResponsesSyncStream,
 )
+from litellm.responses.deepseek_accounting import (
+    AttemptRateSnapshot,
+    ParentAccounting,
+    build_attempt_snapshot,
+)
 from litellm.router_protocol import DeploymentProtocolContext
 from litellm.types.llms.openai import ResponseInputParam, ResponsesAPIOptionalRequestParams, ResponsesAPIResponse
 from litellm.types.router import GenericLiteLLMParams
@@ -261,6 +266,7 @@ def _anthropic_response_to_responses(
     model: str,
     previous_response_id: str | None,
     request: ResponsesAPIOptionalRequestParams,
+    accounting: ParentAccounting,
 ) -> ResponsesAPIResponse:
     response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"resp_ds_{int(time.time() * 1000)}"
     content = payload.get("content") if isinstance(payload.get("content"), list) else []
@@ -311,9 +317,7 @@ def _anthropic_response_to_responses(
                 )
                 assistant_content.append(deepcopy(dict(block)))
     response_status = "incomplete" if payload.get("stop_reason") in {"max_tokens", "length"} else "completed"
-    usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
-    input_tokens = int(usage.get("input_tokens", 0))
-    output_tokens = int(usage.get("output_tokens", 0))
+    usage = accounting.usage
     response = ResponsesAPIResponse(
         id=response_id,
         created_at=int(time.time()),
@@ -324,10 +328,11 @@ def _anthropic_response_to_responses(
         previous_response_id=previous_response_id,
         reasoning=request.get("reasoning") if isinstance(request.get("reasoning"), Mapping) else None,
         usage={
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-            "input_tokens_details": {"cached_tokens": int(usage.get("cache_read_input_tokens", 0))},
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "input_tokens_details": {"cached_tokens": usage.cache_read_input_tokens},
+            "cost": accounting.cost,
         },
     )
     if assistant_content:
@@ -394,7 +399,7 @@ class DeepSeekAnthropicResponsesBridge:
         protocol_context: DeploymentProtocolContext,
         kwargs: Mapping[str, object],
     ) -> object:
-        del custom_llm_provider, protocol_context
+        del custom_llm_provider
         reasoning = responses_api_request.get("reasoning")
         thinking, enabled = _effort_to_thinking(reasoning)
         previous_response_id = responses_api_request.get("previous_response_id")
@@ -448,7 +453,30 @@ class DeepSeekAnthropicResponsesBridge:
         payload = await _read_raw_payload(raw_result.response, owns_client, http_client)
         if not isinstance(payload, Mapping):
             raise DeepSeekProtocolError("upstream_response_invalid")
-        response_obj = _anthropic_response_to_responses(payload, model, previous_response_id, responses_api_request)
+        raw_usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
+        model_info = kwargs.get("model_info") if isinstance(kwargs.get("model_info"), Mapping) else {}
+        rates = AttemptRateSnapshot(
+            input_cost_per_token=float(model_info.get("input_cost_per_token", 0) or 0),
+            output_cost_per_token=float(model_info.get("output_cost_per_token", 0) or 0),
+            cache_read_input_cost_per_token=float(model_info.get("cache_read_input_cost_per_token", 0) or 0),
+            cache_creation_input_cost_per_token=float(model_info.get("cache_creation_input_cost_per_token", 0) or 0),
+        )
+        accounting = ParentAccounting().add_attempt(
+            build_attempt_snapshot(
+                model=model,
+                deployment_id=protocol_context.deployment_id,
+                usage=raw_usage,
+                rates=rates,
+            )
+        )
+        response_obj = _anthropic_response_to_responses(
+            payload,
+            model,
+            previous_response_id,
+            responses_api_request,
+            accounting,
+        )
+        response_obj._hidden_params["deepseek_parent_accounting"] = accounting.spend_log_summary()
         assistant_content = response_obj._hidden_params.get("deepseek_assistant_content")
         if isinstance(assistant_content, list):
             session_messages = list(canonical.messages)
