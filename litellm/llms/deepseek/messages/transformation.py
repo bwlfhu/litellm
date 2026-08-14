@@ -11,6 +11,8 @@ from litellm.llms.anthropic.experimental_pass_through.messages.transformation im
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 
+from litellm.llms.deepseek.anthropic_protocol import compile_deepseek_anthropic_history
+
 
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     """
@@ -118,10 +120,20 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> Dict:
+        request_params = dict(anthropic_messages_optional_request_params)
+        suffix_budget = request_params.pop("_deepseek_reasoning_suffix_token_budget", None)
+        if not isinstance(suffix_budget, int):
+            suffix_budget = None
+        canonical = compile_deepseek_anthropic_history(
+            messages,
+            request_params.get("thinking"),
+            max_suffix_tokens=suffix_budget,
+        )
+        request_params["thinking"] = request_params.get("thinking", {"type": "enabled"})
         anthropic_messages_request = super().transform_anthropic_messages_request(
             model=model,
-            messages=messages,
-            anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
+            messages=list(canonical.messages),
+            anthropic_messages_optional_request_params=request_params,
             litellm_params=litellm_params,
             headers=headers,
         )

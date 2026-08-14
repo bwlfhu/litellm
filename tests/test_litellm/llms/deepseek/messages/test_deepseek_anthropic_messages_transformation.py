@@ -183,7 +183,11 @@ def test_deepseek_anthropic_messages_preserves_thinking_and_sanitizes_custom_too
         headers={},
     )
 
-    assert request["messages"] == messages
+    assert request["messages"][1]["content"][0] == {
+        "type": "thinking",
+        "thinking": "I should call the tool.",
+    }
+    assert messages[1]["content"][0]["signature"] == "sig"
     assert request["thinking"] == {"type": "enabled", "budget_tokens": 1024}
     assert request["tools"][0] == {
         "name": "get_weather",
@@ -308,3 +312,36 @@ def test_deepseek_canonical_history_rejects_bad_graph_digest_and_budget():
         assert error.code == "tool_history_incomplete"
     else:
         raise AssertionError("consecutive unfinished tool calls must fail")
+
+
+def test_deepseek_messages_transform_compiles_unsigned_thinking_without_mutating_history():
+    config = DeepSeekAnthropicMessagesConfig()
+    messages = [
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "reason", "signature": "x"}]},
+        {"role": "user", "content": "continue"},
+    ]
+
+    request = config.transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 32, "thinking": {"type": "enabled"}},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"][0]["content"] == [{"type": "thinking", "thinking": "reason"}]
+    assert messages[0]["content"][0]["signature"] == "x"
+
+
+def test_deepseek_messages_transform_disabled_omits_optional_reasoning_but_not_tool_history():
+    config = DeepSeekAnthropicMessagesConfig()
+    request = config.transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "assistant", "content": [{"type": "thinking", "thinking": "optional"}]}],
+        anthropic_messages_optional_request_params={"max_tokens": 32, "thinking": {"type": "disabled"}},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "disabled"}
+    assert request["messages"][0]["content"] == []
