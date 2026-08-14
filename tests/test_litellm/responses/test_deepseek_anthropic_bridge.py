@@ -483,6 +483,48 @@ async def test_deepseek_responses_raw_failure_preserves_typed_data_and_finalizes
 
 
 @pytest.mark.asyncio
+async def test_deepseek_session_manifest_is_attached_to_spend_log_proxy_request():
+    repository = _InMemorySessionRepository()
+    logging_obj = _RecordingResponsesLogging()
+    logging_obj.model_call_details = {"litellm_params": {"proxy_server_request": {"body": {"input": "question"}}}}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_session_logging",
+                "content": [
+                    {"type": "thinking", "thinking": "reason"},
+                    {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context(),
+        _deepseek_session_repository=repository,
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+    await client.aclose()
+
+    stored = await repository.load(response.id)
+    persisted_request = logging_obj.model_call_details["litellm_params"]["proxy_server_request"]
+    assert stored is not None
+    assert persisted_request["body"]["_deepseek_anthropic_session"] == stored.payload()
+    assert logging_obj.model_call_details["deepseek_session_record"] == stored.payload()
+
+
+@pytest.mark.asyncio
 async def test_deepseek_responses_fallback_tracker_aggregates_attempts_once():
     logging_obj = _RecordingResponsesLogging()
     tracker = DeepSeekParentAccountingTracker()

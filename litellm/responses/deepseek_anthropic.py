@@ -28,7 +28,10 @@ from litellm.responses.deepseek_accounting import (
     ParentAccounting,
     build_attempt_snapshot,
 )
-from litellm.responses.deepseek_session import SpendLogDeepSeekResponsesSessionRepository
+from litellm.responses.deepseek_session import (
+    SpendLogDeepSeekResponsesSessionRepository,
+    create_deepseek_responses_session,
+)
 from litellm.responses.deepseek_streaming import (
     DeepSeekAnthropicResponsesAsyncStream,
     DeepSeekAnthropicResponsesSyncStream,
@@ -291,6 +294,8 @@ def _stage_session(
     stage = getattr(session_repository, "stage", None)
     if callable(stage):
         payload = stage(proxy_server_request, response_id, messages)
+        if payload is None:
+            payload = create_deepseek_responses_session(response_id, messages).payload()
         if not isinstance(payload, Mapping):
             return
         # Keep the immutable session record attached to the parent logging
