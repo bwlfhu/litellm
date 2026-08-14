@@ -8,10 +8,17 @@ from math import ceil
 from typing import Mapping, Sequence
 
 
-class DeepSeekProtocolError(ValueError):
+class DeepSeekProtocolNonFallbackError(ValueError):
     def __init__(self, code: str):
         self.code = code
+        self.status_code = 400
+        self.retry_allowed = False
+        self.fallback_allowed = False
         super().__init__(code)
+
+
+class DeepSeekProtocolError(DeepSeekProtocolNonFallbackError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +285,7 @@ def compile_deepseek_anthropic_history(
 __all__ = [
     "CanonicalHistory",
     "DeepSeekProtocolError",
+    "DeepSeekProtocolNonFallbackError",
     "ToolAssociatedCanonicalSuffix",
     "compile_deepseek_anthropic_history",
 ]

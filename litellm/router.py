@@ -63,6 +63,7 @@ from litellm.constants import (
 )
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.asyncify import run_async_function
+from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolNonFallbackError
 from litellm.litellm_core_utils.request_timeout_resolver import (
     get_configured_request_timeout,
 )
@@ -6177,6 +6178,8 @@ class Router:
         """
         Common utilities for async_function_with_fallbacks
         """
+        if isinstance(e, DeepSeekProtocolNonFallbackError):
+            raise e
         verbose_router_logger.debug(f"Traceback{traceback.format_exc()}")
         original_exception = e
         fallback_model_group = None
@@ -6459,6 +6462,8 @@ class Router:
             )
             return response
         except Exception as e:
+            if isinstance(e, DeepSeekProtocolNonFallbackError):
+                raise
             return await self.async_function_with_fallbacks_common_utils(
                 e,
                 disable_fallbacks,
@@ -6555,6 +6560,8 @@ class Router:
             response = add_retry_headers_to_response(response=response, attempted_retries=0, max_retries=None)
             return response
         except Exception as e:
+            if isinstance(e, DeepSeekProtocolNonFallbackError):
+                raise
             current_attempt = None
             original_exception = e
             deployment_num_retries = getattr(e, "num_retries", None)
@@ -6641,6 +6648,8 @@ class Router:
                     return response
 
                 except Exception as e:
+                    if isinstance(e, DeepSeekProtocolNonFallbackError):
+                        raise
                     # Always track the latest error so we raise the most
                     # recent exception instead of the first one.
                     original_exception = e
