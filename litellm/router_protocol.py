@@ -41,17 +41,19 @@ class DeploymentProtocolContext:
         return self._provenance is _ROUTER_PROVENANCE
 
 
+def _called_from_router() -> bool:
+    frame = currentframe()
+    while frame is not None:
+        module_name: object = frame.f_globals.get("__name__")
+        if module_name == "litellm.router":
+            return True
+        frame = frame.f_back
+    return False
+
+
 _ACTIVE_ROUTER_PROTOCOL_CONTEXT: ContextVar[DeploymentProtocolContext | None] = ContextVar(
     "active_router_protocol_context", default=None
 )
-
-
-def _called_from_router() -> bool:
-    frame = currentframe()
-    if frame is None or frame.f_back is None or frame.f_back.f_back is None:
-        return False
-    module_name: object = frame.f_back.f_back.f_globals.get("__name__")
-    return module_name == "litellm.router"
 
 
 def _non_negative_rate(value: object) -> float:
@@ -106,7 +108,11 @@ def _build_deployment_protocol_context(
 
 @contextmanager
 def _activate_router_protocol_context(context: object) -> Generator[None, None, None]:
-    if not isinstance(context, DeploymentProtocolContext) or not context.is_router_provenanced():
+    if (
+        not _called_from_router()
+        or not isinstance(context, DeploymentProtocolContext)
+        or not context.is_router_provenanced()
+    ):
         yield
         return
     token = _ACTIVE_ROUTER_PROTOCOL_CONTEXT.set(context)

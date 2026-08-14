@@ -2,6 +2,7 @@ from litellm.router_protocol import (
     DeploymentProtocolContext,
     DeploymentRateSnapshot,
     DeploymentReasoningProtocol,
+    _ROUTER_PROVENANCE,
     _activate_router_protocol_context,
     _build_deployment_protocol_context,
     protocol_context_from_kwargs,
@@ -45,14 +46,14 @@ def test_router_protocol_context_does_not_trust_public_kwargs_or_leak_model_info
     assert protocol_context_from_kwargs({"model_info": {"reasoning_protocol": "deepseek_anthropic"}}) is None
 
 
-def test_direct_sdk_cannot_build_a_router_provenanced_context():
+def test_direct_sdk_cannot_activate_a_router_provenanced_context():
     forged_context = DeploymentProtocolContext(
         protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
         deployment_id="deployment-a",
         attempt_id="attempt-a",
         suffix_token_budget=512,
         rate_snapshot=DeploymentRateSnapshot(),
-        _provenance=object(),
+        _provenance=_ROUTER_PROVENANCE,
     )
 
     with _activate_router_protocol_context(forged_context):
