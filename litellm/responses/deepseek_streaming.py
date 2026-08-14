@@ -9,6 +9,9 @@ from typing import Awaitable, Callable, Mapping
 
 import httpx
 
+from litellm.exceptions import MidStreamFallbackError
+from litellm.llms.deepseek.anthropic_protocol import DeepSeekUpstreamError
+
 DeepSeekStreamTerminalHandler = Callable[[Mapping[str, object]], Awaitable[None]]
 
 
@@ -207,6 +210,7 @@ class DeepSeekAnthropicResponsesAsyncStream:
         owns_client: bool,
         client: httpx.AsyncClient,
         on_terminal: DeepSeekStreamTerminalHandler | None = None,
+        pre_output_fallback_enabled: bool = False,
     ):
         self._response = response
         self._decoder = DeepSeekAnthropicResponsesSSEDecoder(model, response_id)
@@ -215,6 +219,7 @@ class DeepSeekAnthropicResponsesAsyncStream:
         self._events = self._decoder.decode(response.aiter_lines())
         self._closed = False
         self._on_terminal = on_terminal
+        self._pre_output_fallback_enabled = pre_output_fallback_enabled
 
     def __aiter__(self) -> "DeepSeekAnthropicResponsesAsyncStream":
         return self
@@ -222,6 +227,18 @@ class DeepSeekAnthropicResponsesAsyncStream:
     async def __anext__(self) -> dict[str, object]:
         try:
             event = await self._events.__anext__()
+            if (
+                event.get("type") == "response.failed"
+                and not self._decoder.output_started
+                and self._pre_output_fallback_enabled
+            ):
+                raise MidStreamFallbackError(
+                    message="DeepSeek Responses stream failed before output",
+                    model=self._decoder.model,
+                    llm_provider="deepseek",
+                    original_exception=DeepSeekUpstreamError("stream_failed", None),
+                    is_pre_first_chunk=True,
+                )
             response = event.get("response")
             if event.get("type") in {"response.completed", "response.failed", "response.incomplete"} and isinstance(
                 response, Mapping
@@ -253,6 +270,7 @@ class DeepSeekAnthropicResponsesSyncStream:
         self._closed = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[object] | None = None
+        self._worker_started = threading.Event()
         self._thread = threading.Thread(target=self._run, args=(coroutine,), daemon=True)
         self._thread.start()
 
@@ -260,6 +278,7 @@ class DeepSeekAnthropicResponsesSyncStream:
         async def worker() -> None:
             self._loop = asyncio.get_running_loop()
             self._task = asyncio.current_task()
+            self._worker_started.set()
             try:
                 stream = await coroutine
                 async for event in stream:
@@ -285,10 +304,13 @@ class DeepSeekAnthropicResponsesSyncStream:
         return item
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        self._worker_started.wait()
         if self._loop is not None and self._task is not None:
             self._loop.call_soon_threadsafe(self._task.cancel)
-        self._thread.join(timeout=5)
+        self._thread.join()
 
 
 __all__ = [

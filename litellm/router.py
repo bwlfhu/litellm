@@ -4628,6 +4628,7 @@ class Router:
         from litellm.responses.streaming_iterator import (
             BaseResponsesAPIStreamingIterator,
         )
+        from litellm.responses.deepseek_streaming import DeepSeekAnthropicResponsesAsyncStream
 
         from litellm.litellm_core_utils.core_helpers import safe_deep_copy
 
@@ -4646,6 +4647,7 @@ class Router:
         # fallback to the original reference for any non-picklable value.
         # The original_generic_function is preserved so the per-attempt
         # helper knows which underlying API to call on fallback.
+        kwargs["_deepseek_pre_output_stream_fallback"] = True
         fallback_kwargs: Dict[str, Any] = kwargs.copy()
         if isinstance(fallback_kwargs.get("litellm_metadata"), dict):
             fallback_kwargs["litellm_metadata"] = safe_deep_copy(fallback_kwargs["litellm_metadata"])
@@ -4655,7 +4657,9 @@ class Router:
 
         response = await self._ageneric_api_call_with_fallbacks(original_function=original_function, **kwargs)
 
-        if kwargs.get("stream") and isinstance(response, BaseResponsesAPIStreamingIterator):
+        if kwargs.get("stream") and isinstance(
+            response, (BaseResponsesAPIStreamingIterator, DeepSeekAnthropicResponsesAsyncStream)
+        ):
             return await self._aresponses_streaming_iterator(
                 response=response,
                 initial_kwargs=fallback_kwargs,

@@ -698,6 +698,7 @@ class DeepSeekAnthropicResponsesBridge:
                 owns_client,
                 http_client,
                 handle_stream_terminal,
+                kwargs.get("_deepseek_pre_output_stream_fallback") is True,
             )
         payload = await _read_raw_payload(raw_result.response, owns_client, http_client)
         if not isinstance(payload, Mapping):
