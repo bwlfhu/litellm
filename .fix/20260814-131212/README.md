@@ -303,32 +303,92 @@ raw transport 不读取或记录 usage；streaming completed payload、callback 
 18. **usage/cost**：缓存 alias 相等且只计费一次，SpendLog token/cost 与最终 Usage 一致
 19. **Claude 不回归**：没有可信 protocol context 的 Claude deployment 仍执行原签名保护，客户端 metadata/model_info 不能绕过
 
-## 7. 分阶段提交与验证
+## 7. 分阶段实施计划
 
-### Phase 0：确认线上真实拓扑
+实施必须按以下顺序推进。每一步完成对应门禁后才能进入下一步；任何门禁失败都停留在当前阶段，不通过配置绕过
 
-增加临时或既有安全 diagnostics，确认两个 endpoint 的 provider、config/bridge、deployment id 和 protocol。日志不得包含请求正文、reasoning、key 或敏感 header。若故障链与当前源码拓扑不符，先确认运行版本和 deployment 配置再修改源码
+### Step 0：固定基线并确认真实链路
 
-### Phase 1：原生 `/v1/messages`
+1. 从目标 release tag 创建修复分支，记录 LiteLLM commit、Python 依赖和部署配置版本
+2. 用脱敏 diagnostics 分别请求 `/v1/messages` 和 `/v1/responses`，记录 provider、deployment id、protocol resolver 结果和具体 handler/bridge
+3. 保存可复现的最小 fixture：首轮 thinking/tool call、第二轮 tool result、stream/non-stream、上游 400；禁止保存请求正文、reasoning、密钥和敏感 header
+4. 对照 #32110、#27425、#26678 做逐文件依赖检查，只标记可移植的最小差异
 
-- `fix(deepseek): validate and replay anthropic reasoning history`
-- `test(deepseek): cover two-turn anthropic tool reasoning`
+**Step 0 门禁**：两个 endpoint 的真实调用图与本方案一致，fixture 能在未修改代码上稳定复现 reasoning 丢失或错误重试；否则先修正方案中的源码落点
 
-只实现路径 A、redacted policy、会话 validator 和 wire test。通过后可以单独灰度给只使用 `/v1/messages` 的 deployment
+### Step 1：建立共享协议基础
 
-### Phase 2：公共 `/v1/responses`
+1. 增加带 provenance 的 Router 私有 `DeploymentProtocolContext` 和两个入口 resolver，先完成 model-info 出站 sanitizer
+2. 定义 canonical assistant/history 类型、`generation_thinking_enabled` 与 `history_reasoning_required` 两个状态
+3. 实现 tool-use/tool-result call-id 图校验、普通 assistant 后缀 reasoning 校验和 `redacted_thinking` 不可恢复错误
+4. 固化 Messages thinking 与 Responses effort 的参数解析、错误码和模式冲突规则
+5. 先写纯函数测试，覆盖 disabled/none、普通 assistant 后缀、并行 tool call、孤儿 result 和 direct SDK 伪造 context
 
-- `fix(responses): route deepseek anthropic protocol explicitly`
-- `fix(responses): preserve reasoning through tool sessions`
-- `test(responses): cover deepseek reasoning session and fallback`
+**Step 1 门禁**：resolver 不能被客户端字段触发；所有历史结构错误、缺失 reasoning 和破坏性 disabled/none 切换都在发出 HTTP 请求前得到稳定结果；输入对象保持不变
 
-实现独立入口 selector、共享 wire preparation + raw transport、共享 sync/async session reconstruction、单次 accounting owner 和专用 sync streaming 生命周期。Phase 1 通过不代表 Phase 2 可以上线；Phase 1 先独立灰度并完成观测，不与 Phase 2 同时发布
+### Step 2：先完成原生 `/v1/messages`（Phase 1）
 
-### Phase 3：通用 Messages-to-Responses adapter
+1. 在 `DeepSeekAnthropicMessagesConfig` 接入共享 codec，编译无签名 thinking block，保留 visible text、tool call 顺序和 provider-specific reasoning 恢复
+2. 接入非流式和流式响应的 reasoning 累计，确保客户端能原样回传下一轮历史
+3. 增加两轮 wire-level 测试：第一轮返回 thinking + 并行 tool_use，第二轮回传 tool_result，断言完整 thinking 出现在上游 body
+4. 增加 Claude signature、无工具多轮、redacted 和 thinking disabled 回归测试
 
-仅在独立回归需求或 route proof 证明其属于线上故障链时实施，避免把 OpenAI adapter 重构混入 DeepSeek 首个补丁
+建议提交：`fix(deepseek): validate and replay anthropic reasoning history`、`test(deepseek): cover two-turn anthropic tool reasoning`
 
-每个提交前运行 mapped tests、类型检查和 `make pre-commit`，再用 `git range-diff <release-tag>...HEAD` 检查 #32110/#27425/#26678 的最小移植边界。真实证明使用本地 proxy curl，只展示状态、event type、usage 摘要和错误阶段
+**Step 2 门禁**：原生 Messages 两轮通过，DeepSeek 工具续接不再 400；Claude deployment 行为不变；该阶段可独立灰度，不得提前启用 Responses bridge
+
+### Step 3：抽取 Path B 的冻结 wire/raw transport
+
+1. 从现有 Anthropic handler 提取 `_prepare_anthropic_messages_wire_request()`，使 config transform、序列化、签名和 URL 只执行一次并返回冻结对象
+2. 增加 `_async_anthropic_messages_raw_transport()`，只负责发送冻结请求和返回 raw response/stream，不进入 Anthropic response finalize 或 accounting hook
+3. DeepSeek Path B 初始版本禁用 HTTP error retry；明确禁止 `transform_anthropic_messages_request_on_http_error()`、删 thinking、重签名和 retry logging
+4. 增加 signature 类 400 测试，断言请求次数为一次、实际 body bytes 与 frozen body 相同、无 body mutation、无重复 pre-call/SpendLog
+
+**Step 3 门禁**：config transform 和 HTTP request 各一次，raw transport 不改变请求，失败由调用方接管；原生 Messages 既有 handler 测试全部通过
+
+### Step 4：实现公共 `/v1/responses` 非流式桥接
+
+1. 在 `responses/main.py` 的 native config/Chat bridge 选择前接入可信 protocol strategy
+2. 通过共享 session reconstruction core 和 canonical validator 生成完整 Anthropic Messages wire；禁止 `completion()`、`acompletion()`、`anthropic_messages()` 和 Router public method 递归进入
+3. 完成 `reasoning.effort` 到 Anthropic `thinking/output_config.effort` 映射，以及 Responses reasoning/function call/function output 的顺序编译
+4. 统一 sync/async session reconstruction、`previous_response_id` 错误、显式 input 优先级和单次 Responses accounting
+5. 增加非流式两轮测试，断言第一轮 reasoning 可持久化，第二轮 wire body 与显式历史重建结果一致
+
+建议提交：`fix(responses): route deepseek anthropic protocol explicitly`、`fix(responses): preserve reasoning through tool sessions`
+
+**Step 4 门禁**：sync/async 非流式两轮均通过；只有一个 wire request、一个 Usage、一个 cost 和一个 SpendLog；Responses 不经过 Anthropic finalize
+
+### Step 5：实现公共 `/v1/responses` 流式桥接
+
+1. 新增 `DeepSeekAnthropicResponsesSSEDecoder`，只处理 SSE framing、reasoning/text/tool delta 和 Responses event 编码
+2. 禁止创建 `BaseAnthropicMessagesStreamingIterator`、`PassThroughStreamingHandler` 或 global pass-through success handler；不得标记 `/v1/messages` route
+3. 为 sync streaming 使用持有 event loop 的 worker iterator，覆盖取消、客户端断开、上游 failed/incomplete 和资源关闭
+4. 确保 reasoning delta 同时进入对外 event、completed response、session history 和唯一 accounting payload
+5. 增加异步/同步流式测试和三个 pass-through 组件的 fail-fast spy
+
+建议提交：`test(responses): cover deepseek reasoning session and fallback`
+
+**Step 5 门禁**：stream completed、首 token 前失败、流中失败和取消路径均只有一个终态生命周期；无重复 success handler、SpendLog 或 cost
+
+### Step 6：接入 Router fallback、Usage 和可观测性
+
+1. 将本地历史 400、DeepSeek 等价 400、rate limit/timeout/5xx 分离到既定 retry/fallback policy
+2. fallback 每次从原始 public request 和新 deployment context 重新编译，禁止复用旧 wire body
+3. 统一 `prompt_cache_hit_tokens`、`cached_tokens` 和 `cache_read_input_tokens` 的 Usage 来源，验证只计费一次
+4. 验证 model info、metadata、proxy request、SpendLog 和 provider wire 不泄漏 `reasoning_protocol`
+5. 增加 fallback、usage/cost、dict/Pydantic terminal response 和 Claude 不回归测试
+
+**Step 6 门禁**：错误分类、fallback 重编译、Usage/cost、SpendLog 和内部字段隔离全部通过；不出现 `dict object has no attribute usage`
+
+### Step 7：验证、灰度与回滚准备
+
+1. 每个逻辑提交分别运行 mapped tests、类型检查、`git diff --check` 和 `make pre-commit`
+2. 用本地 proxy curl 做最终证明，只展示 HTTP 状态、event type、usage 摘要和错误阶段，不展示敏感内容
+3. 先只对 `/v1/messages` deployment 灰度，再单独对 `/v1/responses` 灰度；两个 endpoint 不同时启用
+4. 观察 missing/unrecoverable reasoning、mode conflict、上游 400、fallback skip、stream failed/completed、cache read 和 SpendLog cost
+5. 保留按 commit 和 endpoint 独立回滚能力；移除 `reasoning_protocol` 只能关闭新逻辑，不能替代故障恢复验证
+
+只有 Step 0 至 Step 7 全部门禁通过，才允许构建线上 LiteLLM 镜像
 
 ## 8. 发布、监控与回滚
 
