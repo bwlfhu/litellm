@@ -17,6 +17,7 @@ from litellm.llms.deepseek.messages.transformation import (
 )
 from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 from litellm.proxy.pass_through_endpoints import streaming_handler
+from litellm.router import Router
 from litellm.router_protocol import _RouterDeploymentProtocolContext
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
@@ -47,6 +48,41 @@ def test_anthropic_provider_keeps_default_config_for_deepseek_named_model():
 
     assert isinstance(config, AnthropicMessagesConfig)
     assert not isinstance(config, DeepSeekAnthropicMessagesConfig)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_route_prioritizes_deepseek_protocol_deployment():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "deepseek-v4-pro",
+                "litellm_params": {"model": "openai/deepseek-v4-pro", "api_key": "test-key"},
+                "model_info": {"id": "openai-deployment"},
+            },
+            {
+                "model_name": "deepseek-v4-pro",
+                "litellm_params": {
+                    "model": "anthropic/deepseek-v4-pro",
+                    "api_key": "test-key",
+                    "custom_llm_provider": "anthropic",
+                },
+                "model_info": {"id": "deepseek-deployment", "reasoning_protocol": "deepseek_anthropic"},
+            },
+        ]
+    )
+    dispatch = AsyncMock(return_value={"content": []})
+    routed_messages = router.factory_function(dispatch, call_type="anthropic_messages")
+
+    await routed_messages(
+        model="deepseek-v4-pro",
+        max_tokens=100,
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+
+    assert dispatch.await_count == 1
+    assert dispatch.call_args.kwargs["custom_llm_provider"] == "anthropic"
+    assert dispatch.call_args.kwargs["model_info"]["id"] == "deepseek-deployment"
+    assert "_litellm_router_call_type" not in dispatch.call_args.kwargs
 
 
 def test_untrusted_protocol_context_dict_does_not_select_deepseek_config():

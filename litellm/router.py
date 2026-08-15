@@ -4509,7 +4509,13 @@ class Router:
             kwargs["endpoint"] = kwargs["endpoint"].replace(model, replacement_model_name)
         return kwargs
 
-    async def _ageneric_api_call_with_fallbacks_helper(self, model: str, original_generic_function: Callable, **kwargs):
+    async def _ageneric_api_call_with_fallbacks_helper(
+        self,
+        model: str,
+        original_generic_function: Callable,
+        _litellm_router_call_type: str | None = None,
+        **kwargs,
+    ):
         """
         Helper function to make a generic LLM API call through the router, this allows you to use retries/fallbacks with litellm router
         """
@@ -4517,6 +4523,8 @@ class Router:
         passthrough_on_no_deployment = kwargs.pop("passthrough_on_no_deployment", False)
         function_name = "_ageneric_api_call_with_fallbacks"
         try:
+            if _litellm_router_call_type == "anthropic_messages":
+                kwargs["_litellm_router_call_type"] = _litellm_router_call_type
             parent_otel_span = _get_parent_otel_span_from_kwargs(kwargs)
             try:
                 deployment = await self.async_get_available_deployment(
@@ -4530,6 +4538,8 @@ class Router:
                 if passthrough_on_no_deployment:
                     return await original_generic_function(model=model, **kwargs)
                 raise e
+
+            kwargs.pop("_litellm_router_call_type", None)
 
             self._update_kwargs_with_deployment(deployment=deployment, kwargs=kwargs, function_name=function_name)
 
@@ -5759,6 +5769,7 @@ class Router:
             client: Optional[Any] = None,
             **kwargs,
         ):
+            kwargs.pop("_litellm_router_call_type", None)
             if call_type == "assistants":
                 return await self._pass_through_assistants_endpoint_factory(
                     original_function=original_function,
@@ -5833,6 +5844,7 @@ class Router:
             ):
                 return await self._ageneric_api_call_with_fallbacks(
                     original_function=original_function,
+                    _litellm_router_call_type=call_type,
                     **kwargs,
                 )
             elif call_type in (
@@ -10479,6 +10491,14 @@ class Router:
             request_kwargs=request_kwargs,
             request_team_id=request_team_id,
         )
+        if request_kwargs is not None and request_kwargs.get("_litellm_router_call_type") == "anthropic_messages":
+            deepseek_anthropic_deployments = [
+                deployment
+                for deployment in healthy_deployments
+                if (deployment.get("model_info") or {}).get("reasoning_protocol") == "deepseek_anthropic"
+            ]
+            if deepseek_anthropic_deployments:
+                healthy_deployments = deepseek_anthropic_deployments
         _access_group_filter_emptied_candidates = (
             _pre_model_access_group_filter_len > 0 and len(healthy_deployments) == 0
         )
