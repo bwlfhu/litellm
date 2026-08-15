@@ -283,7 +283,7 @@ def test_deepseek_sync_stream_close_waits_for_cancelled_worker_cleanup():
             httpx.AsyncClient(),
         )
 
-    stream = DeepSeekAnthropicResponsesSyncStream(create_stream())
+    stream = DeepSeekAnthropicResponsesSyncStream(create_stream(), model="deepseek-v4-pro")
     assert body.started.wait(timeout=2)
     stream.close()
     assert body.closed is True

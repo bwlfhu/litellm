@@ -287,11 +287,13 @@ class DeepSeekAnthropicResponsesAsyncStream:
 
 
 class DeepSeekAnthropicResponsesSyncStream:
-    def __init__(self, coroutine):
+    def __init__(self, coroutine, *, model: str, pre_output_fallback_enabled: bool = False):
         self._queue: queue.Queue[object] = queue.Queue()
         self._closed = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[object] | None = None
+        self._model = model
+        self._pre_output_fallback_enabled = pre_output_fallback_enabled
         self._worker_started = threading.Event()
         self._thread = threading.Thread(target=self._run, args=(coroutine,), daemon=True)
         self._thread.start()
@@ -305,6 +307,19 @@ class DeepSeekAnthropicResponsesSyncStream:
                 stream = await coroutine
                 async for event in stream:
                     self._queue.put(event)
+            except DeepSeekUpstreamError as error:
+                if self._pre_output_fallback_enabled:
+                    self._queue.put(
+                        MidStreamFallbackError(
+                            message="DeepSeek Responses stream failed before output",
+                            model=self._model,
+                            llm_provider="deepseek",
+                            original_exception=error,
+                            is_pre_first_chunk=True,
+                        )
+                    )
+                else:
+                    self._queue.put(error)
             except BaseException as error:
                 self._queue.put(error)
             finally:
@@ -331,7 +346,10 @@ class DeepSeekAnthropicResponsesSyncStream:
         self._closed = True
         self._worker_started.wait()
         if self._loop is not None and self._task is not None:
-            self._loop.call_soon_threadsafe(self._task.cancel)
+            try:
+                self._loop.call_soon_threadsafe(self._task.cancel)
+            except RuntimeError:
+                pass
         self._thread.join()
 
 

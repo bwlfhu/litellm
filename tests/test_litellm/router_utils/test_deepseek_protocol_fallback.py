@@ -10,6 +10,7 @@ from litellm.llms.deepseek.anthropic_protocol import (
 from litellm.llms.deepseek.responses_transport import DeepSeekRawResponse
 from litellm.router import Router
 from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker, build_attempt_snapshot
+from litellm.responses.deepseek_streaming import DeepSeekAnthropicResponsesSyncStream
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import protocol_context_from_kwargs
 from litellm.types.llms.openai import ResponsesAPIResponse
@@ -200,6 +201,41 @@ def test_router_responses_falls_back_before_output(monkeypatch):
     response = router.responses(model="primary", input="question", fallbacks=["backup"])
 
     assert response.id == "resp_sync_fallback"
+    assert calls == ["primary-id", "backup-id"]
+
+
+def test_router_responses_sync_stream_worker_falls_back_before_output(monkeypatch):
+    calls: list[str] = []
+
+    async def failed_stream_start() -> object:
+        raise DeepSeekUpstreamError("connect_error", None)
+
+    def fake_responses(*, model: str, **kwargs: object) -> object:
+        context = protocol_context_from_kwargs(kwargs)
+        assert context is not None
+        calls.append(context.deployment_id)
+        if context.deployment_id == "primary-id":
+            return DeepSeekAnthropicResponsesSyncStream(
+                failed_stream_start(),
+                model=model,
+                pre_output_fallback_enabled=True,
+            )
+        return ResponsesAPIResponse(
+            id="resp_sync_stream_fallback",
+            created_at=0,
+            model=model,
+            object="response",
+            output=[],
+            status="completed",
+            usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        )
+
+    monkeypatch.setattr("litellm.responses", fake_responses)
+    router = _router_with_deepseek_backup()
+
+    stream = router.responses(model="primary", input="question", stream=True, fallbacks=["backup"])
+
+    assert list(stream)[0].id == "resp_sync_stream_fallback"
     assert calls == ["primary-id", "backup-id"]
 
 

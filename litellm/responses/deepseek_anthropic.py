@@ -678,7 +678,9 @@ class DeepSeekAnthropicResponsesBridge:
                     protocol_context=protocol_context,
                     is_async=False,
                     kwargs=kwargs,
-                )
+                ),
+                model=model,
+                pre_output_fallback_enabled=kwargs.get("_deepseek_pre_output_stream_fallback") is True,
             )
         return run_async_function(
             cls._async_handle,
