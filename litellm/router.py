@@ -6172,7 +6172,7 @@ class Router:
         original_model_group: Optional[str] = kwargs.get("model")  # type: ignore
         fallback_failure_exception_str = ""
 
-        if disable_fallbacks is True or original_model_group is None:
+        if disable_fallbacks is True or getattr(e, "_litellm_disable_fallbacks", False) or original_model_group is None:
             raise e
 
         input_kwargs = {
