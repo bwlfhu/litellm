@@ -12,6 +12,7 @@ from litellm.llms.deepseek.anthropic_protocol import (
 from litellm.llms.deepseek.responses_transport import DeepSeekRawResponse
 from litellm.router import Router
 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+from litellm.responses.streaming_iterator import BaseResponsesAPIStreamingIterator
 from litellm.responses.deepseek_accounting import (
     AttemptRateSnapshot,
     DeepSeekParentAccountingTracker,
@@ -135,12 +136,31 @@ async def test_router_async_native_stream_fallback_finalizes_deepseek_parent_onc
         async def aclose(self) -> None:
             return None
 
+    class NativeFallback(BaseResponsesAPIStreamingIterator):
+        def __init__(self) -> None:
+            self._events = iter([_native_completed_event()])
+            self.lifecycle_deferred = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._events)
+            except StopIteration as error:
+                raise StopAsyncIteration from error
+
+        def defer_terminal_lifecycle_to_parent(self) -> None:
+            self.lifecycle_deferred = True
+
+        async def aclose(self) -> None:
+            return None
+
+    fallback = NativeFallback()
+
     class RouterWithFallback(Router):
         async def async_function_with_fallbacks_common_utils(self, **kwargs):
-            async def native_stream():
-                yield _native_completed_event()
-
-            return native_stream()
+            return fallback
 
     logging_obj = _RecordingResponsesLogging()
     tracker = _started_tracker_with_native_attempt()
@@ -162,6 +182,7 @@ async def test_router_async_native_stream_fallback_finalizes_deepseek_parent_onc
     assert len(logging_obj.successes) == 1
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 2
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
+    assert fallback.lifecycle_deferred is True
     assert tracker.claim_lifecycle() is False
 
 

@@ -51,9 +51,38 @@ async def test_deepseek_sse_decoder_emits_reasoning_text_and_tool_events_without
     assert event_types[-1] == "response.completed"
     assert event_types.index("response.output_item.done") < event_types.index("response.completed")
     text_delta = next(event for event in decoded if event["type"] == "response.output_text.delta")
-    assert text_delta["item_id"] == "msg_resp_1"
+    assert text_delta["item_id"] == "msg_resp_1_1"
     assert text_delta["content_index"] == 0
     assert decoded[-1]["response"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_sse_decoder_preserves_individual_content_blocks_in_events_and_terminal_response():
+    decoder = DeepSeekAnthropicResponsesSSEDecoder("deepseek-v4-pro", "resp_blocks")
+    events = [
+        ("content_block_start", {"index": 0, "content_block": {"type": "thinking"}}),
+        ("content_block_delta", {"index": 0, "delta": {"type": "thinking_delta", "thinking": "first"}}),
+        ("content_block_stop", {"index": 0}),
+        ("content_block_start", {"index": 1, "content_block": {"type": "thinking"}}),
+        ("content_block_delta", {"index": 1, "delta": {"type": "thinking_delta", "thinking": "second"}}),
+        ("content_block_stop", {"index": 1}),
+        ("content_block_start", {"index": 2, "content_block": {"type": "text"}}),
+        ("content_block_delta", {"index": 2, "delta": {"type": "text_delta", "text": "alpha"}}),
+        ("content_block_stop", {"index": 2}),
+        ("content_block_start", {"index": 3, "content_block": {"type": "text"}}),
+        ("content_block_delta", {"index": 3, "delta": {"type": "text_delta", "text": "beta"}}),
+        ("message_stop", {}),
+    ]
+
+    decoded = [event async for event in decoder.decode(_lines(events))]
+    output_item_done = [event["item"] for event in decoded if event["type"] == "response.output_item.done"]
+    terminal_output = decoded[-1]["response"]["output"]
+
+    assert [item["id"] for item in output_item_done] == [item["id"] for item in terminal_output]
+    assert [item["summary"][0]["text"] for item in terminal_output[:2]] == ["first", "second"]
+    assert [item["content"][0]["text"] for item in terminal_output[2:]] == ["alpha", "beta"]
+    assert len({item["id"] for item in terminal_output}) == 4
+    assert "response.reasoning_summary_part.added" in [event["type"] for event in decoded]
 
 
 @pytest.mark.asyncio
@@ -575,6 +604,70 @@ async def test_router_stream_fallback_iterator_failure_continues_to_next_candida
     assert events == [{"type": "response.completed", "response": {"status": "completed"}}]
     assert len(router.calls) == 2
     assert router.calls[1] == ("backup-b",)
+
+
+@pytest.mark.asyncio
+async def test_router_stream_fallback_does_not_continue_after_native_public_output():
+    class Source:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="before output",
+                model="primary",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self):
+            return None
+
+    class OutputThenFailure:
+        def __init__(self):
+            self._emitted = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._emitted:
+                self._emitted = True
+                return {"type": "response.output_item.added", "output_index": 0, "item": {}}
+            raise MidStreamFallbackError(
+                message="after output",
+                model="backup-a",
+                llm_provider="openai",
+                is_pre_first_chunk=False,
+            )
+
+        async def aclose(self):
+            return None
+
+    class RouterWithTwoFallbacks(Router):
+        def __init__(self):
+            super().__init__(model_list=[])
+            self.calls = 0
+
+        async def async_function_with_fallbacks_common_utils(self, **kwargs):
+            self.calls += 1
+            return OutputThenFailure()
+
+    router = RouterWithTwoFallbacks()
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "primary",
+            "stream": True,
+            "input": "question",
+            "fallbacks": ["backup-a", "backup-b"],
+        },
+    )
+
+    assert (await wrapped.__anext__())["type"] == "response.output_item.added"
+    with pytest.raises(MidStreamFallbackError, match="after output"):
+        await wrapped.__anext__()
+    assert router.calls == 1
 
 
 def test_router_sync_responses_stream_fallback_retries_before_output():

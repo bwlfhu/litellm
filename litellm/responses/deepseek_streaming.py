@@ -37,8 +37,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
         self.response_id = response_id
         self.output_started = False
         self._blocks: dict[int, str] = {}
-        self._reasoning = ""
-        self._text = ""
+        self._block_values: dict[int, str] = {}
         self._arguments: dict[int, str] = {}
         self._tool_calls: dict[int, dict[str, object]] = {}
         self._usage: dict[str, int] = {}
@@ -52,37 +51,34 @@ class DeepSeekAnthropicResponsesSSEDecoder:
     def _response(self, status: str) -> dict[str, object]:
         output: list[dict[str, object]] = []
         item_status = "completed" if status == "completed" else "in_progress"
-        if self._reasoning:
-            output.append(
-                {
-                    "type": "reasoning",
-                    "id": f"rs_{self.response_id}",
-                    "summary": [{"type": "summary_text", "text": self._reasoning}],
-                    "status": item_status,
-                }
-            )
-        if self._text:
-            output.append(
-                {
-                    "type": "message",
-                    "id": f"msg_{self.response_id}",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": self._text, "annotations": []}],
-                    "status": item_status,
-                }
-            )
-        for index in sorted(self._tool_calls):
-            call = self._tool_calls[index]
-            output.append(
-                {
-                    "type": "function_call",
-                    "id": call["id"],
-                    "call_id": call["id"],
-                    "name": call["name"],
-                    "arguments": self._arguments.get(index, ""),
-                    "status": item_status,
-                }
-            )
+        for index in sorted(self._blocks):
+            block_type = self._blocks[index]
+            item = self._block_items.get(index, {})
+            value = self._block_values.get(index, "")
+            if block_type == "thinking" and value:
+                output.append(
+                    {
+                        **item,
+                        "summary": [{"type": "summary_text", "text": value}],
+                        "status": item_status,
+                    }
+                )
+            elif block_type == "text" and value:
+                output.append(
+                    {
+                        **item,
+                        "content": [{"type": "output_text", "text": value, "annotations": []}],
+                        "status": item_status,
+                    }
+                )
+            elif block_type == "tool_use":
+                output.append(
+                    {
+                        **item,
+                        "arguments": self._arguments.get(index, ""),
+                        "status": item_status,
+                    }
+                )
         input_tokens = self._usage.get("input_tokens", 0)
         output_tokens = self._usage.get("output_tokens", 0)
         return {
@@ -122,6 +118,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
         if block_type not in {"thinking", "text", "tool_use"}:
             return []
         self._blocks[index] = str(block_type)
+        self._block_values[index] = ""
         if block_type == "tool_use":
             call_id = block.get("id") if isinstance(block.get("id"), str) else f"call_{index}"
             self._tool_calls[index] = {"id": call_id, "name": block.get("name", "")}
@@ -137,14 +134,14 @@ class DeepSeekAnthropicResponsesSSEDecoder:
         elif block_type == "thinking":
             event_item = {
                 "type": "reasoning",
-                "id": f"rs_{self.response_id}",
+                "id": f"rs_{self.response_id}_{index}",
                 "summary": [],
                 "status": "in_progress",
             }
         else:
             event_item = {
                 "type": "message",
-                "id": f"msg_{self.response_id}",
+                "id": f"msg_{self.response_id}_{index}",
                 "role": "assistant",
                 "content": [],
                 "status": "in_progress",
@@ -164,6 +161,15 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                     "part": {"type": "output_text", "text": "", "annotations": []},
                 }
             )
+        if block_type == "thinking":
+            events.append(
+                {
+                    "type": "response.reasoning_summary_part.added",
+                    "item_id": event_item["id"],
+                    "output_index": index,
+                    "part": {"type": "summary_text", "text": ""},
+                }
+            )
         return events
 
     def _content_block_delta(self, payload: Mapping[str, object]) -> list[dict[str, object]]:
@@ -180,7 +186,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
         item = self._block_items.get(index, {})
         item_id = item.get("id", f"item_{index}")
         if delta_type == "thinking_delta" or block_type == "thinking":
-            self._reasoning += value
+            self._block_values[index] = self._block_values.get(index, "") + value
             return [
                 {
                     "type": "response.reasoning_summary_text.delta",
@@ -191,7 +197,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                 }
             ]
         if delta_type == "text_delta" or block_type == "text":
-            self._text += value
+            self._block_values[index] = self._block_values.get(index, "") + value
             return [
                 {
                     "type": "response.output_text.delta",
@@ -222,6 +228,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
         item_id = item.get("id", f"item_{index}")
         self._closed_blocks.add(index)
         self._sequence_number += 1
+        value = self._block_values.get(index, "")
         if block_type == "thinking":
             return [
                 {
@@ -230,7 +237,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                     "output_index": index,
                     "summary_index": 0,
                     "sequence_number": self._sequence_number,
-                    "text": self._reasoning,
+                    "text": value,
                 },
                 {
                     "type": "response.reasoning_summary_part.done",
@@ -238,7 +245,7 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                     "output_index": index,
                     "summary_index": 0,
                     "sequence_number": self._sequence_number,
-                    "part": {"type": "summary_text", "text": self._reasoning},
+                    "part": {"type": "summary_text", "text": value},
                 },
                 {
                     "type": "response.output_item.done",
@@ -246,20 +253,20 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                     "sequence_number": self._sequence_number,
                     "item": {
                         **item,
-                        "summary": [{"type": "summary_text", "text": self._reasoning}],
+                        "summary": [{"type": "summary_text", "text": value}],
                         "status": "completed",
                     },
                 },
             ]
         if block_type == "text":
-            part = {"type": "output_text", "text": self._text, "annotations": []}
+            part = {"type": "output_text", "text": value, "annotations": []}
             return [
                 {
                     "type": "response.output_text.done",
                     "item_id": item_id,
                     "output_index": index,
                     "content_index": 0,
-                    "text": self._text,
+                    "text": value,
                 },
                 {
                     "type": "response.content_part.done",

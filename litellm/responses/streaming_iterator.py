@@ -118,6 +118,7 @@ class BaseResponsesAPIStreamingIterator:
         self._completed_response_logged = False
         self._completed_response_cache_hit: Optional[bool] = None
         self._persist_completed_response_before_logging = True
+        self._terminal_lifecycle_deferred_to_parent = False
         self._stream_created_time: float = time.time()
 
         # track request context for hooks
@@ -141,6 +142,9 @@ class BaseResponsesAPIStreamingIterator:
         self._hidden_params["additional_headers"] = process_response_headers(
             self.response.headers or {}
         )  # GUARANTEE OPENAI HEADERS IN RESPONSE
+
+    def defer_terminal_lifecycle_to_parent(self) -> None:
+        self._terminal_lifecycle_deferred_to_parent = True
 
     def _check_max_streaming_duration(self) -> None:
         """Raise litellm.Timeout if the stream has exceeded LITELLM_MAX_STREAMING_DURATION_SECONDS."""
@@ -275,26 +279,25 @@ class BaseResponsesAPIStreamingIterator:
                     openai_types.ResponsesAPIStreamEvents.RESPONSE_FAILED,
                 ):
                     self.completed_response = openai_responses_api_chunk
-                    # Add cost to usage object if include_cost_in_streaming_usage is True
-                    if litellm.include_cost_in_streaming_usage and self.logging_obj is not None:
-                        response_obj: Optional[Any] = getattr(openai_responses_api_chunk, "response", None)
-                        if response_obj:
-                            usage_obj: Optional[Any] = getattr(response_obj, "usage", None)
-                            if usage_obj is not None:
-                                try:
-                                    cost: Optional[float] = self.logging_obj._response_cost_calculator(
-                                        result=response_obj
-                                    )
-                                    if cost is not None:
-                                        setattr(usage_obj, "cost", cost)
-                                except Exception:
-                                    # Best-effort usage cost annotation should not break stream replay.
-                                    pass
+                    if not self._terminal_lifecycle_deferred_to_parent:
+                        if litellm.include_cost_in_streaming_usage and self.logging_obj is not None:
+                            response_obj: Optional[Any] = getattr(openai_responses_api_chunk, "response", None)
+                            if response_obj:
+                                usage_obj: Optional[Any] = getattr(response_obj, "usage", None)
+                                if usage_obj is not None:
+                                    try:
+                                        cost: Optional[float] = self.logging_obj._response_cost_calculator(
+                                            result=response_obj
+                                        )
+                                        if cost is not None:
+                                            setattr(usage_obj, "cost", cost)
+                                    except Exception:
+                                        pass
 
-                    if _chunk_type == openai_types.ResponsesAPIStreamEvents.RESPONSE_FAILED:
-                        self._handle_logging_failed_response()
-                    else:
-                        self._handle_logging_completed_response()
+                        if _chunk_type == openai_types.ResponsesAPIStreamEvents.RESPONSE_FAILED:
+                            self._handle_logging_failed_response()
+                        else:
+                            self._handle_logging_completed_response()
 
                 return openai_responses_api_chunk
 

@@ -1072,6 +1072,7 @@ class DeepSeekAnthropicResponsesBridge:
                 )
                 logging_obj = kwargs.get("litellm_logging_obj")
                 _apply_parent_accounting(response, accounting, logging_obj)
+                _write_stream_terminal_response(event, response)
                 if event.get("type") != "response.completed":
                     local_cancellation = event.get("_local_cancellation") is True
                     if not (router_owns_accounting and not output_started and not local_cancellation):

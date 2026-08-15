@@ -396,6 +396,16 @@ def _responses_fallback_candidates(fallbacks: object, model_group: str | None) -
     return []
 
 
+def _is_responses_public_output_event(event: object) -> bool:
+    event_type = event.get("type") if isinstance(event, Mapping) else getattr(event, "type", None)
+    return event_type in {
+        "response.output_item.added",
+        "response.reasoning_summary_text.delta",
+        "response.output_text.delta",
+        "response.function_call_arguments.delta",
+    }
+
+
 _PreRoutingStrategyT = TypeVar("_PreRoutingStrategyT")
 
 
@@ -2520,6 +2530,7 @@ class Router:
             BaseResponsesAPIStreamingIterator,
             _get_openai_response_types,
         )
+        from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker as ParentAccountingTracker
 
         source_iterator = cast(Iterable[Any], response)
 
@@ -2694,10 +2705,19 @@ class Router:
                         if not hasattr(iterator_or_response, "__aiter__"):
                             yield iterator_or_response
                             return
+                        accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+                        if (
+                            isinstance(accounting_tracker, ParentAccountingTracker)
+                            and accounting_tracker.parent_started
+                            and isinstance(iterator_or_response, BaseResponsesAPIStreamingIterator)
+                        ):
+                            iterator_or_response.defer_terminal_lifecycle_to_parent()
                         prepared_hidden_params = Router._prepare_fallback_hidden_params(iterator_or_response)
+                        output_started = False
                         try:
                             async for fallback_item in iterator_or_response:  # type: ignore
                                 Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
+                                output_started = output_started or _is_responses_public_output_event(fallback_item)
                                 _record_native_responses_attempt(initial_kwargs, fallback_item)
                                 if partial_usage is not None:
                                     Router._combine_responses_fallback_usage(fallback_item, partial_usage)
@@ -2708,6 +2728,8 @@ class Router:
                                 )
                                 yield fallback_item
                         except MidStreamFallbackError as next_error:
+                            if output_started:
+                                raise
                             # A fallback stream is an iterator, so its own
                             # pre-output failure occurs after the fallback
                             # engine has already returned. Continue with the
@@ -2854,6 +2876,8 @@ class Router:
         for its cancelled task before returning.
         """
         from litellm.exceptions import MidStreamFallbackError
+        from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker as ParentAccountingTracker
+        from litellm.responses.streaming_iterator import BaseResponsesAPIStreamingIterator
 
         source_iterator = response
         router_self = self
@@ -2930,11 +2954,20 @@ class Router:
                         if not hasattr(iterator_or_response, "__next__"):
                             yield iterator_or_response
                             return
+                        accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+                        if (
+                            isinstance(accounting_tracker, ParentAccountingTracker)
+                            and accounting_tracker.parent_started
+                            and isinstance(iterator_or_response, BaseResponsesAPIStreamingIterator)
+                        ):
+                            iterator_or_response.defer_terminal_lifecycle_to_parent()
                         prepared_hidden_params = Router._prepare_fallback_hidden_params(iterator_or_response)
+                        output_started = False
                         try:
                             fallback_iterator = cast(Iterator[Any], iterator_or_response)
                             for fallback_item in fallback_iterator:
                                 Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
+                                output_started = output_started or _is_responses_public_output_event(fallback_item)
                                 _record_native_responses_attempt(initial_kwargs, fallback_item)
                                 run_async_function(
                                     _finalize_native_responses_stream_terminal,
@@ -2944,6 +2977,8 @@ class Router:
                                 )
                                 yield fallback_item
                         except MidStreamFallbackError as next_error:
+                            if output_started:
+                                raise
                             next_index = candidate_index + 1
                             if next_index >= len(candidates):
                                 raise

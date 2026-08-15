@@ -6,7 +6,7 @@ completion_start_time = end_time."""
 import json
 from datetime import datetime
 from typing import Optional
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -141,6 +141,23 @@ async def test_responses_streaming_stamps_completion_start_time_on_first_chunk()
         "Later chunks must not re-stamp completion_start_time."
     )
     assert isinstance(stamped[0], datetime)
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_parent_lifecycle_deferral_skips_child_success_handler():
+    logging_obj = _logging_obj_stub()
+    logging_obj.dispatch_success_handlers = AsyncMock()
+    iterator = _make_iterator(
+        sse_events=[_sse_event({"type": "response.completed"})],
+        logging_obj=logging_obj,
+    )
+
+    iterator.defer_terminal_lifecycle_to_parent()
+    events = [event async for event in iterator]
+
+    assert [event.type for event in events] == [ResponsesAPIStreamEvents.RESPONSE_COMPLETED]
+    assert iterator.completed_response is events[0]
+    logging_obj.dispatch_success_handlers.assert_not_called()
 
 
 @pytest.mark.asyncio
