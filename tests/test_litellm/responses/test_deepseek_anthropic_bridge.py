@@ -612,6 +612,8 @@ async def test_deepseek_responses_raw_failure_preserves_typed_data_and_finalizes
     assert logging_obj.successes == []
     assert len(logging_obj.failures) == 1
     assert len(logging_obj.async_failures) == 1
+    assert logging_obj.failures[0].raw_headers == {}
+    assert logging_obj.failures[0].raw_body == b""
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
     assert logging_obj.model_call_details["response_cost"] == 0
 
@@ -668,6 +670,38 @@ async def test_deepseek_responses_malformed_payload_finalizes_failure_accounting
     await client.aclose()
 
     assert raised.value.raw_body == b"not-json"
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+    assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_error_shaped_json_200_finalizes_failure_accounting():
+    logging_obj = _RecordingResponsesLogging()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={"error": {"type": "upstream_error", "message": "invalid upstream payload"}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="upstream_response_invalid"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context_with_rates(),
+            litellm_logging_obj=logging_obj,
+            client=client,
+        )
+    await client.aclose()
+
     assert logging_obj.successes == []
     assert len(logging_obj.failures) == 1
     assert len(logging_obj.async_failures) == 1
@@ -802,7 +836,7 @@ async def test_deepseek_session_manifest_is_attached_to_spend_log_proxy_request(
 
 
 @pytest.mark.asyncio
-async def test_deepseek_session_without_atomic_repository_does_not_stage_reasoning():
+async def test_deepseek_session_without_atomic_repository_rejects_tool_history():
     logging_obj = _RecordingResponsesLogging()
     logging_obj.model_call_details = {"litellm_params": {"proxy_server_request": {"body": {"input": "question"}}}}
 
@@ -821,21 +855,22 @@ async def test_deepseek_session_without_atomic_repository_does_not_stage_reasoni
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    await DeepSeekAnthropicResponsesBridge.response_api_handler(
-        model="deepseek-v4-pro",
-        input="question",
-        responses_api_request={"max_output_tokens": 32},
-        custom_llm_provider="anthropic",
-        _is_async=True,
-        stream=False,
-        protocol_context=_context(),
-        litellm_logging_obj=logging_obj,
-        client=client,
-    )
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_history_persistence_unavailable"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            litellm_logging_obj=logging_obj,
+            client=client,
+        )
     await client.aclose()
 
-    body = logging_obj.model_call_details["litellm_params"]["proxy_server_request"]["body"]
-    assert "_deepseek_anthropic_session" not in body
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
     assert "deepseek_session_record" not in logging_obj.model_call_details
 
 

@@ -60,6 +60,7 @@ _PROTOCOL_INTEGRITY_CODES = frozenset(
         "unsupported_input_item",
         "tool_choice_invalid",
         "reasoning_history_persistence_failed",
+        "reasoning_history_persistence_unavailable",
         "upstream_response_invalid",
     }
 )
@@ -385,12 +386,19 @@ async def _stage_session(
             proxy_server_request = litellm_params.get("proxy_server_request")
     requires_atomic = getattr(session_repository, "requires_atomic_session", False)
     supports_atomic = getattr(session_repository, "supports_atomic_session", True)
+    session = create_deepseek_responses_session(response_id, messages, durability="atomic")
     if requires_atomic is True and supports_atomic is not True:
+        # A suffix containing a tool call is not safely reconstructable from
+        # SpendLog metadata. Do not hand out a response id that can never be
+        # resumed after the request returns.
+        if session.history_reasoning_required:
+            raise DeepSeekProtocolError("reasoning_history_persistence_unavailable")
         return
     commit = getattr(session_repository, "commit", None)
     if not callable(commit):
+        if session.history_reasoning_required:
+            raise DeepSeekProtocolError("reasoning_history_persistence_unavailable")
         return
-    session = create_deepseek_responses_session(response_id, messages, durability="atomic")
     try:
         result = commit(session)
         if isawaitable(result):
@@ -495,9 +503,17 @@ def _anthropic_response_to_responses(
     request: ResponsesAPIOptionalRequestParams,
     accounting: ParentAccounting,
 ) -> ResponsesAPIResponse:
-    response_id = payload.get("id") if isinstance(payload.get("id"), str) else _new_deepseek_response_id()
+    response_id = payload.get("id")
     content_value = payload.get("content")
-    content: list[object] = content_value if isinstance(content_value, list) else []
+    if (
+        not isinstance(response_id, str)
+        or not response_id.strip()
+        or not isinstance(content_value, list)
+        or isinstance(payload.get("error"), Mapping)
+        or not all(isinstance(block, Mapping) and isinstance(block.get("type"), str) for block in content_value)
+    ):
+        raise DeepSeekProtocolError("upstream_response_invalid")
+    content: list[Mapping[str, object]] = content_value
     output: list[dict[str, object]] = []
     assistant_content: list[dict[str, object]] = []
     for block in content:
@@ -695,16 +711,54 @@ async def _dispatch_parent_failure(logging_obj: object, error: BaseException, is
     traceback_exception = "DeepSeek Responses stream terminal failure"
     start_time = getattr(logging_obj, "start_time", None)
     failure_handler = getattr(logging_obj, "failure_handler", None)
+    sanitized_error = _sanitize_failure_error(error)
     if callable(failure_handler):
-        failure_handler(error, traceback_exception, start_time, datetime.now())
+        failure_handler(sanitized_error, traceback_exception, start_time, datetime.now())
     if not is_async:
         return
     async_failure_handler = getattr(logging_obj, "async_failure_handler", None)
     if not callable(async_failure_handler):
         return
-    result = async_failure_handler(error, traceback_exception, start_time, datetime.now())
+    result = async_failure_handler(sanitized_error, traceback_exception, start_time, datetime.now())
     if isawaitable(result):
         await result
+
+
+def _sanitize_failure_error(error: BaseException) -> BaseException:
+    """Prevent preserved upstream evidence from reaching external log sinks."""
+    if isinstance(error, DeepSeekProtocolError):
+        return DeepSeekProtocolError(error.code)
+    if isinstance(error, DeepSeekUpstreamError):
+        return DeepSeekUpstreamError(error.category, error.status_code)
+    return error
+
+
+def _stream_event_value(event: object, field: str) -> object:
+    if isinstance(event, Mapping):
+        return event.get(field)
+    return getattr(event, field, None)
+
+
+def _response_from_stream_terminal(event: object) -> ResponsesAPIResponse | None:
+    response = _stream_event_value(event, "response")
+    if isinstance(response, ResponsesAPIResponse):
+        return response
+    if not isinstance(response, Mapping):
+        return None
+    response_id = response.get("id")
+    output = response.get("output")
+    if not isinstance(response_id, str) or not response_id or not isinstance(output, list):
+        return None
+    created_at = response.get("created_at")
+    return ResponsesAPIResponse(
+        id=response_id,
+        created_at=created_at if isinstance(created_at, int) else int(time.time()),
+        model=response.get("model") if isinstance(response.get("model"), str) else None,
+        object=response.get("object") if isinstance(response.get("object"), str) else "response",
+        output=deepcopy(output),
+        status=response.get("status") if isinstance(response.get("status"), str) else None,
+        usage=deepcopy(response.get("usage")) if isinstance(response.get("usage"), Mapping) else None,
+    )
 
 
 def _responses_output_to_assistant_content(output: object) -> list[dict[str, object]]:
@@ -785,6 +839,35 @@ class DeepSeekAnthropicResponsesBridge:
             tracker=tracker,
             logging_obj=logging_obj,
             error=DeepSeekUpstreamError("response_incomplete", None),
+            is_async=is_async,
+        )
+
+    @classmethod
+    async def finalize_router_stream_terminal(
+        cls,
+        *,
+        tracker: DeepSeekParentAccountingTracker,
+        event: object,
+        logging_obj: object,
+        is_async: bool,
+    ) -> None:
+        """Finish the one parent lifecycle when a native fallback stream ends."""
+        event_type = _stream_event_value(event, "type")
+        response = _response_from_stream_terminal(event)
+        if event_type == "response.completed" and response is not None:
+            await cls.finalize_router_success(
+                tracker=tracker,
+                response=response,
+                logging_obj=logging_obj,
+            )
+            return
+        await cls.finalize_router_failure(
+            tracker=tracker,
+            logging_obj=logging_obj,
+            error=DeepSeekUpstreamError(
+                "stream_incomplete" if event_type == "response.incomplete" else "stream_failed",
+                None,
+            ),
             is_async=is_async,
         )
 
@@ -972,13 +1055,23 @@ class DeepSeekAnthropicResponsesBridge:
                 if assistant_content:
                     session_messages = list(canonical.messages)
                     session_messages.append({"role": "assistant", "content": assistant_content})
-                    await _stage_session(
-                        session_repository,
-                        kwargs.get("proxy_server_request"),
-                        raw_response_id,
-                        tuple(session_messages),
-                        kwargs.get("litellm_logging_obj"),
-                    )
+                    try:
+                        await _stage_session(
+                            session_repository,
+                            kwargs.get("proxy_server_request"),
+                            raw_response_id,
+                            tuple(session_messages),
+                            kwargs.get("litellm_logging_obj"),
+                        )
+                    except DeepSeekProtocolNonFallbackError as error:
+                        if not router_owns_accounting:
+                            await cls.finalize_router_failure(
+                                tracker=accounting_tracker,
+                                logging_obj=logging_obj,
+                                error=error,
+                                is_async=is_async,
+                            )
+                        raise
                 if accounting_tracker.claim_lifecycle():
                     await _dispatch_parent_success(logging_obj, response, is_stream=True)
 

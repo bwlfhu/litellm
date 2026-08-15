@@ -2,6 +2,7 @@ import importlib
 
 import pytest
 
+from litellm.exceptions import MidStreamFallbackError
 from litellm.llms.deepseek.anthropic_protocol import (
     DeepSeekProtocolError,
     DeepSeekProtocolNonFallbackError,
@@ -9,11 +10,15 @@ from litellm.llms.deepseek.anthropic_protocol import (
 )
 from litellm.llms.deepseek.responses_transport import DeepSeekRawResponse
 from litellm.router import Router
-from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker, build_attempt_snapshot
+from litellm.responses.deepseek_accounting import (
+    AttemptRateSnapshot,
+    DeepSeekParentAccountingTracker,
+    build_attempt_snapshot,
+)
 from litellm.responses.deepseek_streaming import DeepSeekAnthropicResponsesSyncStream
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import protocol_context_from_kwargs
-from litellm.types.llms.openai import ResponsesAPIResponse
+from litellm.types.llms.openai import ResponseCompletedEvent, ResponsesAPIResponse
 
 
 async def _raise_protocol(*args, **kwargs):
@@ -73,6 +78,131 @@ class _RecordingResponsesLogging:
 
     async def async_failure_handler(self, error: object, *args: object) -> None:
         self.failures.append(error)
+
+
+def _native_completed_event() -> ResponseCompletedEvent:
+    return ResponseCompletedEvent(
+        type="response.completed",
+        response=ResponsesAPIResponse(
+            id="native-stream-response",
+            created_at=1,
+            model="openai/backup",
+            object="response",
+            output=[],
+            status="completed",
+            usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        ),
+    )
+
+
+def _started_tracker_with_native_attempt() -> DeepSeekParentAccountingTracker:
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.mark_deepseek_parent()
+    tracker.record_attempt(
+        build_attempt_snapshot(
+            model="anthropic/primary",
+            deployment_id="primary-id",
+            usage={},
+            rates=AttemptRateSnapshot(),
+        )
+    )
+    tracker.register_native_attempt(
+        "openai/backup",
+        "backup-id",
+        AttemptRateSnapshot(input_cost_per_token=0.1, output_cost_per_token=0.2),
+    )
+    return tracker
+
+
+@pytest.mark.asyncio
+async def test_router_async_native_stream_fallback_finalizes_deepseek_parent_once():
+    class Source:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="before output",
+                model="anthropic/primary",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    class RouterWithFallback(Router):
+        async def async_function_with_fallbacks_common_utils(self, **kwargs):
+            async def native_stream():
+                yield _native_completed_event()
+
+            return native_stream()
+
+    logging_obj = _RecordingResponsesLogging()
+    tracker = _started_tracker_with_native_attempt()
+    router = RouterWithFallback(model_list=[])
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "primary",
+            "fallbacks": ["backup"],
+            "_deepseek_parent_accounting_tracker": tracker,
+            "litellm_logging_obj": logging_obj,
+        },
+    )
+
+    events = [event async for event in wrapped]
+    assert len(events) == 1
+    assert events[0].response._hidden_params["deepseek_parent_accounting"]["attempt_count"] == 2
+    assert logging_obj.failures == []
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 2
+    assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
+    assert tracker.claim_lifecycle() is False
+
+
+def test_router_sync_native_stream_fallback_finalizes_deepseek_parent_once():
+    class Source:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise MidStreamFallbackError(
+                message="before output",
+                model="anthropic/primary",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        def close(self) -> None:
+            return None
+
+    class RouterWithFallback(Router):
+        async def async_function_with_fallbacks_common_utils(self, **kwargs):
+            return iter([_native_completed_event()])
+
+    logging_obj = _RecordingResponsesLogging()
+    tracker = _started_tracker_with_native_attempt()
+    router = RouterWithFallback(model_list=[])
+    wrapped = router._responses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "primary",
+            "fallbacks": ["backup"],
+            "_deepseek_parent_accounting_tracker": tracker,
+            "litellm_logging_obj": logging_obj,
+        },
+        original_function=lambda **kwargs: None,
+    )
+
+    events = list(wrapped)
+    assert len(events) == 1
+    assert events[0].response._hidden_params["deepseek_parent_accounting"]["attempt_count"] == 2
+    assert logging_obj.failures == []
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 2
+    assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
+    assert tracker.claim_lifecycle() is False
 
 
 @pytest.mark.asyncio

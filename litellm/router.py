@@ -355,6 +355,31 @@ def _has_deepseek_protocol_context(kwargs: Mapping[str, object]) -> bool:
     return isinstance(context, DeploymentProtocolContext) and context.is_router_provenanced()
 
 
+async def _finalize_native_responses_stream_terminal(
+    kwargs: Mapping[str, object], event: object, *, is_async: bool
+) -> None:
+    event_type = event.get("type") if isinstance(event, Mapping) else getattr(event, "type", None)
+    if event_type not in {"response.completed", "response.failed", "response.incomplete"}:
+        return
+    from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
+
+    tracker = kwargs.get("_deepseek_parent_accounting_tracker")
+    if (
+        not isinstance(tracker, DeepSeekParentAccountingTracker)
+        or not tracker.parent_started
+        or not tracker.has_attempts
+    ):
+        return
+    from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+
+    await DeepSeekAnthropicResponsesBridge.finalize_router_stream_terminal(
+        tracker=tracker,
+        event=event,
+        logging_obj=kwargs.get("litellm_logging_obj"),
+        is_async=is_async,
+    )
+
+
 def _responses_fallback_candidates(fallbacks: object, model_group: str | None) -> list[str]:
     """Return explicit response fallback groups in deterministic order."""
     if not isinstance(fallbacks, list):
@@ -2676,6 +2701,11 @@ class Router:
                                 _record_native_responses_attempt(initial_kwargs, fallback_item)
                                 if partial_usage is not None:
                                     Router._combine_responses_fallback_usage(fallback_item, partial_usage)
+                                await _finalize_native_responses_stream_terminal(
+                                    initial_kwargs,
+                                    fallback_item,
+                                    is_async=True,
+                                )
                                 yield fallback_item
                         except MidStreamFallbackError as next_error:
                             # A fallback stream is an iterator, so its own
@@ -2906,6 +2936,12 @@ class Router:
                             for fallback_item in fallback_iterator:
                                 Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
                                 _record_native_responses_attempt(initial_kwargs, fallback_item)
+                                run_async_function(
+                                    _finalize_native_responses_stream_terminal,
+                                    initial_kwargs,
+                                    fallback_item,
+                                    is_async=False,
+                                )
                                 yield fallback_item
                         except MidStreamFallbackError as next_error:
                             next_index = candidate_index + 1
