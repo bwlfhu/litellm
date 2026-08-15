@@ -2,14 +2,17 @@
 DeepSeek Anthropic-compatible messages transformation config.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import httpx
 import litellm
+from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
 from litellm.secret_managers.main import get_secret_str
+from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
 from litellm.types.router import GenericLiteLLMParams
 
 from litellm.llms.deepseek.anthropic_protocol import (
@@ -159,6 +162,41 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             anthropic_messages_request["tools"] = self._sanitize_tools_for_deepseek(anthropic_messages_request["tools"])
         validate_deepseek_anthropic_context_budget(anthropic_messages_request, context_budget)
         return anthropic_messages_request
+
+    def transform_anthropic_messages_response(
+        self,
+        model: str,
+        raw_response: httpx.Response,
+        logging_obj: LiteLLMLoggingObj,
+    ) -> AnthropicMessagesResponse:
+        response = cast(
+            dict[str, object],
+            super().transform_anthropic_messages_response(
+                model=model,
+                raw_response=raw_response,
+                logging_obj=logging_obj,
+            ),
+        )
+        provider_fields = response.get("provider_specific_fields")
+        provider_mapping = cast(Mapping[str, object], provider_fields) if isinstance(provider_fields, Mapping) else None
+        reasoning = provider_mapping.get("reasoning_content") if provider_mapping is not None else None
+        content_value = response.get("content")
+        content = cast(list[object], content_value) if isinstance(content_value, list) else []
+        has_thinking = any(isinstance(block, Mapping) and block.get("type") == "thinking" for block in content)
+        if not isinstance(reasoning, str) or not reasoning.strip() or has_thinking:
+            return cast(AnthropicMessagesResponse, response)
+        response["content"] = [
+            {"type": "thinking", "thinking": reasoning},
+            *content,
+        ]
+        remaining_provider_fields = {
+            key: value for key, value in provider_mapping.items() if key != "reasoning_content"
+        }
+        if remaining_provider_fields:
+            response["provider_specific_fields"] = remaining_provider_fields
+        else:
+            response.pop("provider_specific_fields", None)
+        return cast(AnthropicMessagesResponse, response)
 
     @property
     def max_retry_on_anthropic_messages_http_error(self) -> int:

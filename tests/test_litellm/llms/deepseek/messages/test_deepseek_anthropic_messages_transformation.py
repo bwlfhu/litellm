@@ -1,6 +1,8 @@
-import litellm
 import httpx
+import litellm
 import pytest
+from typing import cast
+from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
@@ -396,6 +398,36 @@ def test_deepseek_messages_transform_disabled_omits_optional_reasoning_but_not_t
 
     assert request["thinking"] == {"type": "disabled"}
     assert request["messages"][0]["content"] == []
+
+
+def test_deepseek_messages_response_promotes_provider_reasoning_to_unsigned_thinking():
+    config = DeepSeekAnthropicMessagesConfig()
+    raw_response = httpx.Response(
+        200,
+        json={
+            "id": "message-1",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Calling the tool."},
+                {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
+            ],
+            "provider_specific_fields": {"reasoning_content": "I need the tool result."},
+        },
+    )
+
+    response = config.transform_anthropic_messages_response(
+        model="deepseek-v4-pro",
+        raw_response=raw_response,
+        logging_obj=cast(LiteLLMLoggingObj, object()),
+    )
+
+    assert response.get("content") == [
+        {"type": "thinking", "thinking": "I need the tool result."},
+        {"type": "text", "text": "Calling the tool."},
+        {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
+    ]
+    assert "provider_specific_fields" not in response
 
 
 def test_deepseek_messages_does_not_mutate_and_retry_after_signature_400():
