@@ -221,6 +221,7 @@ async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_
     assert len(requests) == 1
     assert requests[0]["messages"] == [{"role": "user", "content": "question"}]
     assert requests[0]["thinking"] == {"type": "enabled", "budget_tokens": 31}
+    assert requests[0]["stream"] is False
     assert getattr(response.output[0], "type", None) == "reasoning"
     assert getattr(response.output[1], "type", None) == "message"
 

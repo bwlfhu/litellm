@@ -1076,10 +1076,7 @@ class DeepSeekAnthropicResponsesBridge:
         )
         if system_prompt is not None:
             request_body["system"] = system_prompt
-        if stream is True:
-            # DeepSeek selects Anthropic SSE mode from the wire body. The
-            # transport stream flag only controls how httpx reads the response.
-            request_body["stream"] = True
+        request_body["stream"] = stream is True
         url = config.get_complete_url(
             api_base=resolved_base,
             api_key=api_key,
