@@ -65,8 +65,11 @@ class DeepSeekResponsesRawTransport:
                 headers=dict(request.headers),
                 content=request.body,
             )
-            response = await self._client.send(prepared, stream=request.stream)
-            if response.status_code >= 400:
+            response = await self._client.send(prepared, stream=request.stream, follow_redirects=False)
+            # The bridge owns one frozen request per attempt. A redirect is a
+            # second provider request, so surface every non-2xx response to
+            # the owner instead of following it or attempting JSON decoding.
+            if not 200 <= response.status_code < 300:
                 body = await response.aread()
                 await response.aclose()
                 return DeepSeekRawFailure(

@@ -46,6 +46,33 @@ async def test_deepseek_raw_transport_sends_frozen_body_once_without_status_rais
 
 
 @pytest.mark.asyncio
+async def test_deepseek_raw_transport_preserves_redirect_as_single_attempt_failure():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            307,
+            request=request,
+            headers={"location": "https://provider.invalid/redirected", "x-request-id": "redirected"},
+            content=b"redirect body",
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+    result = await DeepSeekResponsesRawTransport(client).send(
+        freeze_deepseek_request(url="https://provider.invalid/v1/messages", headers={}, body=b"{}")
+    )
+    await client.aclose()
+
+    assert isinstance(result, DeepSeekRawFailure)
+    assert result.category == "upstream_http_error"
+    assert result.status_code == 307
+    assert result.headers["x-request-id"] == "redirected"
+    assert result.body == b"redirect body"
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_deepseek_raw_transport_connect_error_is_typed_and_not_retried():
     attempts = 0
 

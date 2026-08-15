@@ -497,7 +497,13 @@ def _http_client_from_kwargs(kwargs: Mapping[str, object]) -> tuple[httpx.AsyncC
         return client.client, False
     if isinstance(client, httpx.AsyncClient):
         return client, False
-    return httpx.AsyncClient(), True
+    # Reuse the provider client's TLS/proxy/header configuration, while the
+    # raw transport calls its underlying httpx client directly and therefore
+    # cannot inherit AsyncHTTPHandler's retry or raise-for-status behavior.
+    import litellm
+    from litellm.llms.custom_httpx.http_handler import get_async_httpx_client
+
+    return get_async_httpx_client(llm_provider=litellm.LlmProviders.ANTHROPIC).client, False
 
 
 def _logging_safe_input(input_value: str | ResponseInputParam) -> str | ResponseInputParam:
