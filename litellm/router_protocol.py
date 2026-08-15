@@ -16,8 +16,11 @@ class DeploymentReasoningProtocol(StrEnum):
 _PROTOCOL_FIELD = "reasoning_protocol"
 _SUFFIX_TOKEN_BUDGET_FIELD = "deepseek_reasoning_suffix_token_budget"
 _CONTEXT_TOKEN_BUDGET_FIELD = "deepseek_reasoning_context_token_budget"
+_MESSAGES_PATH_FIELD = "deepseek_anthropic_messages_path"
+_DEFAULT_DEEPSEEK_ANTHROPIC_MESSAGES_PATH = "anthropic/v1/messages"
+_DEEPSEEK_ANTHROPIC_MESSAGES_PATHS = frozenset({_DEFAULT_DEEPSEEK_ANTHROPIC_MESSAGES_PATH, "v1/messages"})
 _PROTOCOL_PRIVATE_MODEL_INFO_FIELDS = frozenset(
-    {_PROTOCOL_FIELD, _SUFFIX_TOKEN_BUDGET_FIELD, _CONTEXT_TOKEN_BUDGET_FIELD}
+    {_PROTOCOL_FIELD, _SUFFIX_TOKEN_BUDGET_FIELD, _CONTEXT_TOKEN_BUDGET_FIELD, _MESSAGES_PATH_FIELD}
 )
 
 
@@ -38,6 +41,7 @@ class DeploymentProtocolContext:
     rate_snapshot: DeploymentRateSnapshot
     _provenance: object
     context_token_budget: int = 0
+    messages_path: str = _DEFAULT_DEEPSEEK_ANTHROPIC_MESSAGES_PATH
 
     def is_router_provenanced(self) -> bool:
         return _is_router_provenanced(self)
@@ -123,6 +127,7 @@ def _protocol_context_runtime() -> tuple[
             rate_snapshot=_build_rate_snapshot(model_info),
             _provenance=provenance,
             context_token_budget=_context_token_budget(model_info),
+            messages_path=_messages_path(model_info),
         )
 
     def activate(context: object) -> _RouterProtocolContextActivation:
@@ -193,6 +198,13 @@ def _context_token_budget(model_info: Mapping[str, object]) -> int:
     if isinstance(context_window, int) and not isinstance(context_window, bool) and context_window > 0:
         return context_window
     return 0
+
+
+def _messages_path(model_info: Mapping[str, object]) -> str:
+    configured_path = model_info.get(_MESSAGES_PATH_FIELD)
+    if isinstance(configured_path, str) and configured_path in _DEEPSEEK_ANTHROPIC_MESSAGES_PATHS:
+        return configured_path
+    return _DEFAULT_DEEPSEEK_ANTHROPIC_MESSAGES_PATH
 
 
 (

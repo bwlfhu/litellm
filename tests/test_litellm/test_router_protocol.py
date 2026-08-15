@@ -40,6 +40,7 @@ def test_router_protocol_context_does_not_trust_public_kwargs_or_leak_model_info
         {
             "reasoning_protocol": "deepseek_anthropic",
             "deepseek_reasoning_suffix_token_budget": 512,
+            "deepseek_anthropic_messages_path": "v1/messages",
             "tier": "paid",
         }
     ) == {"tier": "paid"}

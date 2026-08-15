@@ -89,6 +89,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         stream: Optional[bool] = None,
     ) -> str:
         base_url = self.get_api_base(api_base=api_base).rstrip("/")
+        messages_path = optional_params.get("_deepseek_anthropic_messages_path")
+        if messages_path in {"anthropic/v1/messages", "v1/messages"}:
+            return f"{base_url}/{messages_path}"
 
         if base_url.endswith("/v1/messages") and "/anthropic/" in base_url:
             return base_url
@@ -130,6 +133,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         request_params = dict(anthropic_messages_optional_request_params)
         suffix_budget = request_params.pop("_deepseek_reasoning_suffix_token_budget", None)
         context_budget = request_params.pop("_deepseek_reasoning_context_token_budget", None)
+        request_params.pop("_deepseek_anthropic_messages_path", None)
         if not isinstance(suffix_budget, int):
             suffix_budget = None
         if not isinstance(context_budget, int):

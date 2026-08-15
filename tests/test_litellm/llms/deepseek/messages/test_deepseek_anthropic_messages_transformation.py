@@ -109,6 +109,32 @@ def test_deepseek_anthropic_messages_url_defaults_to_anthropic_endpoint():
     )
 
 
+def test_deepseek_anthropic_messages_url_honors_router_selected_path():
+    config = DeepSeekAnthropicMessagesConfig()
+
+    url = config.get_complete_url(
+        api_base="https://proxy.example.test",
+        api_key=None,
+        model="deepseek-v4-pro",
+        optional_params={"_deepseek_anthropic_messages_path": "v1/messages"},
+        litellm_params={},
+    )
+    request = config.transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "question"}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 32,
+            "thinking": {"type": "enabled", "budget_tokens": 16},
+            "_deepseek_anthropic_messages_path": "v1/messages",
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert url == "https://proxy.example.test/v1/messages"
+    assert "_deepseek_anthropic_messages_path" not in request
+
+
 def test_deepseek_anthropic_messages_headers_use_deepseek_key():
     config = DeepSeekAnthropicMessagesConfig()
 
@@ -263,7 +289,10 @@ def test_deepseek_canonical_history_preserves_parallel_tool_reasoning_and_digest
         },
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-b", "content": "b"}]},
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-a", "content": "a"}]},
-        {"role": "assistant", "content": [{"type": "thinking", "thinking": "follow up"}, {"type": "text", "text": "done"}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "follow up"}, {"type": "text", "text": "done"}],
+        },
         {"role": "user", "content": "continue"},
     ]
 
@@ -283,7 +312,10 @@ def test_deepseek_canonical_history_rejects_missing_reasoning_redaction_and_disa
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-a", "content": "a"}]},
     ]
 
-    for thinking, expected in ((None, "reasoning_history_missing"), ({"type": "disabled"}, "reasoning_history_missing")):
+    for thinking, expected in (
+        (None, "reasoning_history_missing"),
+        ({"type": "disabled"}, "reasoning_history_missing"),
+    ):
         try:
             compile_deepseek_anthropic_history(base, thinking)
         except DeepSeekProtocolError as error:

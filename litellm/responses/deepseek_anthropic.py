@@ -1043,6 +1043,7 @@ class DeepSeekAnthropicResponsesBridge:
         )
         optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
         optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.context_token_budget
+        optional_params["_deepseek_anthropic_messages_path"] = protocol_context.messages_path
         config = DeepSeekAnthropicMessagesConfig()
         api_key = kwargs.get("api_key") if isinstance(kwargs.get("api_key"), str) else None
         api_base = kwargs.get("api_base") if isinstance(kwargs.get("api_base"), str) else None
