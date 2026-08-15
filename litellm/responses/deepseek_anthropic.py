@@ -458,10 +458,12 @@ def _bridge_optional_params(
     thinking: Mapping[str, object],
     enabled: bool,
     max_output_tokens: int,
+    stream: bool,
 ) -> dict[str, object]:
     tools = _responses_tools_to_anthropic(request.get("tools"))
     params: dict[str, object] = {
         "max_tokens": max_output_tokens,
+        "stream": stream,
         "thinking": dict(thinking),
     }
     if tools:
@@ -1037,10 +1039,8 @@ class DeepSeekAnthropicResponsesBridge:
             thinking,
             enabled,
             max_output_tokens,
+            stream is True,
         )
-        # Preserve the native Messages serializer's field ordering. Some
-        # Anthropic-compatible gateways inspect the signed JSON bytes.
-        optional_params["stream"] = stream is True
         optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
         optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.context_token_budget
         config = DeepSeekAnthropicMessagesConfig()

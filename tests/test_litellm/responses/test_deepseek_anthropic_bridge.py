@@ -226,14 +226,15 @@ async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_
     assert requests[0]["messages"] == [{"role": "user", "content": "question"}]
     assert requests[0]["thinking"] == {"type": "enabled", "budget_tokens": 31}
     assert requests[0]["stream"] is False
+    assert list(requests[0]).index("stream") < list(requests[0]).index("thinking")
     native_wire_body = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
         model="deepseek-v4-pro",
         messages=[{"role": "user", "content": "question"}],
         anthropic_messages_optional_request_params={
             "max_tokens": 32,
+            "stream": False,
             "thinking": {"type": "enabled", "budget_tokens": 31},
             "output_config": {"effort": "high"},
-            "stream": False,
         },
         litellm_params=GenericLiteLLMParams(),
         headers={},
