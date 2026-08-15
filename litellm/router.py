@@ -355,6 +355,16 @@ def _has_deepseek_protocol_context(kwargs: Mapping[str, object]) -> bool:
     return isinstance(context, DeploymentProtocolContext) and context.is_router_provenanced()
 
 
+_DEEPSEEK_ATTEMPT_ONLY_KWARGS = frozenset(
+    {
+        "_deepseek_session_repository",
+        "_deepseek_parent_accounting_tracker",
+        "_deepseek_parent_accounting_owner",
+        "_deepseek_pre_output_stream_fallback",
+    }
+)
+
+
 async def _finalize_native_responses_stream_terminal(
     kwargs: Mapping[str, object], event: object, *, is_async: bool
 ) -> None:
@@ -5053,6 +5063,13 @@ class Router:
                 **kwargs,
                 "model": model_name,
             }
+            protocol_context = kwargs.get("_litellm_deployment_protocol_context")
+            if not isinstance(protocol_context, DeploymentProtocolContext) or not protocol_context.is_router_provenanced():
+                # Keep DeepSeek parent state on Router's outer kwargs for
+                # aggregate accounting, but do not expose bridge-only state to
+                # a native fallback provider's public request parser.
+                for key in _DEEPSEEK_ATTEMPT_ONLY_KWARGS:
+                    response_kwargs.pop(key, None)
             # Only set custom_llm_provider if it's not None
             if custom_llm_provider is not None:
                 response_kwargs["custom_llm_provider"] = custom_llm_provider

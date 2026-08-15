@@ -1159,7 +1159,6 @@ def responses(
                 # incomplete after the sync/async Responses dispatch boundary.
                 "api_key": litellm_params.api_key,
                 "api_base": litellm_params.api_base,
-                "headers": litellm_params.headers,
             }
             response = DeepSeekAnthropicResponsesBridge.response_api_handler(
                 model=model,

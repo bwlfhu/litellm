@@ -53,6 +53,48 @@ async def test_deepseek_protocol_error_blocks_async_same_group_and_cross_group_f
     assert calls == 1
 
 
+@pytest.mark.asyncio
+async def test_router_strips_deepseek_attempt_state_from_native_fallback_provider():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "backup",
+                "litellm_params": {"model": "custom_openai/backup", "api_base": "https://provider.invalid"},
+                "model_info": {"id": "backup-id"},
+            }
+        ]
+    )
+    session_repository = object()
+    tracker = DeepSeekParentAccountingTracker()
+    received: dict[str, object] = {}
+
+    async def native_responses_provider(**kwargs: object) -> dict[str, object]:
+        received.update(kwargs)
+        return {"id": "native-response", "usage": {}}
+
+    response = await router._ageneric_api_call_with_fallbacks_helper(
+        model="backup",
+        original_generic_function=native_responses_provider,
+        input="question",
+        _deepseek_session_repository=session_repository,
+        _deepseek_parent_accounting_tracker=tracker,
+        _deepseek_parent_accounting_owner=True,
+        _deepseek_pre_output_stream_fallback=True,
+    )
+
+    assert response["id"] == "native-response"
+    assert received["model"] == "custom_openai/backup"
+    assert all(
+        key not in received
+        for key in (
+            "_deepseek_session_repository",
+            "_deepseek_parent_accounting_tracker",
+            "_deepseek_parent_accounting_owner",
+            "_deepseek_pre_output_stream_fallback",
+        )
+    )
+
+
 def test_deepseek_protocol_error_blocks_sync_fallback():
     router = Router(model_list=[])
 
