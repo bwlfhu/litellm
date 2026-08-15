@@ -92,6 +92,7 @@ from litellm.router_strategy.tag_based_routing import (
     get_deployments_for_tag,
     is_valid_deployment_tag,
 )
+from litellm.router_protocol import _build_deployment_protocol_context
 from litellm.router_utils.add_retry_fallback_headers import (
     _HiddenParamsHost,
     add_fallback_headers_to_response,
@@ -3057,7 +3058,12 @@ class Router:
         """
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
-        model_info = deployment.get("model_info", {}).copy()
+        raw_model_info = deployment.get("model_info", {})
+        model_info = raw_model_info.copy()
+        protocol_context = _build_deployment_protocol_context(raw_model_info)
+        kwargs.pop("_litellm_deployment_protocol_context", None)
+        if protocol_context is not None:
+            kwargs["_litellm_deployment_protocol_context"] = protocol_context
         deployment_litellm_model_name = deployment["litellm_params"]["model"]
         deployment_api_base = deployment["litellm_params"].get("api_base")
         deployment_model_name = deployment["model_name"]

@@ -38,6 +38,7 @@ from litellm.types.llms.anthropic_messages.anthropic_response import (
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.utils import ProviderConfigManager, client, is_tool_diagnostics_enabled, log_tool_request_shape
 
 from ..utils import is_reasoning_auto_summary_enabled
@@ -74,6 +75,10 @@ def _sanitize_anthropic_tool_history_with_diagnostics(
             },
         )
     return sanitized_messages
+
+
+def _has_deepseek_anthropic_protocol_context(kwargs: dict) -> bool:
+    return get_deployment_protocol_context(kwargs) is not None
 
 
 def _should_route_to_responses_api(custom_llm_provider: Optional[str]) -> bool:
@@ -258,11 +263,12 @@ async def anthropic_messages(
     # ids like ``functions.Bash:0`` that violate Anthropic's id pattern.
     tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
     tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
-    messages = _sanitize_anthropic_tool_history_with_diagnostics(
-        messages=messages,
-        model=model,
-        call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
-    )
+    if not _has_deepseek_anthropic_protocol_context(kwargs):
+        messages = _sanitize_anthropic_tool_history_with_diagnostics(
+            messages=messages,
+            model=model,
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        )
 
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
@@ -467,11 +473,12 @@ def anthropic_messages_handler(
         messages = strip_empty_text_blocks_from_anthropic_messages(messages)
         tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
         tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
-        messages = _sanitize_anthropic_tool_history_with_diagnostics(
-            messages=messages,
-            model=model,
-            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
-        )
+        if not _has_deepseek_anthropic_protocol_context(kwargs):
+            messages = _sanitize_anthropic_tool_history_with_diagnostics(
+                messages=messages,
+                model=model,
+                call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+            )
 
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
@@ -536,7 +543,12 @@ def anthropic_messages_handler(
 
     anthropic_messages_provider_config: Optional[BaseAnthropicMessagesConfig] = None
 
-    if custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
+    protocol_context = get_deployment_protocol_context(kwargs)
+    if protocol_context is not None:
+        from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
+
+        anthropic_messages_provider_config = DeepSeekAnthropicMessagesConfig()
+    elif custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
         anthropic_messages_provider_config = ProviderConfigManager.get_provider_anthropic_messages_config(
             model=model,
             provider=litellm.LlmProviders(custom_llm_provider),
@@ -604,6 +616,8 @@ def anthropic_messages_handler(
                 **thinking_param,
                 "display": "summarized",
             }
+    if protocol_context is not None and protocol_context.messages_path is not None:
+        litellm_params["_deepseek_anthropic_messages_path"] = protocol_context.messages_path
 
     return base_llm_http_handler.anthropic_messages_handler(
         model=model,
