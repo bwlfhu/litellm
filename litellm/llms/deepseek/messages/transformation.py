@@ -4,6 +4,7 @@ DeepSeek Anthropic-compatible messages transformation config.
 
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import litellm
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
@@ -135,6 +136,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             request_params.get("thinking"),
             max_suffix_tokens=suffix_budget,
         )
+        requested_temperature = request_params.get("temperature")
+        requested_top_p = request_params.get("top_p")
         request_params["thinking"] = request_params.get("thinking", {"type": "enabled"})
         deepseek_thinking = dict(request_params["thinking"])
         deepseek_output_config = request_params.get("output_config")
@@ -146,9 +149,26 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             headers=headers,
         )
         anthropic_messages_request["thinking"] = deepseek_thinking
+        if requested_temperature is not None:
+            anthropic_messages_request["temperature"] = requested_temperature
+        if requested_top_p is not None:
+            anthropic_messages_request["top_p"] = requested_top_p
         if isinstance(deepseek_output_config, dict):
             anthropic_messages_request["output_config"] = deepseek_output_config
         if "tools" in anthropic_messages_request:
             anthropic_messages_request["tools"] = self._sanitize_tools_for_deepseek(anthropic_messages_request["tools"])
         validate_deepseek_anthropic_context_budget(anthropic_messages_request, context_budget)
         return anthropic_messages_request
+
+    @property
+    def max_retry_on_anthropic_messages_http_error(self) -> int:
+        """DeepSeek thinking blocks do not use Claude's encrypted signatures."""
+        return 1
+
+    def should_retry_anthropic_messages_on_http_error(self, e: httpx.HTTPStatusError, litellm_params: dict) -> bool:
+        """Never delete DeepSeek reasoning and resend a mutated Messages body."""
+        return False
+
+    def transform_anthropic_messages_request_on_http_error(self, e: httpx.HTTPStatusError, request_data: dict) -> dict:
+        """Keep the failed DeepSeek request immutable for the caller's error path."""
+        return request_data

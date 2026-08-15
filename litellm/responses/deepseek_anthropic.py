@@ -56,6 +56,8 @@ _PROTOCOL_INTEGRITY_CODES = frozenset(
         "tool_history_invalid",
         "tool_result_orphaned",
         "tool_history_incomplete",
+        "unsupported_input_item",
+        "tool_choice_invalid",
     }
 )
 _JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, object])
@@ -193,11 +195,13 @@ def _append_response_item(
     pending_reasoning: str | None,
 ) -> str | None:
     item_type = item.get("type")
-    if item_type in {"input_text", "input_image"}:
+    if item_type == "input_text":
         messages.append({"role": "user", "content": _text_blocks([item])})
         return pending_reasoning
+    if item_type == "input_image":
+        raise DeepSeekProtocolError("unsupported_input_item")
     if item_type != "message":
-        return pending_reasoning
+        raise DeepSeekProtocolError("unsupported_input_item")
     role = item.get("role")
     if role not in {"user", "assistant", "system"}:
         raise DeepSeekProtocolError("reasoning_input_invalid")
@@ -212,11 +216,8 @@ def _append_response_item(
 
 def _responses_input_to_messages(
     input_value: str | ResponseInputParam,
-    instructions: object,
 ) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = []
-    if isinstance(instructions, str) and instructions:
-        messages.append({"role": "system", "content": instructions})
     if isinstance(input_value, str):
         return messages + [{"role": "user", "content": input_value}]
     pending_reasoning: str | None = None
@@ -261,6 +262,50 @@ def _responses_tools_to_anthropic(tools: object) -> list[dict[str, object]]:
             }
         )
     return converted
+
+
+def _responses_tool_choice_to_anthropic(tool_choice: object) -> dict[str, object] | None:
+    if isinstance(tool_choice, str):
+        if tool_choice == "auto":
+            return {"type": "auto"}
+        if tool_choice == "required":
+            return {"type": "any"}
+        if tool_choice == "none":
+            return None
+    if isinstance(tool_choice, Mapping):
+        name = tool_choice.get("name")
+        if tool_choice.get("type") in {"function", "tool"} and isinstance(name, str) and name.strip():
+            return {"type": "tool", "name": name}
+    raise DeepSeekProtocolError("tool_choice_invalid")
+
+
+def _system_prompt_from_messages(
+    messages: tuple[dict[str, object], ...], instructions: object,
+) -> tuple[tuple[dict[str, object], ...], object | None]:
+    non_system: list[dict[str, object]] = []
+    system_parts: list[object] = []
+    if isinstance(instructions, str) and instructions:
+        system_parts.append(instructions)
+    for message in messages:
+        if message.get("role") == "system":
+            content = deepcopy(message.get("content", ""))
+            if content:
+                system_parts.append(content)
+        else:
+            non_system.append(message)
+    if not system_parts:
+        return tuple(non_system), None
+    if len(system_parts) == 1:
+        return tuple(non_system), system_parts[0]
+    if all(isinstance(part, str) for part in system_parts):
+        return tuple(non_system), "\n\n".join(part for part in system_parts if isinstance(part, str))
+    blocks: list[object] = []
+    for part in system_parts:
+        if isinstance(part, list):
+            blocks.extend(deepcopy(part))
+        else:
+            blocks.append({"type": "text", "text": str(part)})
+    return tuple(non_system), blocks
 
 
 async def _load_session_history(
@@ -337,11 +382,28 @@ def _bridge_optional_params(
 ) -> dict[str, object]:
     tools = _responses_tools_to_anthropic(request.get("tools"))
     params: dict[str, object] = {
-        "max_tokens": request.get("max_output_tokens") or 1024,
+        "max_tokens": request.get("max_output_tokens") or 4096,
         "thinking": dict(thinking),
     }
     if tools:
         params["tools"] = tools
+        tool_choice = request.get("tool_choice")
+        if tool_choice is not None:
+            translated_tool_choice = _responses_tool_choice_to_anthropic(tool_choice)
+            if translated_tool_choice is not None:
+                if request.get("parallel_tool_calls") is False:
+                    translated_tool_choice["disable_parallel_tool_use"] = True
+                params["tool_choice"] = translated_tool_choice
+            else:
+                # Anthropic has no wire-level ``none`` choice; omitting the
+                # tools is the only lossless representation.
+                params.pop("tools", None)
+    elif request.get("tool_choice") not in (None, "none"):
+        raise DeepSeekProtocolError("tool_choice_invalid")
+    if request.get("temperature") is not None:
+        params["temperature"] = request["temperature"]
+    if request.get("top_p") is not None:
+        params["top_p"] = request["top_p"]
     reasoning = request.get("reasoning")
     if enabled and isinstance(reasoning, Mapping) and reasoning.get("effort") in {"low", "high", "max"}:
         params["output_config"] = {"effort": reasoning["effort"]}
@@ -717,8 +779,11 @@ class DeepSeekAnthropicResponsesBridge:
         previous_response_id = responses_api_request.get("previous_response_id")
         session_repository = _session_repository_from_kwargs(kwargs)
         session_history = await _load_session_history(previous_response_id, session_repository)
-        new_messages = _responses_input_to_messages(input, responses_api_request.get("instructions"))
+        new_messages = _responses_input_to_messages(input)
         all_messages = session_history + tuple(new_messages)
+        all_messages, system_prompt = _system_prompt_from_messages(
+            all_messages, responses_api_request.get("instructions")
+        )
         canonical = compile_deepseek_anthropic_history(
             all_messages,
             thinking,
@@ -735,6 +800,12 @@ class DeepSeekAnthropicResponsesBridge:
             litellm_params=GenericLiteLLMParams(**dict(kwargs)),
             headers={},
         )
+        if system_prompt is not None:
+            request_body["system"] = system_prompt
+        if stream is True:
+            # DeepSeek selects Anthropic SSE mode from the wire body. The
+            # transport stream flag only controls how httpx reads the response.
+            request_body["stream"] = True
         api_key = kwargs.get("api_key") if isinstance(kwargs.get("api_key"), str) else None
         api_base = kwargs.get("api_base") if isinstance(kwargs.get("api_base"), str) else None
         headers, resolved_base = config.validate_anthropic_messages_environment(
@@ -807,7 +878,8 @@ class DeepSeekAnthropicResponsesBridge:
                 logging_obj = kwargs.get("litellm_logging_obj")
                 _apply_parent_accounting(response, accounting, logging_obj)
                 if event.get("type") != "response.completed":
-                    if not (router_owns_accounting and not output_started):
+                    local_cancellation = event.get("_local_cancellation") is True
+                    if not (router_owns_accounting and not output_started and not local_cancellation):
                         await cls.finalize_router_failure(
                             tracker=accounting_tracker,
                             logging_obj=logging_obj,

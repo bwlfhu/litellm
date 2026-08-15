@@ -172,6 +172,72 @@ async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_
 
 
 @pytest.mark.asyncio
+async def test_deepseek_responses_maps_system_sampling_and_tool_controls():
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={"id": "resp_ds_controls", "content": [{"type": "text", "text": "ok"}], "usage": {}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={
+            "instructions": "be concise",
+            "max_output_tokens": 32,
+            "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+            "temperature": 0.2,
+            "top_p": 0.8,
+        },
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context(),
+        client=client,
+    )
+    await client.aclose()
+
+    body = requests[0]
+    assert body["system"] == "be concise"
+    assert all(message["role"] != "system" for message in body["messages"])
+    assert body["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}
+    assert body["temperature"] == 0.2
+    assert body["top_p"] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_rejects_unsupported_input_image_before_send():
+    sent = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent
+        sent = True
+        return httpx.Response(200, request=request, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="unsupported_input_item"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input=[{"type": "input_image", "image_url": "redacted"}],
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            client=client,
+        )
+    await client.aclose()
+    assert sent is False
+
+
+@pytest.mark.asyncio
 async def test_deepseek_responses_non_stream_parent_accounting_uses_router_rate_snapshot():
     logging_obj = _RecordingResponsesLogging()
 
@@ -706,6 +772,7 @@ async def test_deepseek_responses_async_stream_uses_pure_decoder_and_completed_e
     ).encode()
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["stream"] is True
         return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"}, content=sse)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -722,11 +789,11 @@ async def test_deepseek_responses_async_stream_uses_pure_decoder_and_completed_e
     events = [event async for event in stream]
     await client.aclose()
 
-    assert [event["type"] for event in events] == [
-        "response.output_item.added",
-        "response.reasoning_summary_text.delta",
-        "response.completed",
-    ]
+    event_types = [event["type"] for event in events]
+    assert event_types[:2] == ["response.created", "response.in_progress"]
+    assert "response.reasoning_summary_text.delta" in event_types
+    assert "response.reasoning_summary_text.done" in event_types
+    assert event_types[-1] == "response.completed"
     assert events[-1]["response"]["status"] == "completed"
 
 
@@ -815,6 +882,7 @@ async def test_deepseek_responses_stream_records_one_parent_accounting_snapshot(
     ).encode()
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["stream"] is True
         return httpx.Response(200, request=request, content=sse)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -894,12 +962,53 @@ async def test_deepseek_responses_stream_failure_records_parent_failure_without_
     events = [event async for event in stream]
     await client.aclose()
 
-    assert [event["type"] for event in events] == ["response.failed"]
+    assert events[-1]["type"] == "response.failed"
+    assert "response.completed" not in [event["type"] for event in events]
     assert logging_obj.successes == []
     assert len(logging_obj.failures) == 1
     assert len(logging_obj.async_failures) == 1
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
     assert session_repository._sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_stream_read_error_after_output_finalizes_parent_failure():
+    logging_obj = _RecordingResponsesLogging()
+
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'event: message_start\ndata: {"message":{"usage":{"input_tokens":7}}}\n\n'
+            yield b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+            raise httpx.ReadError("connection reset")
+
+        async def aclose(self):
+            return None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, stream=BrokenStream())
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context_with_rates(),
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+
+    with pytest.raises(DeepSeekUpstreamError, match="stream_read_error"):
+        async for _event in stream:
+            pass
+    await client.aclose()
+
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+    assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
 
 
 @pytest.mark.asyncio
@@ -934,7 +1043,8 @@ async def test_deepseek_responses_stream_incomplete_records_parent_failure_witho
     events = [event async for event in stream]
     await client.aclose()
 
-    assert [event["type"] for event in events] == ["response.incomplete"]
+    assert events[-1]["type"] == "response.incomplete"
+    assert "response.completed" not in [event["type"] for event in events]
     assert logging_obj.successes == []
     assert len(logging_obj.failures) == 1
     assert len(logging_obj.async_failures) == 1
@@ -1093,6 +1203,7 @@ def test_deepseek_responses_sync_stream_worker_forwards_events():
     sse = b"event: message_stop\ndata: {}\n\n"
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["stream"] is True
         return httpx.Response(200, request=request, content=sse)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -1110,4 +1221,5 @@ def test_deepseek_responses_sync_stream_worker_forwards_events():
     stream.close()
     run_async_function(client.aclose)
 
-    assert events[0]["type"] == "response.completed"
+    assert events[0]["type"] == "response.created"
+    assert events[-1]["type"] == "response.completed"

@@ -1,4 +1,5 @@
 import litellm
+import httpx
 import pytest
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
@@ -395,3 +396,15 @@ def test_deepseek_messages_transform_disabled_omits_optional_reasoning_but_not_t
 
     assert request["thinking"] == {"type": "disabled"}
     assert request["messages"][0]["content"] == []
+
+
+def test_deepseek_messages_does_not_mutate_and_retry_after_signature_400():
+    config = DeepSeekAnthropicMessagesConfig()
+    response = httpx.Response(400, request=httpx.Request("POST", "https://provider.invalid"), text="invalid signature")
+    error = httpx.HTTPStatusError("bad request", request=response.request, response=response)
+    request_data = {"messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "reason"}]}]}
+
+    assert config.max_retry_on_anthropic_messages_http_error == 1
+    assert config.should_retry_anthropic_messages_on_http_error(error, {}) is False
+    assert config.transform_anthropic_messages_request_on_http_error(error, request_data) is request_data
+    assert request_data["messages"][0]["content"][0]["thinking"] == "reason"
