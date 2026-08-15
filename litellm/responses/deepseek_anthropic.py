@@ -786,6 +786,12 @@ def _response_from_stream_terminal(event: object) -> ResponsesAPIResponse | None
     )
 
 
+def _write_stream_terminal_response(event: object, response: ResponsesAPIResponse) -> None:
+    terminal_response = _stream_event_value(event, "response")
+    if isinstance(event, dict) and isinstance(terminal_response, Mapping):
+        event["response"] = response.model_dump(exclude_none=True)
+
+
 def _responses_output_to_assistant_content(output: object) -> list[dict[str, object]]:
     if not isinstance(output, list):
         return []
@@ -885,6 +891,7 @@ class DeepSeekAnthropicResponsesBridge:
                 response=response,
                 logging_obj=logging_obj,
             )
+            _write_stream_terminal_response(event, response)
             return
         await cls.finalize_router_failure(
             tracker=tracker,

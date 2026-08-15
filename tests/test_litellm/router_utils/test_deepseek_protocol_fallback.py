@@ -1,6 +1,7 @@
 import importlib
 
 import pytest
+from pydantic import TypeAdapter
 
 from litellm.exceptions import MidStreamFallbackError
 from litellm.llms.deepseek.anthropic_protocol import (
@@ -10,6 +11,7 @@ from litellm.llms.deepseek.anthropic_protocol import (
 )
 from litellm.llms.deepseek.responses_transport import DeepSeekRawResponse
 from litellm.router import Router
+from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 from litellm.responses.deepseek_accounting import (
     AttemptRateSnapshot,
     DeepSeekParentAccountingTracker,
@@ -19,6 +21,8 @@ from litellm.responses.deepseek_streaming import DeepSeekAnthropicResponsesSyncS
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import protocol_context_from_kwargs
 from litellm.types.llms.openai import ResponseCompletedEvent, ResponsesAPIResponse
+
+_OBJECT_MAPPING_ADAPTER = TypeAdapter(dict[str, object])
 
 
 async def _raise_protocol(*args, **kwargs):
@@ -203,6 +207,58 @@ def test_router_sync_native_stream_fallback_finalizes_deepseek_parent_once():
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 2
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
     assert tracker.claim_lifecycle() is False
+
+
+@pytest.mark.asyncio
+async def test_router_async_native_mapping_terminal_receives_aggregate_usage():
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.mark_deepseek_parent()
+    tracker.record_attempt(
+        build_attempt_snapshot(
+            model="anthropic/primary",
+            deployment_id="primary-id",
+            usage={"input_tokens": 5, "output_tokens": 7},
+            rates=AttemptRateSnapshot(input_cost_per_token=0.1, output_cost_per_token=0.2),
+        )
+    )
+    tracker.register_native_attempt(
+        "openai/backup",
+        "backup-id",
+        AttemptRateSnapshot(input_cost_per_token=0.3, output_cost_per_token=0.4),
+    )
+    native_usage: dict[str, object] = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+    native_response: dict[str, object] = {
+        "id": "native-mapping-response",
+        "created_at": 1,
+        "model": "openai/backup",
+        "object": "response",
+        "output": [],
+        "status": "completed",
+        "usage": native_usage,
+    }
+    terminal: dict[str, object] = {
+        "type": "response.completed",
+        "response": native_response,
+    }
+    tracker.record_native_usage(native_usage)
+
+    logging_obj = _RecordingResponsesLogging()
+    await DeepSeekAnthropicResponsesBridge.finalize_router_stream_terminal(
+        tracker=tracker,
+        event=terminal,
+        logging_obj=logging_obj,
+        is_async=True,
+    )
+
+    aggregate_response = _OBJECT_MAPPING_ADAPTER.validate_python(terminal["response"])
+    aggregate_usage = _OBJECT_MAPPING_ADAPTER.validate_python(aggregate_response["usage"])
+    assert aggregate_usage["input_tokens"] == 8
+    assert aggregate_usage["output_tokens"] == 9
+    assert aggregate_usage["total_tokens"] == 17
+    aggregate_cost: object = aggregate_usage["cost"]
+    assert isinstance(aggregate_cost, float)
+    assert abs(aggregate_cost - 3.6) < 1e-12
+    assert len(logging_obj.successes) == 1
 
 
 @pytest.mark.asyncio
