@@ -455,7 +455,7 @@ async def test_router_stream_fallback_failure_finalizes_parent_once():
         async for _ in wrapped:
             pass
 
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
     assert tracker.claim_lifecycle() is False
 
@@ -508,7 +508,7 @@ async def test_router_stream_cancellation_finalizes_parent_failure_once():
     with pytest.raises(asyncio.CancelledError):
         async for _ in wrapped:
             pass
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
     assert tracker.claim_lifecycle() is False
 

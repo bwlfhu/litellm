@@ -61,6 +61,7 @@ _PROTOCOL_INTEGRITY_CODES = frozenset(
         "tool_choice_invalid",
         "reasoning_history_persistence_failed",
         "reasoning_history_persistence_unavailable",
+        "router_provenance_required",
         "upstream_response_invalid",
     }
 )
@@ -458,8 +459,10 @@ def _bridge_optional_params(
     if request.get("top_p") is not None:
         params["top_p"] = request["top_p"]
     reasoning = request.get("reasoning")
-    if enabled and isinstance(reasoning, Mapping) and reasoning.get("effort") in {"low", "high", "max"}:
-        params["output_config"] = {"effort": reasoning["effort"]}
+    if enabled:
+        effort = reasoning.get("effort") if isinstance(reasoning, Mapping) else "high"
+        if isinstance(effort, str) and effort in {"low", "high", "max"}:
+            params["output_config"] = {"effort": effort}
     return params
 
 
@@ -472,10 +475,18 @@ def _http_client_from_kwargs(kwargs: Mapping[str, object]) -> tuple[httpx.AsyncC
     return httpx.AsyncClient(), True
 
 
+def _logging_safe_input(input_value: str | ResponseInputParam) -> str | ResponseInputParam:
+    if not isinstance(input_value, list):
+        return input_value
+    return [
+        deepcopy(item) for item in input_value if not (isinstance(item, Mapping) and item.get("type") == "reasoning")
+    ]
+
+
 def _log_parent_pre_call(logging_obj: object, input_value: str | ResponseInputParam) -> None:
     pre_call = getattr(logging_obj, "pre_call", None)
     if callable(pre_call):
-        pre_call(input=input_value, api_key="", additional_args={})
+        pre_call(input=_logging_safe_input(input_value), api_key="", additional_args={})
 
 
 async def _read_raw_payload(response: httpx.Response, owns_client: bool, client: httpx.AsyncClient) -> object:
@@ -652,6 +663,17 @@ def _apply_parent_accounting_to_logging(
     model_call_details["response_cost"] = accounting.cost
     model_call_details["_deepseek_parent_accounting"] = True
     model_call_details["deepseek_parent_accounting"] = summary
+    litellm_params = model_call_details.get("litellm_params")
+    if not isinstance(litellm_params, dict):
+        return
+    metadata = litellm_params.get("metadata")
+    metadata_values = dict(metadata) if isinstance(metadata, Mapping) else {}
+    spend_logs_metadata = metadata_values.get("spend_logs_metadata")
+    persisted_summary = {
+        **(dict(spend_logs_metadata) if isinstance(spend_logs_metadata, Mapping) else {}),
+        "deepseek_parent_accounting": summary,
+    }
+    litellm_params["metadata"] = {**metadata_values, "spend_logs_metadata": persisted_summary}
 
 
 def _stream_terminal_response(
@@ -702,7 +724,14 @@ async def _dispatch_parent_success(
         return
     if is_stream:
         logging_obj.stream = False
-    result = dispatch(response)
+    logging_response = response.model_copy()
+    logging_response.output = [
+        item
+        for item in logging_response.output
+        if (item.get("type") if isinstance(item, Mapping) else getattr(item, "type", None)) != "reasoning"
+    ]
+    logging_response._hidden_params = {}
+    result = dispatch(logging_response)
     if isawaitable(result):
         await result
 
@@ -710,16 +739,12 @@ async def _dispatch_parent_success(
 async def _dispatch_parent_failure(logging_obj: object, error: BaseException, is_async: bool) -> None:
     traceback_exception = "DeepSeek Responses stream terminal failure"
     start_time = getattr(logging_obj, "start_time", None)
-    failure_handler = getattr(logging_obj, "failure_handler", None)
     sanitized_error = _sanitize_failure_error(error)
-    if callable(failure_handler):
-        failure_handler(sanitized_error, traceback_exception, start_time, datetime.now())
-    if not is_async:
+    handler_name = "async_failure_handler" if is_async else "failure_handler"
+    handler = getattr(logging_obj, handler_name, None)
+    if not callable(handler):
         return
-    async_failure_handler = getattr(logging_obj, "async_failure_handler", None)
-    if not callable(async_failure_handler):
-        return
-    result = async_failure_handler(sanitized_error, traceback_exception, start_time, datetime.now())
+    result = handler(sanitized_error, traceback_exception, start_time, datetime.now())
     if isawaitable(result):
         await result
 
@@ -884,6 +909,8 @@ class DeepSeekAnthropicResponsesBridge:
         protocol_context: DeploymentProtocolContext,
         **kwargs: object,
     ) -> object:
+        if not protocol_context.is_router_provenanced():
+            raise DeepSeekProtocolError("router_provenance_required")
         if _is_async:
             return cls._async_handle(
                 model=model,

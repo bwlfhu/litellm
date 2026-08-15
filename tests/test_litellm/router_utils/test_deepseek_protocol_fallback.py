@@ -289,7 +289,9 @@ async def test_router_aresponses_keeps_protocol_context_and_aggregates_pre_outpu
     assert summary["attempts"][1]["cost"] == pytest.approx(1.62)
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(1.62)
     assert logging_obj.failures == []
-    assert logging_obj.successes == [response]
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.successes[0].model_dump() == response.model_dump()
+    assert logging_obj.successes[0]._hidden_params == {}
 
 
 def test_router_responses_falls_back_before_output(monkeypatch):
@@ -559,7 +561,9 @@ async def test_router_aresponses_cross_provider_success_finalizes_deepseek_paren
     assert response._hidden_params["response_cost"] == pytest.approx(0.3)
     assert response.usage.input_tokens == 1
     assert response.usage.output_tokens == 1
-    assert logging_obj.successes == [response]
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.successes[0].model_dump() == response.model_dump()
+    assert logging_obj.successes[0]._hidden_params == {}
 
 
 def test_router_responses_sync_cross_provider_success_finalizes_deepseek_parent(monkeypatch):
@@ -625,4 +629,6 @@ def test_router_responses_sync_cross_provider_success_finalizes_deepseek_parent(
     assert response._hidden_params["response_cost"] == pytest.approx(0.3)
     assert response.usage.input_tokens == 1
     assert response.usage.output_tokens == 1
-    assert logging_obj.successes == [response]
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.successes[0].model_dump() == response.model_dump()
+    assert logging_obj.successes[0]._hidden_params == {}

@@ -1,5 +1,6 @@
 import importlib
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -25,25 +26,11 @@ from litellm.types.llms.openai import ResponsesAPIResponse
 
 
 def _context():
-    return DeploymentProtocolContext(
-        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
-        deployment_id="deployment-a",
-        attempt_id="attempt-a",
-        suffix_token_budget=4096,
-        rate_snapshot=DeploymentRateSnapshot(),
-        _provenance=object(),
-    )
+    return _context_for("deployment-a", "attempt-a", 4096, DeploymentRateSnapshot())
 
 
 def _context_with_suffix_budget(suffix_token_budget: int):
-    return DeploymentProtocolContext(
-        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
-        deployment_id="deployment-a",
-        attempt_id="attempt-a",
-        suffix_token_budget=suffix_token_budget,
-        rate_snapshot=DeploymentRateSnapshot(),
-        _provenance=object(),
-    )
+    return _context_for("deployment-a", "attempt-a", suffix_token_budget, DeploymentRateSnapshot())
 
 
 def _context_with_rates():
@@ -57,17 +44,54 @@ def _context_with_rates_for(
     output_cost: float,
     cache_read_cost: float,
 ):
-    return DeploymentProtocolContext(
-        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
-        deployment_id=deployment_id,
-        attempt_id=attempt_id,
-        suffix_token_budget=4096,
-        rate_snapshot=DeploymentRateSnapshot(
+    return _context_for(
+        deployment_id,
+        attempt_id,
+        4096,
+        DeploymentRateSnapshot(
             input_cost_per_token=input_cost,
             output_cost_per_token=output_cost,
             cache_read_input_cost_per_token=cache_read_cost,
         ),
-        _provenance=object(),
+    )
+
+
+def _router_provenanced_context() -> DeploymentProtocolContext:
+    router = litellm.Router(model_list=[])
+    kwargs: dict[str, object] = {"litellm_call_id": "bridge-test"}
+    router._update_kwargs_with_deployment(
+        deployment={
+            "model_info": {
+                "id": "bridge-test-deployment",
+                "reasoning_protocol": DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC.value,
+                "max_input_tokens": 4096,
+            },
+            "litellm_params": {"model": "deepseek/deepseek-v4-pro"},
+            "model_name": "bridge-test-model",
+        },
+        kwargs=kwargs,
+    )
+    context = kwargs.get("_litellm_deployment_protocol_context")
+    assert isinstance(context, DeploymentProtocolContext)
+    assert context.is_router_provenanced()
+    return context
+
+
+_ROUTER_PROVENANCED_CONTEXT = _router_provenanced_context()
+
+
+def _context_for(
+    deployment_id: str,
+    attempt_id: str,
+    suffix_token_budget: int,
+    rate_snapshot: DeploymentRateSnapshot,
+) -> DeploymentProtocolContext:
+    return replace(
+        _ROUTER_PROVENANCED_CONTEXT,
+        deployment_id=deployment_id,
+        attempt_id=attempt_id,
+        suffix_token_budget=suffix_token_budget,
+        rate_snapshot=rate_snapshot,
     )
 
 
@@ -135,6 +159,28 @@ class _RecordingResponsesLogging:
 
     async def async_failure_handler(self, error: object, *args: object) -> None:
         self.async_failures.append(error)
+
+
+def test_deepseek_responses_bridge_rejects_forged_protocol_context():
+    forged_context = DeploymentProtocolContext(
+        protocol=DeploymentReasoningProtocol.DEEPSEEK_ANTHROPIC,
+        deployment_id="deployment-a",
+        attempt_id="attempt-a",
+        suffix_token_budget=4096,
+        rate_snapshot=DeploymentRateSnapshot(),
+        _provenance=object(),
+    )
+
+    with pytest.raises(DeepSeekProtocolError, match="router_provenance_required"):
+        DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=forged_context,
+        )
 
 
 @pytest.mark.asyncio
@@ -215,6 +261,7 @@ async def test_deepseek_responses_maps_system_sampling_and_tool_controls():
     assert body["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}
     assert body["temperature"] == 0.2
     assert body["top_p"] == 0.8
+    assert body["output_config"] == {"effort": "high"}
 
 
 @pytest.mark.asyncio
@@ -278,7 +325,8 @@ async def test_deepseek_responses_non_stream_parent_accounting_uses_router_rate_
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(1.44)
     assert logging_obj.model_call_details["combined_usage_object"].prompt_tokens == 12
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
-    assert logging_obj.successes == [response]
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.successes[0].model_dump() == response.model_dump()
     assert logging_obj.failures == []
 
 
@@ -321,7 +369,8 @@ async def test_router_owned_non_stream_bridge_stamps_accounting_for_parent_final
         response=response,
         logging_obj=logging_obj,
     )
-    assert logging_obj.successes == [response]
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.successes[0].model_dump() == response.model_dump()
 
 
 @pytest.mark.asyncio
@@ -353,7 +402,7 @@ async def test_router_parent_finalize_uses_failure_lifecycle_for_incomplete_resp
     )
 
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
 
 
@@ -610,10 +659,10 @@ async def test_deepseek_responses_raw_failure_preserves_typed_data_and_finalizes
     assert raised.value.raw_body == b'{"error":{"code":"invalid_request"}}'
     assert len(logging_obj.pre_calls) == 1
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
-    assert logging_obj.failures[0].raw_headers == {}
-    assert logging_obj.failures[0].raw_body == b""
+    assert logging_obj.async_failures[0].raw_headers == {}
+    assert logging_obj.async_failures[0].raw_body == b""
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
     assert logging_obj.model_call_details["response_cost"] == 0
 
@@ -671,7 +720,7 @@ async def test_deepseek_responses_malformed_payload_finalizes_failure_accounting
 
     assert raised.value.raw_body == b"not-json"
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
 
@@ -703,7 +752,7 @@ async def test_deepseek_responses_error_shaped_json_200_finalizes_failure_accoun
     await client.aclose()
 
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
 
@@ -740,7 +789,7 @@ async def test_deepseek_responses_incomplete_non_stream_uses_failure_lifecycle()
 
     assert response.status == "incomplete"
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
 
 
@@ -786,7 +835,7 @@ async def test_deepseek_responses_session_commit_failure_is_typed_and_not_succes
     await client.aclose()
 
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
 
 
@@ -870,7 +919,8 @@ async def test_deepseek_session_without_atomic_repository_rejects_tool_history()
     await client.aclose()
 
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
+    assert len(logging_obj.async_failures) == 1
     assert "deepseek_session_record" not in logging_obj.model_call_details
 
 
@@ -944,7 +994,8 @@ async def test_deepseek_responses_fallback_tracker_aggregates_attempts_once():
     assert summary["attempts"][1]["rates"]["cache_read_input_cost_per_token"] == 0.01
     assert len(logging_obj.pre_calls) == 2
     assert logging_obj.failures == []
-    assert logging_obj.successes == [response]
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.successes[0].model_dump() == response.model_dump()
 
 
 @pytest.mark.asyncio
@@ -1081,6 +1132,9 @@ async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_
 async def test_deepseek_responses_stream_records_one_parent_accounting_snapshot():
     session_repository = _InMemorySessionRepository()
     logging_obj = _RecordingResponsesLogging()
+    logging_obj.model_call_details = {
+        "litellm_params": {"metadata": {"spend_logs_metadata": {"request_scope": "test"}}}
+    }
     sse = (
         "event: message_start\n"
         'data: {"message":{"usage":{"input_tokens":10}}}\n\n'
@@ -1128,7 +1182,7 @@ async def test_deepseek_responses_stream_records_one_parent_accounting_snapshot(
     assert response.usage.output_tokens == 4
     assert response.usage.input_tokens_details.cached_tokens == 2
     assert response.usage.cost == pytest.approx(1.62)
-    assert response._hidden_params["response_cost"] == pytest.approx(1.62)
+    assert response._hidden_params == {}
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(1.62)
     assert logging_obj.model_call_details["combined_usage_object"].prompt_tokens == 10
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempts"][0]["rates"] == {
@@ -1137,10 +1191,62 @@ async def test_deepseek_responses_stream_records_one_parent_accounting_snapshot(
         "cache_read_input_cost_per_token": 0.01,
         "cache_creation_input_cost_per_token": 0.0,
     }
+    persisted_metadata = logging_obj.model_call_details["litellm_params"]["metadata"]["spend_logs_metadata"]
+    assert persisted_metadata["request_scope"] == "test"
+    assert (
+        persisted_metadata["deepseek_parent_accounting"] == logging_obj.model_call_details["deepseek_parent_accounting"]
+    )
     response_id = ResponsesAPIRequestUtils._decode_responses_api_response_id(events[-1]["response"]["id"])[
         "response_id"
     ]
     assert await session_repository.load(response_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_logs_a_reasoning_free_parent_response_and_spend_summary():
+    logging_obj = _RecordingResponsesLogging()
+    logging_obj.model_call_details = {"litellm_params": {"metadata": {}}}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_ds_logging_safe",
+                "content": [
+                    {"type": "thinking", "thinking": "private-reasoning-value"},
+                    {"type": "text", "text": "visible-answer"},
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context_with_rates(),
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+    await client.aclose()
+
+    logged_response = logging_obj.successes[0]
+    assert "private-reasoning-value" in response.model_dump_json()
+    assert "private-reasoning-value" not in logged_response.model_dump_json()
+    assert "deepseek_assistant_content" not in logged_response._hidden_params
+    summary = logging_obj.model_call_details["litellm_params"]["metadata"]["spend_logs_metadata"][
+        "deepseek_parent_accounting"
+    ]
+    assert summary["attempt_count"] == 1
+    assert summary["input_tokens"] == 3
+    assert summary["output_tokens"] == 2
+    assert summary["cost"] == pytest.approx(0.7)
+    assert "private-reasoning-value" not in json.dumps(logging_obj.model_call_details, default=str)
 
 
 @pytest.mark.asyncio
@@ -1178,7 +1284,7 @@ async def test_deepseek_responses_stream_failure_records_parent_failure_without_
     assert events[-1]["type"] == "response.failed"
     assert "response.completed" not in [event["type"] for event in events]
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
     assert session_repository._sessions == {}
@@ -1219,7 +1325,7 @@ async def test_deepseek_responses_stream_read_error_after_output_finalizes_paren
     await client.aclose()
 
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
 
@@ -1259,7 +1365,7 @@ async def test_deepseek_responses_stream_incomplete_records_parent_failure_witho
     assert events[-1]["type"] == "response.incomplete"
     assert "response.completed" not in [event["type"] for event in events]
     assert logging_obj.successes == []
-    assert len(logging_obj.failures) == 1
+    assert logging_obj.failures == []
     assert len(logging_obj.async_failures) == 1
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(1.1)
     assert session_repository._sessions == {}
