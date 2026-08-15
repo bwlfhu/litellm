@@ -621,8 +621,7 @@ class BaseResponsesAPIStreamingIterator:
         Trigger failure handlers before bubbling the exception.
         Only calls handlers once even if called multiple times.
         """
-        # Prevent double-calling failure handlers
-        if self._failure_handled:
+        if self._terminal_lifecycle_deferred_to_parent or self._failure_handled:
             return
         self._failure_handled = True
 

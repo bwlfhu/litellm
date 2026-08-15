@@ -1,12 +1,14 @@
 """SpendLog-backed session records for DeepSeek Anthropic Responses."""
 
+from binascii import Error as BinasciiError
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
-from json import dumps
+from json import JSONDecodeError, dumps
 from typing import cast
 
+from cryptography.exceptions import InvalidTag
 from litellm.litellm_core_utils.app_crypto import AppCrypto
 from litellm.llms.deepseek.anthropic_protocol import deepseek_anthropic_session_manifest
 from litellm.responses.utils import ResponsesAPIRequestUtils
@@ -68,12 +70,21 @@ def create_deepseek_responses_session(
 SessionLoader = Callable[[str], Awaitable[DeepSeekResponsesSession | None]]
 SessionCommitter = Callable[[DeepSeekResponsesSession], Awaitable[None]]
 SessionEncryptionKeyLoader = Callable[[], str | None]
+SessionJsonEncoder = Callable[[object], object]
 
 
 def _proxy_session_encryption_key() -> str | None:
     from litellm.proxy.proxy_server import master_key
 
     return master_key if isinstance(master_key, str) and master_key else None
+
+
+def _encode_prisma_json(value: object) -> object:
+    if not isinstance(value, Mapping):
+        raise ValueError("DeepSeek Responses session payload must be a JSON object")
+    from prisma import Json  # noqa: PLC0415  # generated Prisma client is unavailable in lightweight tooling
+
+    return Json(dict(value))
 
 
 def _session_from_payload(payload: object) -> DeepSeekResponsesSession | None:
@@ -114,10 +125,12 @@ class ProxyDeepSeekResponsesSessionRepository:
         prisma_client: object,
         owner_id: str,
         encryption_key_loader: SessionEncryptionKeyLoader = _proxy_session_encryption_key,
+        json_encoder: SessionJsonEncoder = _encode_prisma_json,
     ):
         self._prisma_client = prisma_client
         self._owner_id = owner_id
         self._encryption_key_loader = encryption_key_loader
+        self._json_encoder = json_encoder
 
     @property
     def requires_atomic_session(self) -> bool:
@@ -161,7 +174,7 @@ class ProxyDeepSeekResponsesSessionRepository:
                 dict(encrypted_payload) if isinstance(encrypted_payload, Mapping) else {},
                 aad=_session_aad(self._owner_id, response_id),
             )
-        except Exception:
+        except (BinasciiError, InvalidTag, JSONDecodeError, KeyError, TypeError, UnicodeDecodeError, ValueError):
             return None
         session = _session_from_payload(payload)
         return session if session is not None and session.is_valid_atomic_session(response_id) else None
@@ -175,17 +188,18 @@ class ProxyDeepSeekResponsesSessionRepository:
         encrypted_payload = self._crypto().encrypt_json(
             session.payload(), aad=_session_aad(self._owner_id, session.response_id)
         )
+        encrypted_json = self._json_encoder(encrypted_payload)
         await upsert(
             where={"response_id": session.response_id},
             data={
                 "create": {
                     "response_id": session.response_id,
                     "owner_id": self._owner_id,
-                    "encrypted_payload": encrypted_payload,
+                    "encrypted_payload": encrypted_json,
                 },
                 "update": {
                     "owner_id": self._owner_id,
-                    "encrypted_payload": encrypted_payload,
+                    "encrypted_payload": encrypted_json,
                 },
             },
         )

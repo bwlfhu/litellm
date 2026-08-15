@@ -4,6 +4,7 @@ import httpx
 import pytest
 from pydantic import TypeAdapter
 
+import litellm
 from litellm.exceptions import MidStreamFallbackError
 from litellm.llms.deepseek.anthropic_protocol import (
     DeepSeekProtocolError,
@@ -22,7 +23,7 @@ from litellm.responses.deepseek_accounting import (
 from litellm.responses.deepseek_streaming import DeepSeekAnthropicResponsesSyncStream
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import protocol_context_from_kwargs
-from litellm.types.llms.openai import ResponseCompletedEvent, ResponsesAPIResponse
+from litellm.types.llms.openai import ResponseCompletedEvent, ResponseFailedEvent, ResponsesAPIResponse
 
 _OBJECT_MAPPING_ADAPTER = TypeAdapter(dict[str, object])
 
@@ -295,6 +296,82 @@ async def test_router_async_native_iterator_fallback_defers_its_terminal_lifecyc
     assert native_iterator._terminal_lifecycle_deferred_to_parent is True
     assert len(logging_obj.successes) == 1
     assert logging_obj.failures == []
+    assert tracker.claim_lifecycle() is False
+
+
+@pytest.mark.asyncio
+async def test_router_async_native_failed_iterator_fallback_has_one_parent_failure_lifecycle():
+    class Source:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="before output",
+                model="anthropic/primary",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    class NativeConfig:
+        def transform_streaming_response(self, **kwargs: object) -> ResponseFailedEvent:
+            return ResponseFailedEvent(
+                type="response.failed",
+                response=ResponsesAPIResponse(
+                    id="native-stream-failed",
+                    created_at=1,
+                    model="openai/backup",
+                    object="response",
+                    output=[],
+                    status="failed",
+                    error={"type": "server_error", "message": "provider failed"},
+                ),
+            )
+
+    class NativeBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"type":"response.failed","response":{}}\n\n'
+
+        async def aclose(self) -> None:
+            return None
+
+    logging_obj = _RecordingResponsesLogging()
+    native_iterator = ResponsesAPIStreamingIterator(
+        response=httpx.Response(
+            200,
+            request=httpx.Request("POST", "https://provider.invalid"),
+            stream=NativeBody(),
+        ),
+        model="openai/backup",
+        responses_api_provider_config=NativeConfig(),
+        logging_obj=logging_obj,
+    )
+
+    class RouterWithFallback(Router):
+        async def async_function_with_fallbacks_common_utils(self, **kwargs: object) -> object:
+            return native_iterator
+
+    tracker = _started_tracker_with_native_attempt()
+    router = RouterWithFallback(model_list=[])
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "primary",
+            "fallbacks": ["backup"],
+            "_deepseek_parent_accounting_tracker": tracker,
+            "litellm_logging_obj": logging_obj,
+        },
+    )
+
+    with pytest.raises(litellm.APIError):
+        async for _ in wrapped:
+            pass
+
+    assert native_iterator._terminal_lifecycle_deferred_to_parent is True
+    assert len(logging_obj.failures) == 1
     assert tracker.claim_lifecycle() is False
 
 

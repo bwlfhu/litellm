@@ -1566,6 +1566,7 @@ async def test_proxy_deepseek_session_repository_encrypts_and_scopes_atomic_hist
         prisma_client=client,
         owner_id="hashed-owner-a",
         encryption_key_loader=key_loader,
+        json_encoder=lambda value: value,
     )
     messages = (
         {
@@ -1589,6 +1590,7 @@ async def test_proxy_deepseek_session_repository_encrypts_and_scopes_atomic_hist
         prisma_client=client,
         owner_id="hashed-owner-b",
         encryption_key_loader=key_loader,
+        json_encoder=lambda value: value,
     )
     assert await other_owner_repository.load("resp_persisted") is None
     table.records["resp_persisted"]["owner_id"] = "hashed-owner-b"
@@ -1598,6 +1600,31 @@ async def test_proxy_deepseek_session_repository_encrypts_and_scopes_atomic_hist
 
     table.records["resp_persisted"]["encrypted_payload"] = {}
     assert await repository.load("resp_persisted") is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_deepseek_session_repository_writes_prisma_json_value():
+    table = _ProxySessionTable()
+    client = _ProxySessionClient(table)
+    repository = ProxyDeepSeekResponsesSessionRepository(
+        prisma_client=client,
+        owner_id="hashed-owner-a",
+        encryption_key_loader=lambda: "test-session-encryption-key",
+        json_encoder=lambda value: {"encoded": value},
+    )
+    session = create_deepseek_responses_session(
+        "resp_json_value",
+        ({"role": "user", "content": "question"},),
+        durability="atomic",
+    )
+
+    await repository.commit(session)
+
+    encoded = table.records["resp_json_value"]["encrypted_payload"]
+    assert isinstance(encoded, dict)
+    payload = encoded.get("encoded")
+    assert isinstance(payload, dict)
+    assert set(payload) == {"nonce", "ciphertext", "tag"}
 
 
 @pytest.mark.asyncio
