@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -38,11 +39,22 @@ async def test_deepseek_raw_transport_sends_frozen_body_once_without_status_rais
     assert result.headers["x-request-id"] == "test-request"
     assert result.body == b'{"error":{"code":"reasoning_history_missing"}}'
     assert requests == [request.body]
-    assert request.body == freeze_deepseek_request(
-        url=request.url,
-        headers=request.headers,
-        body=request.body,
-    ).body
+    assert (
+        request.body
+        == freeze_deepseek_request(
+            url=request.url,
+            headers=request.headers,
+            body=request.body,
+        ).body
+    )
+
+
+def test_freeze_deepseek_request_matches_anthropic_handler_json_serialization():
+    body = {"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "question"}]}
+
+    frozen = freeze_deepseek_request(url="https://provider.invalid/v1/messages", headers={}, body=body)
+
+    assert frozen.body == json.dumps(body).encode()
 
 
 @pytest.mark.asyncio

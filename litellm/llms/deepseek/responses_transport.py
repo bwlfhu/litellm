@@ -41,9 +41,10 @@ def freeze_deepseek_request(
     body: Mapping[str, object] | bytes,
     stream: bool = False,
 ) -> DeepSeekPreparedRequest:
-    encoded_body = (
-        body if isinstance(body, bytes) else json.dumps(body, separators=(",", ":"), ensure_ascii=True).encode()
-    )
+    # Match the shared Anthropic request-preparation serialization exactly.
+    # Some compatibility gateways inspect the body before JSON parsing, so a
+    # different compact representation is not wire-equivalent in practice.
+    encoded_body = body if isinstance(body, bytes) else json.dumps(body).encode()
     return DeepSeekPreparedRequest(
         url=url,
         headers=MappingProxyType(dict(headers)),
