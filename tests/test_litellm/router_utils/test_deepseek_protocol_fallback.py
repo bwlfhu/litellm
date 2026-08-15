@@ -1,5 +1,6 @@
 import importlib
 
+import httpx
 import pytest
 from pydantic import TypeAdapter
 
@@ -12,7 +13,7 @@ from litellm.llms.deepseek.anthropic_protocol import (
 from litellm.llms.deepseek.responses_transport import DeepSeekRawResponse
 from litellm.router import Router
 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
-from litellm.responses.streaming_iterator import BaseResponsesAPIStreamingIterator
+from litellm.responses.streaming_iterator import BaseResponsesAPIStreamingIterator, ResponsesAPIStreamingIterator
 from litellm.responses.deepseek_accounting import (
     AttemptRateSnapshot,
     DeepSeekParentAccountingTracker,
@@ -113,9 +114,13 @@ class _RecordingResponsesLogging:
         self.model_call_details: dict[str, object] = {}
         self.successes: list[object] = []
         self.failures: list[object] = []
+        self.completion_start_time = None
 
     def pre_call(self, **kwargs: object) -> None:
         return None
+
+    def _update_completion_start_time(self, **kwargs: object) -> None:
+        self.completion_start_time = kwargs["completion_start_time"]
 
     async def dispatch_success_handlers(self, response: object) -> None:
         self.successes.append(response)
@@ -226,6 +231,194 @@ async def test_router_async_native_stream_fallback_finalizes_deepseek_parent_onc
     assert logging_obj.model_call_details["response_cost"] == pytest.approx(0.7)
     assert fallback.lifecycle_deferred is True
     assert tracker.claim_lifecycle() is False
+
+
+@pytest.mark.asyncio
+async def test_router_async_native_iterator_fallback_defers_its_terminal_lifecycle():
+    class Source:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="before output",
+                model="anthropic/primary",
+                llm_provider="deepseek",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    class NativeConfig:
+        def transform_streaming_response(self, **kwargs: object) -> ResponseCompletedEvent:
+            return _native_completed_event()
+
+    class NativeBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"type":"response.completed","response":{}}\n\n'
+
+        async def aclose(self) -> None:
+            return None
+
+    logging_obj = _RecordingResponsesLogging()
+    native_iterator = ResponsesAPIStreamingIterator(
+        response=httpx.Response(
+            200,
+            request=httpx.Request("POST", "https://provider.invalid"),
+            stream=NativeBody(),
+        ),
+        model="openai/backup",
+        responses_api_provider_config=NativeConfig(),
+        logging_obj=logging_obj,
+    )
+
+    class RouterWithFallback(Router):
+        async def async_function_with_fallbacks_common_utils(self, **kwargs: object) -> object:
+            return native_iterator
+
+    tracker = _started_tracker_with_native_attempt()
+    router = RouterWithFallback(model_list=[])
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={
+            "model": "primary",
+            "fallbacks": ["backup"],
+            "_deepseek_parent_accounting_tracker": tracker,
+            "litellm_logging_obj": logging_obj,
+        },
+    )
+
+    events = [event async for event in wrapped]
+
+    assert len(events) == 1
+    assert native_iterator._terminal_lifecycle_deferred_to_parent is True
+    assert len(logging_obj.successes) == 1
+    assert logging_obj.failures == []
+    assert tracker.claim_lifecycle() is False
+
+
+@pytest.mark.asyncio
+async def test_router_async_responses_stream_does_not_fallback_after_public_output():
+    class Source:
+        def __init__(self) -> None:
+            self._next = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> dict[str, object]:
+            if self._next == 0:
+                self._next += 1
+                return {"type": "response.output_text.delta", "delta": "visible"}
+            raise MidStreamFallbackError(
+                message="after output",
+                model="openai/primary",
+                llm_provider="openai",
+                is_pre_first_chunk=False,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    fallback_calls: list[object] = []
+
+    class RouterWithFallback(Router):
+        async def async_function_with_fallbacks_common_utils(self, **kwargs: object) -> object:
+            fallback_calls.append(kwargs)
+            return {"id": "fallback"}
+
+    router = RouterWithFallback(model_list=[])
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={"model": "primary", "fallbacks": ["backup"], "input": "original"},
+    )
+
+    assert (await wrapped.__anext__())["type"] == "response.output_text.delta"
+    with pytest.raises(MidStreamFallbackError):
+        await wrapped.__anext__()
+    assert fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_async_responses_stream_recompiles_pre_output_fallback_from_original_input():
+    class Source:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> object:
+            raise MidStreamFallbackError(
+                message="before output",
+                model="openai/primary",
+                llm_provider="openai",
+                generated_content="discarded",
+                is_pre_first_chunk=True,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    received_inputs: list[object] = []
+
+    class RouterWithFallback(Router):
+        async def async_function_with_fallbacks_common_utils(self, **kwargs: object) -> object:
+            fallback_kwargs = kwargs["kwargs"]
+            assert isinstance(fallback_kwargs, dict)
+            received_inputs.append(fallback_kwargs["input"])
+            return {"id": "fallback"}
+
+    original_input = [{"role": "user", "content": "original"}]
+    router = RouterWithFallback(model_list=[])
+    wrapped = await router._aresponses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={"model": "primary", "fallbacks": ["backup"], "input": original_input},
+    )
+
+    assert await wrapped.__anext__() == {"id": "fallback"}
+    assert received_inputs == [original_input]
+    assert received_inputs[0] is not original_input
+
+
+def test_router_sync_responses_stream_does_not_fallback_after_public_output():
+    class Source:
+        def __init__(self) -> None:
+            self._next = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> dict[str, object]:
+            if self._next == 0:
+                self._next += 1
+                return {"type": "response.output_text.delta", "delta": "visible"}
+            raise MidStreamFallbackError(
+                message="after output",
+                model="openai/primary",
+                llm_provider="openai",
+                is_pre_first_chunk=False,
+            )
+
+        def close(self) -> None:
+            return None
+
+    fallback_calls: list[object] = []
+
+    class RouterWithFallback(Router):
+        async def async_function_with_fallbacks_common_utils(self, **kwargs: object) -> object:
+            fallback_calls.append(kwargs)
+            return {"id": "fallback"}
+
+    router = RouterWithFallback(model_list=[])
+    wrapped = router._responses_streaming_iterator(
+        response=Source(),
+        initial_kwargs={"model": "primary", "fallbacks": ["backup"], "input": "original"},
+        original_function=lambda **kwargs: None,
+    )
+
+    assert next(wrapped)["type"] == "response.output_text.delta"
+    with pytest.raises(MidStreamFallbackError):
+        next(wrapped)
+    assert fallback_calls == []
 
 
 def test_router_sync_native_stream_fallback_finalizes_deepseek_parent_once():

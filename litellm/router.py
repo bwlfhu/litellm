@@ -2652,10 +2652,15 @@ class Router:
 
         async def stream_with_fallbacks():
             fallback_response = None
+            original_input = copy.deepcopy(initial_kwargs.get("input"))
+            source_output_started = False
             try:
                 async for item in source_iterator:
+                    source_output_started = source_output_started or _is_responses_public_output_event(item)
                     yield item
             except MidStreamFallbackError as e:
+                if source_output_started:
+                    raise
                 try:
                     partial_usage = Router._extract_partial_responses_usage(source_iterator)
                 except Exception:  # noqa: BLE001  # custom stream wrappers may fail while exposing partial usage
@@ -2674,17 +2679,9 @@ class Router:
                     # _ageneric_api_call_with_fallbacks_helper.
                     # original_generic_function is preserved by the caller so
                     # the helper knows what underlying API to invoke per attempt.
-                    initial_kwargs["original_function"] = self._ageneric_api_call_with_fallbacks_helper
-                    if e.is_pre_first_chunk or not e.generated_content:
-                        # No content generated before the error — retry with the
-                        # original input. Adding a continuation prompt would
-                        # waste tokens and confuse the model.
-                        pass
-                    else:
-                        initial_kwargs["input"] = Router._build_responses_continuation_input(
-                            initial_kwargs.get("input"),
-                            e.generated_content,
-                        )
+                    fallback_kwargs = dict(initial_kwargs)
+                    fallback_kwargs["original_function"] = self._ageneric_api_call_with_fallbacks_helper
+                    fallback_kwargs["input"] = copy.deepcopy(original_input)
                     # The Responses-API path stores observability metadata
                     # under "litellm_metadata" (not the default "metadata") —
                     # see _ageneric_api_call_with_fallbacks. Mirroring that
@@ -2692,7 +2689,7 @@ class Router:
                     # ids land in the same key litellm.aresponses reads from.
                     self._update_kwargs_before_fallbacks(
                         model=model_group,
-                        kwargs=initial_kwargs,
+                        kwargs=fallback_kwargs,
                         metadata_variable_name="litellm_metadata",
                     )
                     fallback_response = await self.async_function_with_fallbacks_common_utils(
@@ -2703,8 +2700,8 @@ class Router:
                         content_policy_fallbacks=content_policy_fallbacks,
                         model_group=model_group,
                         args=(),
-                        kwargs=initial_kwargs,
-                        include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
+                        kwargs=fallback_kwargs,
+                        include_fallback_errors=fallback_kwargs.get("include_fallback_errors", False) is True,
                     )
 
                     candidates = _responses_fallback_candidates(fallbacks, model_group)
@@ -2750,12 +2747,9 @@ class Router:
                                 raise
                             next_kwargs = dict(initial_kwargs)
                             next_kwargs["fallbacks"] = candidates[next_index:]
-                            if next_error.is_pre_first_chunk or not next_error.generated_content:
-                                next_kwargs["input"] = initial_kwargs.get("input")
-                            else:
-                                next_kwargs["input"] = Router._build_responses_continuation_input(
-                                    initial_kwargs.get("input"), next_error.generated_content
-                                )
+                            if output_started:
+                                raise
+                            next_kwargs["input"] = copy.deepcopy(original_input)
                             next_response = await self.async_function_with_fallbacks_common_utils(
                                 e=next_error,
                                 disable_fallbacks=False,
@@ -2914,10 +2908,15 @@ class Router:
 
         def stream_with_fallbacks() -> Generator[Any, None, None]:
             fallback_response: object | None = None
+            original_input = copy.deepcopy(initial_kwargs.get("input"))
+            source_output_started = False
             try:
                 for item in source_iterator:
+                    source_output_started = source_output_started or _is_responses_public_output_event(item)
                     yield item
             except MidStreamFallbackError as error:
+                if source_output_started:
+                    raise
                 try:
                     model_group = cast(str, initial_kwargs.get("model"))
                     fallbacks: Optional[List] = initial_kwargs.get("fallbacks", router_self.fallbacks)
@@ -2927,21 +2926,17 @@ class Router:
                     content_policy_fallbacks: Optional[List] = initial_kwargs.get(
                         "content_policy_fallbacks", router_self.content_policy_fallbacks
                     )
-                    if error.is_pre_first_chunk or not error.generated_content:
-                        initial_kwargs["input"] = initial_kwargs.get("input")
-                    else:
-                        initial_kwargs["input"] = Router._build_responses_continuation_input(
-                            initial_kwargs.get("input"), error.generated_content
-                        )
 
                     async def async_original_function(**call_kwargs: object) -> object:
                         return original_function(**call_kwargs)
 
-                    initial_kwargs["original_function"] = router_self._ageneric_api_call_with_fallbacks_helper
-                    initial_kwargs["original_generic_function"] = async_original_function
+                    fallback_kwargs = dict(initial_kwargs)
+                    fallback_kwargs["original_function"] = router_self._ageneric_api_call_with_fallbacks_helper
+                    fallback_kwargs["original_generic_function"] = async_original_function
+                    fallback_kwargs["input"] = copy.deepcopy(original_input)
                     router_self._update_kwargs_before_fallbacks(
                         model=model_group,
-                        kwargs=initial_kwargs,
+                        kwargs=fallback_kwargs,
                         metadata_variable_name="litellm_metadata",
                     )
                     fallback_response = run_async_function(
@@ -2953,8 +2948,8 @@ class Router:
                         content_policy_fallbacks=content_policy_fallbacks,
                         model_group=model_group,
                         args=(),
-                        kwargs=initial_kwargs,
-                        include_fallback_errors=initial_kwargs.get("include_fallback_errors", False) is True,
+                        kwargs=fallback_kwargs,
+                        include_fallback_errors=fallback_kwargs.get("include_fallback_errors", False) is True,
                     )
                     candidates = _responses_fallback_candidates(fallbacks, model_group)
 
@@ -2994,12 +2989,9 @@ class Router:
                                 raise
                             next_kwargs = dict(initial_kwargs)
                             next_kwargs["fallbacks"] = candidates[next_index:]
-                            if next_error.is_pre_first_chunk or not next_error.generated_content:
-                                next_kwargs["input"] = initial_kwargs.get("input")
-                            else:
-                                next_kwargs["input"] = Router._build_responses_continuation_input(
-                                    initial_kwargs.get("input"), next_error.generated_content
-                                )
+                            if output_started:
+                                raise
+                            next_kwargs["input"] = copy.deepcopy(original_input)
                             next_response = run_async_function(
                                 router_self.async_function_with_fallbacks_common_utils,
                                 e=next_error,
