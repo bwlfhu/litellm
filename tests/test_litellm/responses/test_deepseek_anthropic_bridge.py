@@ -8,6 +8,7 @@ import pytest
 import litellm
 from litellm.litellm_core_utils.asyncify import run_async_function
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, DeepSeekUpstreamError
+from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
 from litellm.responses.deepseek_anthropic import (
     DeepSeekAnthropicResponsesBridge,
     _read_raw_payload,
@@ -25,6 +26,7 @@ from litellm.responses.deepseek_session import (
 )
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import DeploymentProtocolContext, DeploymentRateSnapshot, DeploymentReasoningProtocol
+from litellm.types.router import GenericLiteLLMParams
 from litellm.types.llms.openai import ResponsesAPIResponse
 
 
@@ -189,8 +191,10 @@ def test_deepseek_responses_bridge_rejects_forged_protocol_context():
 @pytest.mark.asyncio
 async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_without_completion(monkeypatch):
     requests: list[dict] = []
+    wire_bodies: list[bytes] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        wire_bodies.append(bytes(request.content))
         requests.append(json.loads(request.content))
         return httpx.Response(
             200,
@@ -222,6 +226,19 @@ async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_
     assert requests[0]["messages"] == [{"role": "user", "content": "question"}]
     assert requests[0]["thinking"] == {"type": "enabled", "budget_tokens": 31}
     assert requests[0]["stream"] is False
+    native_wire_body = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "question"}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 32,
+            "thinking": {"type": "enabled", "budget_tokens": 31},
+            "output_config": {"effort": "high"},
+            "stream": False,
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+    assert wire_bodies == [json.dumps(native_wire_body).encode()]
     assert getattr(response.output[0], "type", None) == "reasoning"
     assert getattr(response.output[1], "type", None) == "message"
 

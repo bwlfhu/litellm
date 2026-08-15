@@ -1038,6 +1038,9 @@ class DeepSeekAnthropicResponsesBridge:
             enabled,
             max_output_tokens,
         )
+        # Preserve the native Messages serializer's field ordering. Some
+        # Anthropic-compatible gateways inspect the signed JSON bytes.
+        optional_params["stream"] = stream is True
         optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
         optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.context_token_budget
         config = DeepSeekAnthropicMessagesConfig()
@@ -1076,7 +1079,6 @@ class DeepSeekAnthropicResponsesBridge:
         )
         if system_prompt is not None:
             request_body["system"] = system_prompt
-        request_body["stream"] = stream is True
         url = config.get_complete_url(
             api_base=resolved_base,
             api_key=api_key,
