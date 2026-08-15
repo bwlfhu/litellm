@@ -8,7 +8,10 @@ import pytest
 import litellm
 from litellm.litellm_core_utils.asyncify import run_async_function
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, DeepSeekUpstreamError
-from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
+from litellm.responses.deepseek_anthropic import (
+    DeepSeekAnthropicResponsesBridge,
+    _read_raw_payload,
+)
 from litellm.responses.deepseek_accounting import (
     AttemptRateSnapshot,
     DeepSeekParentAccountingTracker,
@@ -249,6 +252,25 @@ async def test_deepseek_responses_accepts_utf8_bom_upstream_json():
 
     assert response.id == "resp_ds_bom"
     assert response.status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "headers", "expected_code"),
+    [
+        (b"", {}, "upstream_response_empty"),
+        (b"data: {}\n\n", {"content-type": "text/event-stream"}, "upstream_response_unexpected_sse"),
+        (b"<html></html>", {"content-type": "text/html"}, "upstream_response_unexpected_html"),
+    ],
+)
+async def test_deepseek_responses_classifies_non_json_upstream_payloads(content, headers, expected_code):
+    request = httpx.Request("POST", "https://provider.invalid/v1/messages")
+    response = httpx.Response(200, request=request, headers=headers, content=content)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response))
+
+    with pytest.raises(DeepSeekProtocolError, match=expected_code):
+        await _read_raw_payload(response, False, client)
+    await client.aclose()
 
 
 @pytest.mark.asyncio

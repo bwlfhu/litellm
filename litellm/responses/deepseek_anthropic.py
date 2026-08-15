@@ -520,6 +520,17 @@ def _log_parent_pre_call(logging_obj: object, input_value: str | ResponseInputPa
         pre_call(input=_logging_safe_input(input_value), api_key="", additional_args={})
 
 
+def _invalid_raw_payload_code(body: bytes, headers: Mapping[str, str]) -> str:
+    if not body:
+        return "upstream_response_empty"
+    content_type = headers.get("content-type", "").lower()
+    if "text/event-stream" in content_type or body.lstrip().startswith(b"data:"):
+        return "upstream_response_unexpected_sse"
+    if "text/html" in content_type or body.lstrip().startswith((b"<!doctype", b"<html", b"<HTML")):
+        return "upstream_response_unexpected_html"
+    return "upstream_response_invalid"
+
+
 async def _read_raw_payload(response: httpx.Response, owns_client: bool, client: httpx.AsyncClient) -> object:
     body = b""
     try:
@@ -531,7 +542,7 @@ async def _read_raw_payload(response: httpx.Response, owns_client: bool, client:
             return json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise DeepSeekProtocolError(
-                "upstream_response_invalid",
+                _invalid_raw_payload_code(body, dict(response.headers)),
                 raw_headers=dict(response.headers),
                 raw_body=body,
             ) from error
