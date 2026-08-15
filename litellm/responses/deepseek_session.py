@@ -42,6 +42,13 @@ class DeepSeekResponsesSession:
             "durability": "atomic",
         }
 
+    def is_valid_atomic_session(self, response_id: str) -> bool:
+        return (
+            self.response_id == response_id
+            and self.durability == "atomic"
+            and self.suffix_manifest == deepseek_anthropic_session_manifest(self.messages)
+        )
+
 
 def create_deepseek_responses_session(
     response_id: str, messages: Sequence[Mapping[str, object]], *, durability: str = "staged"
@@ -85,7 +92,8 @@ class SpendLogDeepSeekResponsesSessionRepository:
         )
         if not response_id:
             return None
-        return await self._load_atomic_session(response_id)
+        session = await self._load_atomic_session(response_id)
+        return session if session is not None and session.is_valid_atomic_session(response_id) else None
 
     async def commit(self, session: DeepSeekResponsesSession) -> None:
         if self._commit_atomic_session is None:

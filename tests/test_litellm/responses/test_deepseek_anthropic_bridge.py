@@ -947,6 +947,13 @@ async def test_deepseek_spend_log_session_requires_a_complete_atomic_manifest():
     assert "messages" not in marker
     proxy_server_request["body"]["_deepseek_anthropic_session"]["suffix_manifest"]["digest"] = "bad"
     assert await repository.load("resp_persisted") is not None
+    atomic_sessions["resp_persisted"] = DeepSeekResponsesSession(
+        response_id="resp_persisted",
+        messages=messages,
+        suffix_manifest={"version": 1, "digest": "bad"},
+        durability="atomic",
+    )
+    assert await repository.load("resp_persisted") is None
 
     spend_log_only = SpendLogDeepSeekResponsesSessionRepository()
     assert await spend_log_only.load("resp_persisted") is None
