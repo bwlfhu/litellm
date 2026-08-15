@@ -16,6 +16,8 @@ from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
 )
 from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+from litellm.proxy.pass_through_endpoints import streaming_handler
+from litellm.router_protocol import _RouterDeploymentProtocolContext
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
 
@@ -67,6 +69,28 @@ def test_untrusted_protocol_context_dict_does_not_select_deepseek_config():
     assert isinstance(config, AnthropicMessagesConfig)
     assert not isinstance(config, DeepSeekAnthropicMessagesConfig)
     assert "_deepseek_anthropic_messages_path" not in dispatch.call_args.kwargs["litellm_params"]
+
+
+def test_untrusted_protocol_context_object_does_not_select_deepseek_config():
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    with patch.object(
+        handler.base_llm_http_handler, "anthropic_messages_handler", return_value="dispatched"
+    ) as dispatch:
+        result = anthropic_messages_handler(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "Hello"}],
+            model="anthropic/claude-test",
+            custom_llm_provider="anthropic",
+            _litellm_deployment_protocol_context=_RouterDeploymentProtocolContext(
+                protocol="deepseek_anthropic", messages_path="v1/messages", _owner=object()
+            ),
+        )
+
+    assert result == "dispatched"
+    config = dispatch.call_args.kwargs["anthropic_messages_provider_config"]
+    assert isinstance(config, AnthropicMessagesConfig)
+    assert not isinstance(config, DeepSeekAnthropicMessagesConfig)
 
 
 def test_deepseek_anthropic_messages_url_defaults_to_anthropic_endpoint():
@@ -305,7 +329,6 @@ def test_deepseek_anthropic_messages_restores_reasoning_content_without_mutating
                 {"type": "thinking", "thinking": "Use the weather tool."},
                 {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
             ],
-            "provider_specific_fields": {"source": "upstream"},
         }
     ]
     assert messages[0]["provider_specific_fields"]["reasoning_content"] == "Use the weather tool."
@@ -617,8 +640,9 @@ async def test_deepseek_anthropic_messages_streams_through_mock_transport():
     try:
         with (
             patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client", return_value=http_client),
-            patch(
-                "litellm.proxy.pass_through_endpoints.streaming_handler.GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue",
+            patch.object(
+                streaming_handler.GLOBAL_LOGGING_WORKER,
+                "ensure_initialized_and_enqueue",
                 side_effect=close_logging_coroutine,
             ),
         ):

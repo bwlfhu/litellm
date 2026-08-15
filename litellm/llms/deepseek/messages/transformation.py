@@ -21,6 +21,10 @@ from litellm.types.router import GenericLiteLLMParams
 _DEEPSEEK_MESSAGES_PATHS = frozenset({"anthropic/v1/messages", "v1/messages"})
 
 
+class _DeepSeekHistoryValidationError(AnthropicError):
+    _litellm_disable_fallbacks = True
+
+
 def _deduplicated_path_segments(path: str) -> tuple[str, ...]:
     segments = tuple(segment for segment in path.split("/") if segment)
     return tuple(
@@ -97,9 +101,7 @@ def _unsigned_content_blocks(content: list[object]) -> tuple[list[object], bool,
 
 
 def _deepseek_history_validation_error(message: str) -> AnthropicError:
-    error = AnthropicError(message=message, status_code=400)
-    setattr(error, "_litellm_disable_fallbacks", True)
-    return error
+    return _DeepSeekHistoryValidationError(message=message, status_code=400)
 
 
 def _deepseek_history_message(message: Dict) -> Dict:
@@ -109,15 +111,7 @@ def _deepseek_history_message(message: Dict) -> Dict:
 
     reasoning_content = _nonempty_reasoning_content(message)
     transformed_message.pop("reasoning_content", None)
-    provider_specific_fields = transformed_message.get("provider_specific_fields")
-    if isinstance(provider_specific_fields, Mapping):
-        remaining_provider_specific_fields = {
-            key: value for key, value in provider_specific_fields.items() if key != "reasoning_content"
-        }
-        if remaining_provider_specific_fields:
-            transformed_message["provider_specific_fields"] = remaining_provider_specific_fields
-        else:
-            transformed_message.pop("provider_specific_fields", None)
+    transformed_message.pop("provider_specific_fields", None)
     content = transformed_message.get("content")
     if not isinstance(content, list):
         if reasoning_content is None:
