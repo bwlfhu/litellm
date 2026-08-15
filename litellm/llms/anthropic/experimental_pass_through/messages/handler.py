@@ -499,11 +499,18 @@ def anthropic_messages_handler(
     # This is needed by agentic hooks (e.g., websearch_interception) to make follow-up requests
     original_model = model
 
+    protocol_context = get_deployment_protocol_context(kwargs)
+    kwargs.pop("_deepseek_anthropic_messages_path", None)
     litellm_params = GenericLiteLLMParams(
         **kwargs,
         api_key=api_key,
         api_base=api_base,
         custom_llm_provider=custom_llm_provider,
+        **(
+            {"_deepseek_anthropic_messages_path": protocol_context.messages_path}
+            if protocol_context is not None and protocol_context.messages_path is not None
+            else {}
+        ),
     )
     (
         model,
@@ -543,7 +550,6 @@ def anthropic_messages_handler(
 
     anthropic_messages_provider_config: Optional[BaseAnthropicMessagesConfig] = None
 
-    protocol_context = get_deployment_protocol_context(kwargs)
     if protocol_context is not None:
         from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
 
@@ -616,9 +622,6 @@ def anthropic_messages_handler(
                 **thinking_param,
                 "display": "summarized",
             }
-    if protocol_context is not None and protocol_context.messages_path is not None:
-        litellm_params["_deepseek_anthropic_messages_path"] = protocol_context.messages_path
-
     return base_llm_http_handler.anthropic_messages_handler(
         model=model,
         messages=messages,
