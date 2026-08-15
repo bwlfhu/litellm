@@ -161,16 +161,6 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                     "part": {"type": "output_text", "text": "", "annotations": []},
                 }
             )
-        elif block_type == "thinking":
-            events.append(
-                {
-                    "type": "response.reasoning_summary_part.added",
-                    "item_id": event_item["id"],
-                    "output_index": index,
-                    "summary_index": 0,
-                    "part": {"type": "summary_text", "text": ""},
-                }
-            )
         return events
 
     def _content_block_delta(self, payload: Mapping[str, object]) -> list[dict[str, object]]:

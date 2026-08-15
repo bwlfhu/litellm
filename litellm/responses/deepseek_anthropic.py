@@ -274,6 +274,8 @@ def _responses_tool_choice_to_anthropic(tool_choice: object) -> dict[str, object
             return None
     if isinstance(tool_choice, Mapping):
         name = tool_choice.get("name")
+        if name is None and isinstance(tool_choice.get("function"), Mapping):
+            name = tool_choice["function"].get("name")
         if tool_choice.get("type") in {"function", "tool"} and isinstance(name, str) and name.strip():
             return {"type": "tool", "name": name}
     raise DeepSeekProtocolError("tool_choice_invalid")
@@ -398,6 +400,8 @@ def _bridge_optional_params(
                 # Anthropic has no wire-level ``none`` choice; omitting the
                 # tools is the only lossless representation.
                 params.pop("tools", None)
+        elif request.get("parallel_tool_calls") is False:
+            params["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
     elif request.get("tool_choice") not in (None, "none"):
         raise DeepSeekProtocolError("tool_choice_invalid")
     if request.get("temperature") is not None:
