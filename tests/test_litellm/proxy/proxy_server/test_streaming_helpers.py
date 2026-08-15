@@ -684,6 +684,7 @@ async def test_async_data_generator_formats_responses_dict_as_valid_json_sse(mon
         "type": "response.output_text.delta",
         "item_id": "msg_1",
         "delta": "hi",
+        "model": "deepseek-v4-pro",
     }
 
 
