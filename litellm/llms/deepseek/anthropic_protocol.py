@@ -18,7 +18,18 @@ class DeepSeekProtocolNonFallbackError(ValueError):
 
 
 class DeepSeekProtocolError(DeepSeekProtocolNonFallbackError):
-    pass
+    def __init__(
+        self,
+        code: str,
+        *,
+        raw_headers: Mapping[str, str] | None = None,
+        raw_body: bytes = b"",
+    ):
+        super().__init__(code)
+        # Keep the public protocol classification stable while preserving the
+        # upstream evidence for diagnostics and logging owners.
+        self.raw_headers = dict(raw_headers or {})
+        self.raw_body = bytes(raw_body)
 
 
 class DeepSeekUpstreamError(ValueError):
@@ -89,8 +100,7 @@ def _restored_thinking(message: Mapping[str, object]) -> str | None:
 
 def _has_redacted_thinking(message: Mapping[str, object]) -> bool:
     return any(
-        isinstance(block, Mapping) and block.get("type") == "redacted_thinking"
-        for block in _message_content(message)
+        isinstance(block, Mapping) and block.get("type") == "redacted_thinking" for block in _message_content(message)
     )
 
 
@@ -138,9 +148,7 @@ def _copy_message_for_wire(message: Mapping[str, object], *, keep_thinking: bool
         wire_content.insert(0, {"type": "thinking", "thinking": restored})
     if not keep_thinking:
         wire_content = [
-            block
-            for block in wire_content
-            if not (isinstance(block, Mapping) and block.get("type") == "thinking")
+            block for block in wire_content if not (isinstance(block, Mapping) and block.get("type") == "thinking")
         ]
     copied["content"] = wire_content
     return copied
@@ -161,9 +169,7 @@ def _suffix_token_count(messages: Sequence[dict[str, object]]) -> int:
     return ceil(len(encoded) / 4)
 
 
-def validate_deepseek_anthropic_context_budget(
-    request: Mapping[str, object], max_context_tokens: int | None
-) -> None:
+def validate_deepseek_anthropic_context_budget(request: Mapping[str, object], max_context_tokens: int | None) -> None:
     if max_context_tokens is None or max_context_tokens <= 0:
         return
     encoded = dumps(dict(request), ensure_ascii=True, separators=(",", ":"), default=str).encode()

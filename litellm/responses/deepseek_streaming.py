@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Mapping, cast
 import httpx
 
 from litellm.exceptions import MidStreamFallbackError
+from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolNonFallbackError
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekUpstreamError
 
 DeepSeekStreamTerminalHandler = Callable[[Mapping[str, object], bool], Awaitable[None]]
@@ -150,7 +151,9 @@ class DeepSeekAnthropicResponsesSSEDecoder:
             }
         self._block_items[index] = event_item
         self._mark_started()
-        events: list[dict[str, object]] = [{"type": "response.output_item.added", "output_index": index, "item": event_item}]
+        events: list[dict[str, object]] = [
+            {"type": "response.output_item.added", "output_index": index, "item": event_item}
+        ]
         if block_type == "text":
             events.append(
                 {
@@ -241,7 +244,11 @@ class DeepSeekAnthropicResponsesSSEDecoder:
                     "type": "response.output_item.done",
                     "output_index": index,
                     "sequence_number": self._sequence_number,
-                    "item": {**item, "summary": [{"type": "summary_text", "text": self._reasoning}], "status": "completed"},
+                    "item": {
+                        **item,
+                        "summary": [{"type": "summary_text", "text": self._reasoning}],
+                        "status": "completed",
+                    },
                 },
             ]
         if block_type == "text":
@@ -397,6 +404,11 @@ class DeepSeekAnthropicResponsesAsyncStream:
         self._terminal_notified = True
         try:
             await self._on_terminal(event, self._decoder.output_started)
+        except DeepSeekProtocolNonFallbackError:
+            # A session/protocol integrity failure must reach Router as its
+            # typed non-fallback error; swallowing it would turn it into a
+            # successful terminal event or an ordinary retryable exception.
+            raise
         except Exception:
             # Accounting/logging must not mask the original upstream stream
             # failure or a caller cancellation.
@@ -431,7 +443,11 @@ class DeepSeekAnthropicResponsesAsyncStream:
             if is_terminal and isinstance(response, Mapping):
                 await self._notify_terminal(event)
             if self._lifecycle_buffer:
-                if self._decoder.output_started or event_type not in {"response.failed", "response.incomplete"}:
+                if (
+                    self._decoder.output_started
+                    or event_type not in {"response.failed", "response.incomplete"}
+                    or not self._pre_output_fallback_enabled
+                ):
                     self._deferred_event = event
                     return self._lifecycle_buffer.pop(0)
                 self._lifecycle_buffer.clear()
@@ -458,12 +474,13 @@ class DeepSeekAnthropicResponsesAsyncStream:
         except MidStreamFallbackError:
             await self.aclose()
             raise
+        except DeepSeekProtocolNonFallbackError:
+            await self.aclose()
+            raise
         except Exception as error:
             await self.aclose()
             upstream_error = (
-                error
-                if isinstance(error, DeepSeekUpstreamError)
-                else DeepSeekUpstreamError("stream_read_error", None)
+                error if isinstance(error, DeepSeekUpstreamError) else DeepSeekUpstreamError("stream_read_error", None)
             )
             await self._notify_terminal(self._synthetic_failure_event(upstream_error.category))
             if self._pre_output_fallback_enabled and not self._decoder.output_started:

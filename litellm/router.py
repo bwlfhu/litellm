@@ -2727,7 +2727,10 @@ class Router:
                     if accounting_tracker is not None and _has_deepseek_protocol_context(initial_kwargs):
                         from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
 
-                        if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                        if (
+                            isinstance(accounting_tracker, DeepSeekParentAccountingTracker)
+                            and accounting_tracker.has_attempts
+                        ):
                             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
                             try:
@@ -2754,7 +2757,10 @@ class Router:
                     from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
                     from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
-                    if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                    if (
+                        isinstance(accounting_tracker, DeepSeekParentAccountingTracker)
+                        and accounting_tracker.has_attempts
+                    ):
                         await asyncio.shield(
                             DeepSeekAnthropicResponsesBridge.finalize_router_failure(
                                 tracker=accounting_tracker,
@@ -2770,7 +2776,10 @@ class Router:
                     from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
                     from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
-                    if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                    if (
+                        isinstance(accounting_tracker, DeepSeekParentAccountingTracker)
+                        and accounting_tracker.has_attempts
+                    ):
                         await DeepSeekAnthropicResponsesBridge.finalize_router_failure(
                             tracker=accounting_tracker,
                             logging_obj=initial_kwargs.get("litellm_logging_obj"),
@@ -2860,6 +2869,7 @@ class Router:
                         initial_kwargs["input"] = Router._build_responses_continuation_input(
                             initial_kwargs.get("input"), error.generated_content
                         )
+
                     async def async_original_function(**call_kwargs: object) -> object:
                         return original_function(**call_kwargs)
 
@@ -2884,7 +2894,9 @@ class Router:
                     )
                     candidates = _responses_fallback_candidates(fallbacks, model_group)
 
-                    def forward_fallback(iterator_or_response: object, candidate_index: int) -> Generator[Any, None, None]:
+                    def forward_fallback(
+                        iterator_or_response: object, candidate_index: int
+                    ) -> Generator[Any, None, None]:
                         if not hasattr(iterator_or_response, "__next__"):
                             yield iterator_or_response
                             return
@@ -2933,7 +2945,10 @@ class Router:
                     if accounting_tracker is not None and _has_deepseek_protocol_context(initial_kwargs):
                         from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
 
-                        if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                        if (
+                            isinstance(accounting_tracker, DeepSeekParentAccountingTracker)
+                            and accounting_tracker.has_attempts
+                        ):
                             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
                             try:
@@ -2948,7 +2963,10 @@ class Router:
                                 verbose_router_logger.debug(
                                     "Responses sync fallback failure finalization failed: %s", finalize_error
                                 )
-                    if isinstance(fallback_error, MidStreamFallbackError) and fallback_error.original_exception is not None:
+                    if (
+                        isinstance(fallback_error, MidStreamFallbackError)
+                        and fallback_error.original_exception is not None
+                    ):
                         raise fallback_error.original_exception from fallback_error
                     raise
             except BaseException as source_error:
@@ -2957,7 +2975,10 @@ class Router:
                     from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
                     from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
-                    if isinstance(accounting_tracker, DeepSeekParentAccountingTracker) and accounting_tracker.has_attempts:
+                    if (
+                        isinstance(accounting_tracker, DeepSeekParentAccountingTracker)
+                        and accounting_tracker.has_attempts
+                    ):
                         run_async_function(
                             DeepSeekAnthropicResponsesBridge.finalize_router_failure,
                             tracker=accounting_tracker,
@@ -5079,10 +5100,11 @@ class Router:
         if accounting_tracker.parent_started and accounting_tracker.has_attempts:
             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
-            await DeepSeekAnthropicResponsesBridge.finalize_router_success(
+            await DeepSeekAnthropicResponsesBridge.finalize_router_response(
                 tracker=accounting_tracker,
                 response=response,
                 logging_obj=kwargs.get("litellm_logging_obj"),
+                is_async=True,
             )
         return response
 
@@ -5114,6 +5136,7 @@ class Router:
             fallback_kwargs["metadata"] = safe_deep_copy(fallback_kwargs["metadata"])
         fallback_kwargs["original_generic_function"] = original_function
         try:
+
             def sync_original_function(model: str, **call_kwargs: object) -> object:
                 return self._generic_api_call_with_fallbacks(
                     model=model,
@@ -5142,10 +5165,11 @@ class Router:
             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
             run_async_function(
-                DeepSeekAnthropicResponsesBridge.finalize_router_success,
+                DeepSeekAnthropicResponsesBridge.finalize_router_response,
                 tracker=accounting_tracker,
                 response=response,
                 logging_obj=kwargs.get("litellm_logging_obj"),
+                is_async=False,
             )
         if kwargs.get("stream") and hasattr(response, "__next__"):
             return self._responses_streaming_iterator(

@@ -8,7 +8,11 @@ import litellm
 from litellm.litellm_core_utils.asyncify import run_async_function
 from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, DeepSeekUpstreamError
 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
-from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
+from litellm.responses.deepseek_accounting import (
+    AttemptRateSnapshot,
+    DeepSeekParentAccountingTracker,
+    build_attempt_snapshot,
+)
 from litellm.responses.deepseek_session import (
     DeepSeekResponsesSession,
     ProxyDeepSeekResponsesSessionRepository,
@@ -17,6 +21,7 @@ from litellm.responses.deepseek_session import (
 )
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import DeploymentProtocolContext, DeploymentRateSnapshot, DeploymentReasoningProtocol
+from litellm.types.llms.openai import ResponsesAPIResponse
 
 
 def _context():
@@ -319,6 +324,39 @@ async def test_router_owned_non_stream_bridge_stamps_accounting_for_parent_final
     assert logging_obj.successes == [response]
 
 
+@pytest.mark.asyncio
+async def test_router_parent_finalize_uses_failure_lifecycle_for_incomplete_response():
+    logging_obj = _RecordingResponsesLogging()
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.record_attempt(
+        build_attempt_snapshot(
+            model="deepseek-v4-pro",
+            deployment_id="deployment-a",
+            usage={"input_tokens": 1},
+            rates=AttemptRateSnapshot(),
+        )
+    )
+    response = ResponsesAPIResponse(
+        id="resp_incomplete_parent",
+        created_at=1,
+        model="deepseek-v4-pro",
+        object="response",
+        output=[],
+        status="incomplete",
+    )
+
+    await DeepSeekAnthropicResponsesBridge.finalize_router_response(
+        tracker=tracker,
+        response=response,
+        logging_obj=logging_obj,
+        is_async=True,
+    )
+
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+
+
 def test_deepseek_responses_sync_bridge_uses_same_raw_reconstruction_core():
     requests: list[dict] = []
 
@@ -576,6 +614,146 @@ async def test_deepseek_responses_raw_failure_preserves_typed_data_and_finalizes
     assert len(logging_obj.async_failures) == 1
     assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
     assert logging_obj.model_call_details["response_cost"] == 0
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_message_only_history_400_is_non_fallback_and_keeps_raw_data():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            request=request,
+            headers={"x-upstream-request-id": "history-400"},
+            content=b'{"type":"invalid_request_error","message":"missing reasoning_content for tool call"}',
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_history_unrecoverable") as raised:
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            client=client,
+        )
+    await client.aclose()
+
+    assert raised.value.fallback_allowed is False
+    assert raised.value.raw_headers["x-upstream-request-id"] == "history-400"
+    assert b"reasoning_content" in raised.value.raw_body
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_malformed_payload_finalizes_failure_accounting():
+    logging_obj = _RecordingResponsesLogging()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, content=b"not-json")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="upstream_response_invalid") as raised:
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context_with_rates(),
+            litellm_logging_obj=logging_obj,
+            client=client,
+        )
+    await client.aclose()
+
+    assert raised.value.raw_body == b"not-json"
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+    assert logging_obj.model_call_details["deepseek_parent_accounting"]["attempt_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_incomplete_non_stream_uses_failure_lifecycle():
+    logging_obj = _RecordingResponsesLogging()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_incomplete",
+                "content": [{"type": "text", "text": "partial"}],
+                "stop_reason": "max_tokens",
+                "usage": {"input_tokens": 2, "output_tokens": 1},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context_with_rates(),
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+    await client.aclose()
+
+    assert response.status == "incomplete"
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_session_commit_failure_is_typed_and_not_success():
+    class FailingSessionRepository:
+        requires_atomic_session = True
+        supports_atomic_session = True
+
+        async def load(self, response_id: str) -> None:
+            return None
+
+        async def commit(self, session: object) -> None:
+            raise RuntimeError("storage unavailable")
+
+    logging_obj = _RecordingResponsesLogging()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_commit_failure",
+                "content": [{"type": "thinking", "thinking": "reason"}, {"type": "text", "text": "answer"}],
+                "usage": {},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_history_persistence_failed"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 32},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            _deepseek_session_repository=FailingSessionRepository(),
+            litellm_logging_obj=logging_obj,
+            client=client,
+        )
+    await client.aclose()
+
+    assert logging_obj.successes == []
+    assert len(logging_obj.failures) == 1
+    assert len(logging_obj.async_failures) == 1
 
 
 @pytest.mark.asyncio
@@ -1192,9 +1370,9 @@ async def test_deepseek_stream_response_ids_remain_unique_when_the_clock_collide
     first_response_id = ResponsesAPIRequestUtils._decode_responses_api_response_id(first_events[-1]["response"]["id"])[
         "response_id"
     ]
-    second_response_id = ResponsesAPIRequestUtils._decode_responses_api_response_id(second_events[-1]["response"]["id"])[
-        "response_id"
-    ]
+    second_response_id = ResponsesAPIRequestUtils._decode_responses_api_response_id(
+        second_events[-1]["response"]["id"]
+    )["response_id"]
     assert first_response_id != second_response_id
     assert set(session_repository._sessions) == {first_response_id, second_response_id}
 

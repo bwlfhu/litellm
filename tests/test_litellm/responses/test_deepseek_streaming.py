@@ -59,12 +59,7 @@ async def test_deepseek_sse_decoder_emits_reasoning_text_and_tool_events_without
 @pytest.mark.asyncio
 async def test_deepseek_sse_decoder_failed_event_does_not_emit_success():
     decoder = DeepSeekAnthropicResponsesSSEDecoder("deepseek-v4-pro", "resp_2")
-    decoded = [
-        event
-        async for event in decoder.decode(
-            _lines([("error", {"type": "upstream", "message": "failed"})])
-        )
-    ]
+    decoded = [event async for event in decoder.decode(_lines([("error", {"type": "upstream", "message": "failed"})]))]
 
     assert [event["type"] for event in decoded][-1] == "response.failed"
     assert [event["type"] for event in decoded][:2] == ["response.created", "response.in_progress"]
@@ -261,6 +256,39 @@ async def test_deepseek_async_stream_post_output_error_is_terminal_event():
     assert (await stream.__anext__())["type"] == "response.output_item.added"
     assert (await stream.__anext__())["type"] == "response.content_part.added"
     assert (await stream.__anext__())["type"] == "response.failed"
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_deepseek_async_stream_without_router_fallback_preserves_preoutput_lifecycle():
+    class EventBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'event: error\ndata: {"type":"upstream"}\n\n'
+
+        async def aclose(self):
+            return None
+
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://provider.invalid"),
+        stream=EventBody(),
+    )
+    stream = DeepSeekAnthropicResponsesAsyncStream(
+        response,
+        "deepseek-v4-pro",
+        "resp_preoutput_lifecycle",
+        False,
+        httpx.AsyncClient(),
+        pre_output_fallback_enabled=False,
+    )
+
+    events = [event async for event in stream]
+
+    assert [event["type"] for event in events] == [
+        "response.created",
+        "response.in_progress",
+        "response.failed",
+    ]
     await stream.aclose()
 
 
