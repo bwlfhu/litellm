@@ -1521,6 +1521,17 @@ class ProxyBaseLLMRequestProcessing:
             if router_settings is not None:
                 self.data["router_settings_override"] = router_settings
 
+        if route_type == "aresponses":
+            from litellm.proxy.proxy_server import prisma_client
+            from litellm.responses.deepseek_session import ProxyDeepSeekResponsesSessionRepository
+
+            owner_id = getattr(user_api_key_dict, "token", None)
+            if isinstance(owner_id, str) and owner_id:
+                self.data["_deepseek_session_repository"] = ProxyDeepSeekResponsesSessionRepository(
+                    prisma_client=prisma_client,
+                    owner_id=owner_id,
+                )
+
         if "messages" in self.data and self.data["messages"]:
             logging_obj.update_messages(self.data["messages"])
 

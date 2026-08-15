@@ -3,8 +3,10 @@
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import cast
 
+from litellm.litellm_core_utils.app_crypto import AppCrypto
 from litellm.llms.deepseek.anthropic_protocol import deepseek_anthropic_session_manifest
 from litellm.responses.utils import ResponsesAPIRequestUtils
 
@@ -64,6 +66,122 @@ def create_deepseek_responses_session(
 
 SessionLoader = Callable[[str], Awaitable[DeepSeekResponsesSession | None]]
 SessionCommitter = Callable[[DeepSeekResponsesSession], Awaitable[None]]
+SessionEncryptionKeyLoader = Callable[[], str | None]
+
+
+def _proxy_session_encryption_key() -> str | None:
+    from litellm.proxy.proxy_server import master_key
+
+    return master_key if isinstance(master_key, str) and master_key else None
+
+
+def _session_from_payload(payload: object) -> DeepSeekResponsesSession | None:
+    if not isinstance(payload, Mapping):
+        return None
+    response_id = payload.get("response_id")
+    messages = payload.get("messages")
+    suffix_manifest = payload.get("suffix_manifest")
+    durability = payload.get("durability")
+    if not isinstance(response_id, str) or not isinstance(messages, list) or not isinstance(durability, str):
+        return None
+    if suffix_manifest is not None and not isinstance(suffix_manifest, Mapping):
+        return None
+    if not all(isinstance(message, Mapping) for message in messages):
+        return None
+    return DeepSeekResponsesSession(
+        response_id=response_id,
+        messages=tuple(deepcopy(dict(message)) for message in messages),
+        suffix_manifest=deepcopy(dict(suffix_manifest)) if isinstance(suffix_manifest, Mapping) else None,
+        durability=durability,
+    )
+
+
+def _record_field(record: object, field: str) -> object:
+    if isinstance(record, Mapping):
+        return record.get(field)
+    return getattr(record, field, None)
+
+
+class ProxyDeepSeekResponsesSessionRepository:
+    def __init__(
+        self,
+        *,
+        prisma_client: object,
+        owner_id: str,
+        encryption_key_loader: SessionEncryptionKeyLoader = _proxy_session_encryption_key,
+    ):
+        self._prisma_client = prisma_client
+        self._owner_id = owner_id
+        self._encryption_key_loader = encryption_key_loader
+
+    @property
+    def requires_atomic_session(self) -> bool:
+        return True
+
+    @property
+    def supports_atomic_session(self) -> bool:
+        return self._prisma_client is not None and bool(self._owner_id) and self._encryption_key_loader() is not None
+
+    def _crypto(self) -> AppCrypto:
+        encryption_key = self._encryption_key_loader()
+        if not isinstance(encryption_key, str) or not encryption_key:
+            raise RuntimeError("DeepSeek Responses session encryption is unavailable")
+        return AppCrypto(sha256(encryption_key.encode()).digest())
+
+    @property
+    def _table(self) -> object:
+        database = getattr(self._prisma_client, "db", None)
+        table = getattr(database, "litellm_deepseekresponsessession", None)
+        if table is None:
+            raise RuntimeError("DeepSeek Responses session storage is unavailable")
+        return table
+
+    async def load(self, previous_response_id: str) -> DeepSeekResponsesSession | None:
+        if not self.supports_atomic_session:
+            return None
+        response_id = ResponsesAPIRequestUtils.decode_previous_response_id_to_original_previous_response_id(
+            previous_response_id
+        )
+        if not response_id:
+            return None
+        find_unique = getattr(self._table, "find_unique", None)
+        if not callable(find_unique):
+            raise RuntimeError("DeepSeek Responses session storage is unavailable")
+        record = await find_unique(where={"response_id": response_id})
+        if record is None or _record_field(record, "owner_id") != self._owner_id:
+            return None
+        encrypted_payload = _record_field(record, "encrypted_payload")
+        try:
+            payload = self._crypto().decrypt_json(
+                dict(encrypted_payload) if isinstance(encrypted_payload, Mapping) else {},
+                aad=response_id.encode(),
+            )
+        except Exception:
+            return None
+        session = _session_from_payload(payload)
+        return session if session is not None and session.is_valid_atomic_session(response_id) else None
+
+    async def commit(self, session: DeepSeekResponsesSession) -> None:
+        if not self.supports_atomic_session:
+            raise RuntimeError("DeepSeek Responses session storage is unavailable")
+        upsert = getattr(self._table, "upsert", None)
+        if not callable(upsert):
+            raise RuntimeError("DeepSeek Responses session storage is unavailable")
+        encrypted_payload = self._crypto().encrypt_json(session.payload(), aad=session.response_id.encode())
+        await upsert(
+            where={"response_id": session.response_id},
+            data={
+                "create": {
+                    "response_id": session.response_id,
+                    "owner_id": self._owner_id,
+                    "encrypted_payload": encrypted_payload,
+                },
+                "update": {
+                    "owner_id": self._owner_id,
+                    "encrypted_payload": encrypted_payload,
+                },
+            },
+        )
 
 
 class SpendLogDeepSeekResponsesSessionRepository:
@@ -128,6 +246,7 @@ class SpendLogDeepSeekResponsesSessionRepository:
 
 __all__ = [
     "DeepSeekResponsesSession",
+    "ProxyDeepSeekResponsesSessionRepository",
     "SpendLogDeepSeekResponsesSessionRepository",
     "create_deepseek_responses_session",
 ]

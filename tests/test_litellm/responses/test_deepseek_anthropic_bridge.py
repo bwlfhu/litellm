@@ -10,9 +10,11 @@ from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridg
 from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
 from litellm.responses.deepseek_session import (
     DeepSeekResponsesSession,
+    ProxyDeepSeekResponsesSessionRepository,
     SpendLogDeepSeekResponsesSessionRepository,
     create_deepseek_responses_session,
 )
+from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import DeploymentProtocolContext, DeploymentRateSnapshot, DeploymentReasoningProtocol
 
 
@@ -80,6 +82,29 @@ class _InMemorySessionRepository:
     def stage(self, proxy_server_request: object, response_id: str, messages: tuple[dict[str, object], ...]) -> None:
         del proxy_server_request
         self._sessions[response_id] = create_deepseek_responses_session(response_id, messages)
+
+
+class _ProxySessionTable:
+    def __init__(self):
+        self.records: dict[str, dict[str, object]] = {}
+
+    async def upsert(self, *, where: dict[str, str], data: dict[str, dict[str, object]]) -> None:
+        response_id = where["response_id"]
+        existing = self.records.get(response_id)
+        self.records[response_id] = dict(data["update"] if existing is not None else data["create"])
+
+    async def find_unique(self, *, where: dict[str, str]) -> dict[str, object] | None:
+        return self.records.get(where["response_id"])
+
+
+class _ProxySessionDatabase:
+    def __init__(self, table: _ProxySessionTable):
+        self.litellm_deepseekresponsessession = table
+
+
+class _ProxySessionClient:
+    def __init__(self, table: _ProxySessionTable):
+        self.db = _ProxySessionDatabase(table)
 
 
 class _RecordingResponsesLogging:
@@ -752,6 +777,7 @@ async def test_deepseek_responses_stream_completed_history_is_reconstructed_for_
     )
     events = [event async for event in stream]
     response_id = events[-1]["response"]["id"]
+    assert ResponsesAPIRequestUtils._decode_responses_api_response_id(response_id)["model_id"] == "deployment-a"
     await DeepSeekAnthropicResponsesBridge.response_api_handler(
         model="deepseek-v4-pro",
         input=[{"type": "function_call_output", "call_id": "call-1", "output": "value"}],
@@ -829,7 +855,10 @@ async def test_deepseek_responses_stream_records_one_parent_accounting_snapshot(
         "cache_read_input_cost_per_token": 0.01,
         "cache_creation_input_cost_per_token": 0.0,
     }
-    assert await session_repository.load(events[-1]["response"]["id"]) is not None
+    response_id = ResponsesAPIRequestUtils._decode_responses_api_response_id(events[-1]["response"]["id"])[
+        "response_id"
+    ]
+    assert await session_repository.load(response_id) is not None
 
 
 @pytest.mark.asyncio
@@ -957,6 +986,48 @@ async def test_deepseek_spend_log_session_requires_a_complete_atomic_manifest():
 
     spend_log_only = SpendLogDeepSeekResponsesSessionRepository()
     assert await spend_log_only.load("resp_persisted") is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_deepseek_session_repository_encrypts_and_scopes_atomic_history():
+    table = _ProxySessionTable()
+    client = _ProxySessionClient(table)
+
+    def key_loader() -> str:
+        return "test-session-encryption-key"
+
+    repository = ProxyDeepSeekResponsesSessionRepository(
+        prisma_client=client,
+        owner_id="hashed-owner-a",
+        encryption_key_loader=key_loader,
+    )
+    messages = (
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "private-reasoning-value"},
+                {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}]},
+    )
+    session = create_deepseek_responses_session("resp_persisted", messages, durability="atomic")
+
+    await repository.commit(session)
+
+    stored = table.records["resp_persisted"]
+    assert "private-reasoning-value" not in json.dumps(stored)
+    assert await repository.load("resp_persisted") == session
+
+    other_owner_repository = ProxyDeepSeekResponsesSessionRepository(
+        prisma_client=client,
+        owner_id="hashed-owner-b",
+        encryption_key_loader=key_loader,
+    )
+    assert await other_owner_repository.load("resp_persisted") is None
+
+    table.records["resp_persisted"]["encrypted_payload"] = {}
+    assert await repository.load("resp_persisted") is None
 
 
 def test_deepseek_responses_sync_stream_worker_forwards_events():

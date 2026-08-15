@@ -36,7 +36,7 @@ from litellm.responses.deepseek_streaming import (
     DeepSeekAnthropicResponsesAsyncStream,
     DeepSeekAnthropicResponsesSyncStream,
 )
-from litellm.responses.utils import ResponseAPILoggingUtils
+from litellm.responses.utils import ResponseAPILoggingUtils, ResponsesAPIRequestUtils
 from litellm.router_protocol import DeploymentProtocolContext
 from litellm.types.llms.openai import (
     ResponseAPIUsage,
@@ -266,7 +266,10 @@ async def _load_session_history(
     load = getattr(session_repository, "load", None)
     if not callable(load):
         raise DeepSeekProtocolError("reasoning_history_unrecoverable")
-    session = await load(previous_response_id)
+    response_id = ResponsesAPIRequestUtils.decode_previous_response_id_to_original_previous_response_id(
+        previous_response_id
+    )
+    session = await load(response_id)
     if session is None or not hasattr(session, "messages"):
         raise DeepSeekProtocolError("reasoning_history_unrecoverable")
     messages = getattr(session, "messages")
@@ -538,6 +541,19 @@ def _stream_terminal_response(
     )
 
 
+def _encoded_stream_response_id(
+    response_id: str,
+    *,
+    protocol_context: DeploymentProtocolContext,
+    custom_llm_provider: str | None,
+) -> str:
+    return ResponsesAPIRequestUtils._build_responses_api_response_id(
+        model_id=protocol_context.deployment_id,
+        custom_llm_provider=custom_llm_provider,
+        response_id=response_id,
+    )
+
+
 async def _dispatch_parent_success(
     logging_obj: object,
     response: ResponsesAPIResponse,
@@ -689,7 +705,6 @@ class DeepSeekAnthropicResponsesBridge:
         is_async: bool,
         kwargs: Mapping[str, object],
     ) -> object:
-        del custom_llm_provider
         reasoning = responses_api_request.get("reasoning")
         thinking, enabled = _effort_to_thinking(reasoning)
         previous_response_id = responses_api_request.get("previous_response_id")
@@ -757,7 +772,12 @@ class DeepSeekAnthropicResponsesBridge:
                 )
             raise error
         if stream:
-            response_id = f"resp_ds_{int(time.time() * 1000)}"
+            raw_response_id = f"resp_ds_{int(time.time() * 1000)}"
+            response_id = _encoded_stream_response_id(
+                raw_response_id,
+                protocol_context=protocol_context,
+                custom_llm_provider=custom_llm_provider,
+            )
 
             async def handle_stream_terminal(event: Mapping[str, object], output_started: bool) -> None:
                 raw_response = event.get("response")
@@ -798,7 +818,7 @@ class DeepSeekAnthropicResponsesBridge:
                     await _stage_session(
                         session_repository,
                         kwargs.get("proxy_server_request"),
-                        response_id,
+                        raw_response_id,
                         tuple(session_messages),
                         kwargs.get("litellm_logging_obj"),
                     )

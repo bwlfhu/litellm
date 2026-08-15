@@ -634,6 +634,16 @@ model LiteLLM_SpendLogs {
   @@index([session_id])
 }
 
+model LiteLLM_DeepSeekResponsesSession {
+  response_id       String   @id
+  owner_id          String
+  encrypted_payload Json
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  @@index([owner_id])
+}
+
 // View spend, model, api_key per request
 model LiteLLM_ErrorLogs {
   request_id          String   @id @default(uuid())
