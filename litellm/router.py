@@ -5043,6 +5043,11 @@ class Router:
         kwargs["_deepseek_parent_accounting_tracker"] = accounting_tracker
         kwargs["_deepseek_parent_accounting_owner"] = True
         kwargs["_deepseek_pre_output_stream_fallback"] = True
+        self._update_kwargs_before_fallbacks(
+            model=cast(str, kwargs["model"]),
+            kwargs=kwargs,
+            metadata_variable_name="litellm_metadata",
+        )
         fallback_kwargs: Dict[str, Any] = kwargs.copy()
         if isinstance(fallback_kwargs.get("litellm_metadata"), dict):
             fallback_kwargs["litellm_metadata"] = safe_deep_copy(fallback_kwargs["litellm_metadata"])
@@ -5096,6 +5101,12 @@ class Router:
         accounting_tracker = DeepSeekParentAccountingTracker()
         kwargs["_deepseek_parent_accounting_tracker"] = accounting_tracker
         kwargs["_deepseek_parent_accounting_owner"] = True
+        kwargs["_deepseek_pre_output_stream_fallback"] = True
+        self._update_kwargs_before_fallbacks(
+            model=cast(str, kwargs["model"]),
+            kwargs=kwargs,
+            metadata_variable_name="litellm_metadata",
+        )
         fallback_kwargs: Dict[str, Any] = kwargs.copy()
         if isinstance(fallback_kwargs.get("litellm_metadata"), dict):
             fallback_kwargs["litellm_metadata"] = safe_deep_copy(fallback_kwargs["litellm_metadata"])
@@ -5103,7 +5114,14 @@ class Router:
             fallback_kwargs["metadata"] = safe_deep_copy(fallback_kwargs["metadata"])
         fallback_kwargs["original_generic_function"] = original_function
         try:
-            response = self._generic_api_call_with_fallbacks(original_function=original_function, **kwargs)
+            def sync_original_function(model: str, **call_kwargs: object) -> object:
+                return self._generic_api_call_with_fallbacks(
+                    model=model,
+                    original_function=original_function,
+                    **call_kwargs,
+                )
+
+            response = self.function_with_fallbacks(original_function=sync_original_function, **kwargs)
         except BaseException as error:
             if accounting_tracker.has_attempts:
                 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
@@ -5200,6 +5218,13 @@ class Router:
                         **kwargs,
                     }
                 )
+
+            _record_native_responses_attempt(
+                kwargs,
+                response,
+                deployment=deployment,
+                model=model_name,
+            )
 
             self.success_calls[model_name] += 1
             verbose_router_logger.info(f"{handler_name}(model={model_name})\033[32m 200 OK\033[0m")

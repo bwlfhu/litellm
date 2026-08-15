@@ -364,3 +364,69 @@ async def test_router_aresponses_cross_provider_success_finalizes_deepseek_paren
     assert response.usage.input_tokens == 1
     assert response.usage.output_tokens == 1
     assert logging_obj.successes == [response]
+
+
+def test_router_responses_sync_cross_provider_success_finalizes_deepseek_parent(monkeypatch):
+    calls: list[str] = []
+    logging_obj = _RecordingResponsesLogging()
+
+    def fake_responses(*, model: str, **kwargs: object) -> ResponsesAPIResponse:
+        context = protocol_context_from_kwargs(kwargs)
+        calls.append(model)
+        if context is not None:
+            tracker = kwargs["_deepseek_parent_accounting_tracker"]
+            assert isinstance(tracker, DeepSeekParentAccountingTracker)
+            tracker.record_attempt(
+                build_attempt_snapshot(
+                    model=model,
+                    deployment_id=context.deployment_id,
+                    usage={},
+                    rates=context.rate_snapshot,
+                )
+            )
+            raise DeepSeekUpstreamError("connect_error", None)
+        return ResponsesAPIResponse(
+            id="native-sync-fallback",
+            created_at=0,
+            model=model,
+            object="response",
+            output=[],
+            status="completed",
+            usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
+
+    monkeypatch.setattr("litellm.responses", fake_responses)
+    router = Router(
+        model_list=[
+            {
+                "model_name": "primary",
+                "litellm_params": {"model": "anthropic/primary"},
+                "model_info": {"id": "primary-id", "reasoning_protocol": "deepseek_anthropic"},
+            },
+            {
+                "model_name": "backup",
+                "litellm_params": {"model": "openai/backup"},
+                "model_info": {
+                    "id": "backup-id",
+                    "input_cost_per_token": 0.1,
+                    "output_cost_per_token": 0.2,
+                },
+            },
+        ],
+        num_retries=0,
+    )
+
+    response = router.responses(
+        model="primary",
+        input="question",
+        stream=True,
+        fallbacks=["backup"],
+        litellm_logging_obj=logging_obj,
+    )
+
+    assert calls == ["anthropic/primary", "openai/backup"]
+    assert response._hidden_params["deepseek_parent_accounting"]["attempt_count"] == 2
+    assert response._hidden_params["response_cost"] == pytest.approx(0.3)
+    assert response.usage.input_tokens == 1
+    assert response.usage.output_tokens == 1
+    assert logging_obj.successes == [response]
