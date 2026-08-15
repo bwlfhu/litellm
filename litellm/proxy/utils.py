@@ -2579,6 +2579,10 @@ class ProxyLogging:
         logging_obj = request_data.get("litellm_logging_obj")
         if logging_obj is None:
             return
+        if request_data.get("_litellm_stream_terminal_failure") is True:
+            logging_obj._on_deferred_stream_complete = None
+            logging_obj._deferred_stream_complete_args = None
+            return
         _deferred_cb = getattr(logging_obj, "_on_deferred_stream_complete", None)
         _args = getattr(logging_obj, "_deferred_stream_complete_args", None)
         if _deferred_cb is not None and _args is not None:

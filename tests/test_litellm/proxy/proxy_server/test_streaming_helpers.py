@@ -16,6 +16,7 @@ Pins covered:
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -195,9 +196,7 @@ async def test_async_assistants_data_generator_hook_failure_yields_error_chunk(
     async def _noop_failure(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(
-        ps.proxy_logging_obj, "async_post_call_streaming_hook", _boom_hook
-    )
+    monkeypatch.setattr(ps.proxy_logging_obj, "async_post_call_streaming_hook", _boom_hook)
     monkeypatch.setattr(ps.proxy_logging_obj, "post_call_failure_hook", _noop_failure)
 
     stream = _FakeAssistantsStream([_simple_chunk()])
@@ -369,9 +368,7 @@ def test_get_streaming_fallback_metadata_no_additional_headers():
 def test_get_streaming_fallback_metadata_zero_fallback_count():
     stream = _FakeStream(
         [],
-        hidden_params={
-            "additional_headers": {"x-litellm-attempted-fallbacks": 0}
-        },
+        hidden_params={"additional_headers": {"x-litellm-attempted-fallbacks": 0}},
     )
     assert _get_streaming_fallback_metadata(stream) == (False, None, [])
 
@@ -540,9 +537,7 @@ async def test_apply_streaming_chunk_hooks_appends_to_str_so_far(monkeypatch):
     async def _passthrough(*, user_api_key_dict, response, data, str_so_far=None):
         return response
 
-    monkeypatch.setattr(
-        ps.proxy_logging_obj, "async_post_call_streaming_hook", _passthrough
-    )
+    monkeypatch.setattr(ps.proxy_logging_obj, "async_post_call_streaming_hook", _passthrough)
 
     new_chunk, new_str = await _apply_streaming_chunk_hooks(
         chunk=chunk,
@@ -686,6 +681,37 @@ async def test_async_data_generator_formats_responses_dict_as_valid_json_sse(mon
         "delta": "hi",
         "model": "deepseek-v4-pro",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_type", ["response.failed", "response.incomplete"])
+async def test_async_data_generator_records_responses_terminal_failure_without_success_logging(
+    monkeypatch, terminal_type
+):
+    failure_hook = AsyncMock()
+    deferred_logging = Mock()
+    monkeypatch.setattr(ps.proxy_logging_obj, "post_call_failure_hook", failure_hook)
+    monkeypatch.setattr(ps.proxy_logging_obj, "needs_iterator_wrap", lambda: False)
+    monkeypatch.setattr(ps.proxy_logging_obj, "needs_per_chunk_streaming_hook", lambda: False)
+    monkeypatch.setattr(ps.ProxyLogging, "_fire_deferred_stream_logging", deferred_logging)
+    request_data = {"_litellm_skip_openai_stream_done": True}
+
+    events = [
+        event
+        async for event in async_data_generator(
+            _async_iter([{"type": terminal_type, "response": {"id": "resp_1", "status": "failed"}}]),
+            _user_auth(),
+            request_data,
+        )
+    ]
+
+    assert [json.loads(event.removeprefix("data: ").strip()) for event in events] == [
+        {"type": terminal_type, "response": {"id": "resp_1", "status": "failed"}}
+    ]
+    assert request_data["_litellm_stream_terminal_failure"] is True
+    failure_hook.assert_awaited_once()
+    assert str(failure_hook.await_args.kwargs["original_exception"]) == f"Responses stream ended with {terminal_type}"
+    deferred_logging.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -875,9 +901,7 @@ async def test_async_data_generator_mid_stream_exception_yields_error_payload(
         out.append(line)
 
     # First entry is the successful "partial" chunk (bytes), last is the error.
-    assert any(
-        isinstance(item, str) and item.startswith('data: {"error":') for item in out
-    )
+    assert any(isinstance(item, str) and item.startswith('data: {"error":') for item in out)
 
 
 # ---------------------------------------------------------------------------

@@ -7295,6 +7295,7 @@ async def async_data_generator(
     verbose_proxy_logger.debug("inside generator")
     stream_completed = False
     client_disconnected = False
+    terminal_stream_error: Exception | None = None
     try:
         error_message: Optional[str] = None
         requested_model_from_client = _get_client_requested_model_for_streaming(request_data=request_data)
@@ -7373,6 +7374,8 @@ async def async_data_generator(
                 fallback_model_from_metadata=fallback_model_from_metadata,
             )
 
+            terminal_event_type = chunk.get("type") if isinstance(chunk, Mapping) else None
+            terminal_responses_event = terminal_event_type in {"response.failed", "response.incomplete"}
             raw_passthrough = False
             if isinstance(chunk, (BaseModel, Mapping)):
                 chunk = _serialize_streaming_chunk(chunk)
@@ -7411,6 +7414,10 @@ async def async_data_generator(
                 except Exception as e:
                     yield f"data: {str(e)}\n\n"
 
+            if terminal_responses_event:
+                request_data["_litellm_stream_terminal_failure"] = True
+                terminal_stream_error = RuntimeError(f"Responses stream ended with {terminal_event_type}")
+
             if pending_fallback_event:
                 yield _format_fallback_metadata_sse_event(
                     fallback_model=fallback_model_from_metadata,
@@ -7419,7 +7426,13 @@ async def async_data_generator(
                 fallback_metadata_event_sent = True
 
         stream_completed = True
-        if not needs_iterator_wrap:
+        if terminal_stream_error is not None:
+            await proxy_logging_obj.post_call_failure_hook(
+                user_api_key_dict=user_api_key_dict,
+                original_exception=terminal_stream_error,
+                request_data=request_data,
+            )
+        elif not needs_iterator_wrap:
             # The iterator-wrap path fires deferred logging itself; fire it
             # here for the no-wrap fast path so non-callback deployments
             # still flush their post-stream logging.
