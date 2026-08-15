@@ -171,6 +171,10 @@ def _build_rate_snapshot(model_info: Mapping[str, object]) -> DeploymentRateSnap
     )
 
 
+def deployment_rate_snapshot(model_info: Mapping[str, object]) -> DeploymentRateSnapshot:
+    return _build_rate_snapshot(model_info)
+
+
 def _suffix_token_budget(model_info: Mapping[str, object]) -> int:
     configured_budget = model_info.get(_SUFFIX_TOKEN_BUDGET_FIELD)
     if isinstance(configured_budget, int) and not isinstance(configured_budget, bool) and configured_budget >= 0:
@@ -240,6 +244,7 @@ __all__ = [
     "DeploymentProtocolContext",
     "DeploymentRateSnapshot",
     "DeploymentReasoningProtocol",
+    "deployment_rate_snapshot",
     "protocol_context_from_kwargs",
     "resolve_deployment_protocol",
     "sanitize_model_info",

@@ -188,6 +188,38 @@ def _redact_standard_logging_object(model_call_details: dict):
             standard_logging_object["response"] = {"text": redacted_str}
 
 
+def _redact_deepseek_session_payload(payload: object, redacted_str: str) -> object:
+    if not isinstance(payload, dict):
+        return redacted_str
+    redacted = copy.deepcopy(payload)
+    messages = redacted.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for content_item in content:
+                if isinstance(content_item, dict) and content_item.get("type") == "thinking":
+                    content_item["thinking"] = redacted_str
+    redacted["durability"] = "redacted"
+    return redacted
+
+
+def _redact_deepseek_session_fields(value: object, redacted_str: str) -> None:
+    if not isinstance(value, dict):
+        return
+    for key, nested in tuple(value.items()):
+        if key in {"_deepseek_anthropic_session", "deepseek_session_record"}:
+            value[key] = _redact_deepseek_session_payload(nested, redacted_str)
+        elif isinstance(nested, dict):
+            _redact_deepseek_session_fields(nested, redacted_str)
+        elif isinstance(nested, list):
+            for item in nested:
+                _redact_deepseek_session_fields(item, redacted_str)
+
+
 def _redact_tool_calls_dict(message: dict, redacted_str: str) -> None:
     """Redact tool call / function_call arguments in a dict-form message or delta."""
     tool_calls = message.get("tool_calls")
@@ -239,6 +271,7 @@ def perform_redaction(model_call_details: dict, result, redact_streaming_respons
     model_call_details["prompt"] = ""
     model_call_details["input"] = ""
     _redact_standard_logging_object(model_call_details)
+    _redact_deepseek_session_fields(model_call_details, "redacted-by-litellm")
     redact_vertex_ai_metadata_from_litellm_params(model_call_details)
 
     # Redact streaming response

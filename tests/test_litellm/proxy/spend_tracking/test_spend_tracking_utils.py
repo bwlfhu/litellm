@@ -167,6 +167,29 @@ def test_sanitize_request_body_for_spend_logs_payload_nested_dict():
     assert sanitized["outer"]["inner"]["normal"] == "short"
 
 
+def test_sanitize_request_body_redacts_deepseek_session_reasoning_without_digest_recovery():
+    request_body = {
+        "_deepseek_anthropic_session": {
+            "version": 1,
+            "response_id": "resp-session",
+            "history_reasoning_required": True,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": "reasoning-secret"}],
+                }
+            ],
+            "suffix_manifest": {"version": 1, "digest": "digest", "token_count": 1},
+        }
+    }
+
+    sanitized = _sanitize_request_body_for_spend_logs_payload(request_body)
+    session = sanitized["_deepseek_anthropic_session"]
+    assert "reasoning-secret" not in json.dumps(sanitized)
+    assert session["durability"] == "redacted"
+    assert session[LITELLM_TRUNCATED_PAYLOAD_FIELD]
+
+
 def test_sanitize_request_body_for_spend_logs_payload_nested_list():
     from litellm.constants import MAX_STRING_LENGTH_PROMPT_IN_DB
 

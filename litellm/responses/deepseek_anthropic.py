@@ -38,7 +38,12 @@ from litellm.responses.deepseek_streaming import (
 )
 from litellm.responses.utils import ResponseAPILoggingUtils
 from litellm.router_protocol import DeploymentProtocolContext
-from litellm.types.llms.openai import ResponseInputParam, ResponsesAPIOptionalRequestParams, ResponsesAPIResponse
+from litellm.types.llms.openai import (
+    ResponseAPIUsage,
+    ResponseInputParam,
+    ResponsesAPIOptionalRequestParams,
+    ResponsesAPIResponse,
+)
 from litellm.types.router import GenericLiteLLMParams
 
 _PROTOCOL_INTEGRITY_CODES = frozenset(
@@ -275,7 +280,7 @@ def _session_repository_from_kwargs(kwargs: Mapping[str, object]) -> object:
     return repository if repository is not None else SpendLogDeepSeekResponsesSessionRepository()
 
 
-def _stage_session(
+async def _stage_session(
     session_repository: object,
     proxy_server_request: object,
     response_id: str,
@@ -287,31 +292,34 @@ def _stage_session(
         litellm_params = model_call_details.get("litellm_params")
         if isinstance(litellm_params, dict):
             proxy_server_request = litellm_params.get("proxy_server_request")
-    stage = getattr(session_repository, "stage", None)
-    if callable(stage):
-        payload = stage(proxy_server_request, response_id, messages)
-        if payload is None:
-            payload = create_deepseek_responses_session(response_id, messages).payload()
-        if not isinstance(payload, Mapping):
-            return
-        # Keep the immutable session record attached to the parent logging
-        # object as well as proxy_server_request. This lets the normal
-        # SpendLog writer persist the response record and its manifest in one
-        # lifecycle, even when it snapshots request metadata late.
-        if isinstance(model_call_details, dict):
-            model_call_details["deepseek_session_record"] = deepcopy(dict(payload))
-            litellm_params = model_call_details.get("litellm_params")
-            if isinstance(litellm_params, dict):
-                proxy_request = litellm_params.get("proxy_server_request")
-                if not isinstance(proxy_request, dict):
-                    proxy_request = {}
-                body = proxy_request.get("body")
-                if not isinstance(body, dict):
-                    body = {}
-                litellm_params["proxy_server_request"] = {
-                    **proxy_request,
-                    "body": {**body, "_deepseek_anthropic_session": deepcopy(dict(payload))},
-                }
+    requires_atomic = getattr(session_repository, "requires_atomic_session", False)
+    supports_atomic = getattr(session_repository, "supports_atomic_session", True)
+    if requires_atomic is True and supports_atomic is not True:
+        return
+    commit = getattr(session_repository, "commit", None)
+    if not callable(commit):
+        return
+    session = create_deepseek_responses_session(response_id, messages, durability="atomic")
+    result = commit(session)
+    if isawaitable(result):
+        await result
+    payload = SpendLogDeepSeekResponsesSessionRepository.stage(proxy_server_request, response_id, messages)
+    if not isinstance(model_call_details, dict):
+        return
+    model_call_details["deepseek_session_record"] = deepcopy(payload)
+    litellm_params = model_call_details.get("litellm_params")
+    if not isinstance(litellm_params, dict):
+        return
+    proxy_request = litellm_params.get("proxy_server_request")
+    if not isinstance(proxy_request, dict):
+        proxy_request = {}
+    body = proxy_request.get("body")
+    if not isinstance(body, dict):
+        body = {}
+    litellm_params["proxy_server_request"] = {
+        **proxy_request,
+        "body": {**body, "_deepseek_anthropic_session": deepcopy(payload)},
+    }
 
 
 def _bridge_optional_params(
@@ -482,6 +490,7 @@ def _apply_parent_accounting(
     logging_obj: object,
 ) -> None:
     summary = accounting.spend_log_summary()
+    response.usage = ResponseAPIUsage(**_responses_usage(accounting))
     response._hidden_params["response_cost"] = accounting.cost
     response._hidden_params["deepseek_parent_accounting"] = summary
     _apply_parent_accounting_to_logging(accounting, logging_obj, response.usage)
@@ -786,7 +795,7 @@ class DeepSeekAnthropicResponsesBridge:
                 if assistant_content:
                     session_messages = list(canonical.messages)
                     session_messages.append({"role": "assistant", "content": assistant_content})
-                    _stage_session(
+                    await _stage_session(
                         session_repository,
                         kwargs.get("proxy_server_request"),
                         response_id,
@@ -830,7 +839,7 @@ class DeepSeekAnthropicResponsesBridge:
         if response_obj.status == "completed" and isinstance(assistant_content, list):
             session_messages = list(canonical.messages)
             session_messages.append({"role": "assistant", "content": assistant_content})
-            _stage_session(
+            await _stage_session(
                 session_repository,
                 kwargs.get("proxy_server_request"),
                 response_obj.id,

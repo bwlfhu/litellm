@@ -113,6 +113,24 @@ def _initialize_deepseek_anthropic_responses_logging(
     )
 
 
+def _finalize_deepseek_anthropic_response(
+    response: object,
+    *,
+    litellm_metadata: object,
+    custom_llm_provider: Optional[str],
+) -> object:
+    if not isinstance(response, ResponsesAPIResponse):
+        return response
+    metadata = litellm_metadata if isinstance(litellm_metadata, dict) else {}
+    finalized = ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id(
+        responses_api_response=response,
+        litellm_metadata=metadata,
+        custom_llm_provider=custom_llm_provider,
+    )
+    finalized._hidden_params["custom_llm_provider"] = custom_llm_provider
+    return finalized
+
+
 def _has_file_search_tool(tools: Optional[Any]) -> bool:
     """Return True if any tool in the list has type 'file_search'."""
     if not tools:
@@ -586,15 +604,11 @@ async def aresponses(
             response = init_response
 
         # Update the responses_api_response_id with the model_id
-        if isinstance(response, ResponsesAPIResponse):
-            response = ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id(
-                responses_api_response=response,
-                litellm_metadata=kwargs.get("litellm_metadata", {}),
-                custom_llm_provider=custom_llm_provider,
-            )
-            # Stamp custom_llm_provider so callbacks can identify the provider
-            # (mirrors litellm/main.py:1371 for chat completions)
-            response._hidden_params["custom_llm_provider"] = custom_llm_provider
+        response = _finalize_deepseek_anthropic_response(
+            response,
+            litellm_metadata=kwargs.get("litellm_metadata", {}),
+            custom_llm_provider=custom_llm_provider,
+        )
 
         if response is None:
             raise ValueError(f"Got an unexpected None response from the Responses API: {response}")
@@ -1138,7 +1152,7 @@ def responses(
                 litellm_call_id=litellm_call_id,
                 api_base=litellm_params.api_base,
             )
-            return DeepSeekAnthropicResponsesBridge.response_api_handler(
+            response = DeepSeekAnthropicResponsesBridge.response_api_handler(
                 model=model,
                 input=input,
                 responses_api_request=response_api_optional_params,
@@ -1147,6 +1161,11 @@ def responses(
                 stream=stream,
                 protocol_context=protocol_context,
                 **kwargs,
+            )
+            return _finalize_deepseek_anthropic_response(
+                response,
+                litellm_metadata=kwargs.get("litellm_metadata", {}),
+                custom_llm_provider=custom_llm_provider,
             )
 
         if responses_api_provider_config is None or use_chat_completions_api is True:

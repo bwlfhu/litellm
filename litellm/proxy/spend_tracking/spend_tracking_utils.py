@@ -691,6 +691,24 @@ def _sanitize_request_body_for_spend_logs_payload(
         return {}
     visited.add(obj_id)
 
+    def _sanitize_deepseek_session(value: Any) -> Any:
+        if isinstance(value, dict):
+            manifest = value.get("suffix_manifest")
+            safe_manifest = (
+                {key: manifest[key] for key in ("version", "digest", "token_count") if key in manifest}
+                if isinstance(manifest, dict)
+                else None
+            )
+            return {
+                "version": value.get("version"),
+                "response_id": value.get("response_id"),
+                "history_reasoning_required": value.get("history_reasoning_required"),
+                "suffix_manifest": safe_manifest,
+                "durability": "redacted",
+                LITELLM_TRUNCATED_PAYLOAD_FIELD: "deepseek session moved to atomic storage",
+            }
+        return "redacted-by-litellm"
+
     def _sanitize_value(value: Any) -> Any:
         if isinstance(value, dict):
             return _sanitize_request_body_for_spend_logs_payload(value, visited, max_string_length_prompt_in_db)
@@ -730,7 +748,11 @@ def _sanitize_request_body_for_spend_logs_payload(
             return value
         return value
 
-    return {k: _sanitize_value(v) for k, v in request_body.items() if k not in _SENSITIVE_REQUEST_BODY_KEYS}
+    return {
+        k: _sanitize_deepseek_session(v) if k == "_deepseek_anthropic_session" else _sanitize_value(v)
+        for k, v in request_body.items()
+        if k not in _SENSITIVE_REQUEST_BODY_KEYS
+    }
 
 
 # Quoted-key form: ``"input"`` / ``'messages'`` / ``"prompt"`` followed by

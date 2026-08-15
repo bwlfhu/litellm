@@ -100,6 +100,7 @@ from litellm.router_protocol import (
     DeploymentProtocolContext,
     _activate_router_protocol_context,
     _build_deployment_protocol_context,
+    deployment_rate_snapshot,
     sanitize_model_info,
 )
 from litellm.router_utils.add_retry_fallback_headers import (
@@ -277,17 +278,71 @@ def _cost_value_as_float(value: Union[str, int, float, None]) -> Optional[float]
         return None
 
 
-def _has_deepseek_parent_accounting(response: object) -> bool:
-    """Return whether a Responses result was finalized by the DeepSeek bridge.
+def _response_usage_mapping(response: object) -> Mapping[str, object] | None:
+    usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    if isinstance(usage, Mapping):
+        return usage
+    model_dump = getattr(usage, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump()
+        return dumped if isinstance(dumped, Mapping) else None
+    return None
 
-    Router fallback chains can cross from a DeepSeek deployment to a native
-    Responses provider. The shared parent tracker is present for the whole
-    request, but a native provider must retain ownership of its own logging
-    and cost lifecycle. The bridge's private accounting marker is therefore
-    the authoritative result-side capability for the DeepSeek finalizer.
-    """
-    hidden_params = getattr(response, "_hidden_params", None)
-    return isinstance(hidden_params, dict) and isinstance(hidden_params.get("deepseek_parent_accounting"), dict)
+
+def _record_native_responses_attempt(
+    kwargs: Mapping[str, object],
+    response: object,
+    *,
+    deployment: object = None,
+    model: object = None,
+) -> None:
+    from litellm.responses.deepseek_accounting import (
+        AttemptRateSnapshot,
+        DeepSeekParentAccountingTracker,
+        build_attempt_snapshot,
+    )
+
+    tracker = kwargs.get("_deepseek_parent_accounting_tracker")
+    if not isinstance(tracker, DeepSeekParentAccountingTracker) or not tracker.parent_started:
+        return
+    if isinstance(kwargs.get("_litellm_deployment_protocol_context"), DeploymentProtocolContext):
+        return
+    event_response = response.get("response") if isinstance(response, Mapping) else getattr(response, "response", None)
+    if event_response is not None:
+        event_usage = _response_usage_mapping(event_response)
+        if event_usage is not None:
+            tracker.record_native_usage(event_usage)
+            return
+    deployment_info = deployment.get("model_info") if isinstance(deployment, Mapping) else None
+    metadata = kwargs.get("litellm_metadata")
+    metadata_info = metadata.get("model_info") if isinstance(metadata, Mapping) else None
+    model_info = deployment_info if isinstance(deployment_info, Mapping) else metadata_info
+    if not isinstance(model_info, Mapping):
+        return
+    deployment_id = model_info.get("id")
+    selected_model = model if isinstance(model, str) else kwargs.get("model")
+    if not isinstance(deployment_id, str) or not deployment_id or not isinstance(selected_model, str):
+        return
+    rates = deployment_rate_snapshot(model_info)
+    attempt_rates = AttemptRateSnapshot(
+        input_cost_per_token=rates.input_cost_per_token,
+        output_cost_per_token=rates.output_cost_per_token,
+        cache_read_input_cost_per_token=rates.cache_read_input_cost_per_token,
+        cache_creation_input_cost_per_token=rates.cache_creation_input_cost_per_token,
+    )
+    usage = _response_usage_mapping(response)
+    if usage is None:
+        if kwargs.get("stream") is True:
+            tracker.register_native_attempt(selected_model, deployment_id, attempt_rates)
+        return
+    tracker.record_attempt(
+        build_attempt_snapshot(
+            model=selected_model,
+            deployment_id=deployment_id,
+            usage=usage,
+            rates=attempt_rates,
+        )
+    )
 
 
 def _has_deepseek_protocol_context(kwargs: Mapping[str, object]) -> bool:
@@ -2618,6 +2673,7 @@ class Router:
                         try:
                             async for fallback_item in iterator_or_response:  # type: ignore
                                 Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
+                                _record_native_responses_attempt(initial_kwargs, fallback_item)
                                 if partial_usage is not None:
                                     Router._combine_responses_fallback_usage(fallback_item, partial_usage)
                                 yield fallback_item
@@ -2837,6 +2893,7 @@ class Router:
                             fallback_iterator = cast(Iterator[Any], iterator_or_response)
                             for fallback_item in fallback_iterator:
                                 Router._apply_fallback_hidden_params_to_item(fallback_item, prepared_hidden_params)
+                                _record_native_responses_attempt(initial_kwargs, fallback_item)
                                 yield fallback_item
                         except MidStreamFallbackError as next_error:
                             next_index = candidate_index + 1
@@ -3406,6 +3463,9 @@ class Router:
         kwargs.pop("_litellm_deployment_protocol_context", None)
         if protocol_context is not None:
             kwargs["_litellm_deployment_protocol_context"] = protocol_context
+            accounting_tracker = kwargs.get("_deepseek_parent_accounting_tracker")
+            if accounting_tracker is not None and hasattr(accounting_tracker, "mark_deepseek_parent"):
+                accounting_tracker.mark_deepseek_parent()
         model_info = sanitize_model_info(model_info)
         deployment_litellm_model_name = deployment["litellm_params"]["model"]
         deployment_api_base = deployment["litellm_params"].get("api_base")
@@ -4925,6 +4985,13 @@ class Router:
                     )
                     response = await response  # type: ignore
 
+            _record_native_responses_attempt(
+                kwargs,
+                response,
+                deployment=deployment,
+                model=model_name,
+            )
+
             self.success_calls[model_name] += 1
             verbose_router_logger.info(f"ageneric_api_call_with_fallbacks(model={model_name})\033[32m 200 OK\033[0m")
 
@@ -5004,7 +5071,7 @@ class Router:
                 response=response,
                 initial_kwargs=fallback_kwargs,
             )
-        if accounting_tracker.has_attempts and _has_deepseek_parent_accounting(response):
+        if accounting_tracker.parent_started and accounting_tracker.has_attempts:
             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 
             await DeepSeekAnthropicResponsesBridge.finalize_router_success(
@@ -5052,7 +5119,7 @@ class Router:
         if (
             not isinstance(response, DeepSeekAnthropicResponsesSyncStream)
             and accounting_tracker.has_attempts
-            and _has_deepseek_parent_accounting(response)
+            and accounting_tracker.parent_started
         ):
             from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 

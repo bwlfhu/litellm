@@ -90,6 +90,8 @@ class ParentAccounting:
 class DeepSeekParentAccountingTracker:
     _accounting: ParentAccounting = ParentAccounting()
     _finalized: bool = False
+    _deepseek_parent_started: bool = False
+    _pending_native_attempts: tuple[tuple[str, str, AttemptRateSnapshot], ...] = ()
 
     @property
     def accounting(self) -> ParentAccounting:
@@ -98,6 +100,25 @@ class DeepSeekParentAccountingTracker:
     @property
     def has_attempts(self) -> bool:
         return bool(self._accounting.attempts)
+
+    @property
+    def parent_started(self) -> bool:
+        return self._deepseek_parent_started
+
+    def mark_deepseek_parent(self) -> None:
+        self._deepseek_parent_started = True
+
+    def register_native_attempt(self, model: str, deployment_id: str, rates: AttemptRateSnapshot) -> None:
+        self._pending_native_attempts = self._pending_native_attempts + ((model, deployment_id, rates),)
+
+    def record_native_usage(self, usage: Mapping[str, object]) -> ParentAccounting:
+        if not self._pending_native_attempts:
+            return self._accounting
+        model, deployment_id, rates = self._pending_native_attempts[0]
+        self._pending_native_attempts = self._pending_native_attempts[1:]
+        return self.record_attempt(
+            build_attempt_snapshot(model=model, deployment_id=deployment_id, usage=usage, rates=rates)
+        )
 
     def record_attempt(self, snapshot: AttemptAccountingSnapshot) -> ParentAccounting:
         self._accounting = self._accounting.add_attempt(snapshot)

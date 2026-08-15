@@ -53,6 +53,33 @@ def _make_model_call_details(
     return details
 
 
+def test_perform_redaction_removes_nested_deepseek_session_reasoning():
+    details = {
+        "deepseek_session_record": {
+            "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "secret"}]}]
+        },
+        "litellm_params": {
+            "proxy_server_request": {
+                "body": {
+                    "_deepseek_anthropic_session": {
+                        "messages": [
+                            {"role": "assistant", "content": [{"type": "thinking", "thinking": "secret"}]}
+                        ]
+                    }
+                }
+            }
+        },
+    }
+
+    perform_redaction(details, None)
+
+    assert details["deepseek_session_record"]["messages"][0]["content"][0]["thinking"] == "redacted-by-litellm"
+    assert (
+        details["litellm_params"]["proxy_server_request"]["body"]["_deepseek_anthropic_session"]["durability"]
+        == "redacted"
+    )
+
+
 class TestShouldRedactMessageLogging:
     """Unit tests for should_redact_message_logging()."""
 

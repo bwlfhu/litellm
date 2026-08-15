@@ -9,6 +9,7 @@ from litellm.llms.deepseek.anthropic_protocol import DeepSeekProtocolError, Deep
 from litellm.responses.deepseek_anthropic import DeepSeekAnthropicResponsesBridge
 from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker
 from litellm.responses.deepseek_session import (
+    DeepSeekResponsesSession,
     SpendLogDeepSeekResponsesSessionRepository,
     create_deepseek_responses_session,
 )
@@ -72,6 +73,9 @@ class _InMemorySessionRepository:
 
     async def load(self, response_id: str) -> object | None:
         return self._sessions.get(response_id)
+
+    async def commit(self, session: DeepSeekResponsesSession) -> None:
+        self._sessions[session.response_id] = session
 
     def stage(self, proxy_server_request: object, response_id: str, messages: tuple[dict[str, object], ...]) -> None:
         del proxy_server_request
@@ -520,8 +524,49 @@ async def test_deepseek_session_manifest_is_attached_to_spend_log_proxy_request(
     stored = await repository.load(response.id)
     persisted_request = logging_obj.model_call_details["litellm_params"]["proxy_server_request"]
     assert stored is not None
-    assert persisted_request["body"]["_deepseek_anthropic_session"] == stored.payload()
-    assert logging_obj.model_call_details["deepseek_session_record"] == stored.payload()
+    marker = persisted_request["body"]["_deepseek_anthropic_session"]
+    assert marker == stored.spend_log_marker()
+    assert logging_obj.model_call_details["deepseek_session_record"] == marker
+    assert "messages" not in marker
+    assert '"thinking": "reason"' not in json.dumps(logging_obj.model_call_details, default=str)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_session_without_atomic_repository_does_not_stage_reasoning():
+    logging_obj = _RecordingResponsesLogging()
+    logging_obj.model_call_details = {"litellm_params": {"proxy_server_request": {"body": {"input": "question"}}}}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_no_atomic_session",
+                "content": [
+                    {"type": "thinking", "thinking": "reason"},
+                    {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context(),
+        litellm_logging_obj=logging_obj,
+        client=client,
+    )
+    await client.aclose()
+
+    body = logging_obj.model_call_details["litellm_params"]["proxy_server_request"]["body"]
+    assert "_deepseek_anthropic_session" not in body
+    assert "deepseek_session_record" not in logging_obj.model_call_details
 
 
 @pytest.mark.asyncio
@@ -870,6 +915,7 @@ async def test_deepseek_responses_stream_incomplete_records_parent_failure_witho
 @pytest.mark.asyncio
 async def test_deepseek_spend_log_session_requires_a_complete_atomic_manifest():
     proxy_server_request = {"body": {}}
+    atomic_sessions: dict[str, DeepSeekResponsesSession] = {}
     messages = (
         {
             "role": "assistant",
@@ -880,23 +926,30 @@ async def test_deepseek_spend_log_session_requires_a_complete_atomic_manifest():
         },
     )
 
-    async def load_spend_logs(response_id: str) -> list[dict[str, object]]:
-        assert response_id == "resp_persisted"
-        return [{"request_id": "resp_persisted"}]
+    async def load_atomic_session(response_id: str) -> DeepSeekResponsesSession | None:
+        return atomic_sessions.get(response_id)
 
-    async def load_proxy_request(spend_log: dict[str, object]) -> dict[str, object]:
-        assert spend_log["request_id"] == "resp_persisted"
-        return proxy_server_request["body"]
+    async def commit_atomic_session(session: DeepSeekResponsesSession) -> None:
+        atomic_sessions[session.response_id] = session
 
-    repository = SpendLogDeepSeekResponsesSessionRepository(load_spend_logs, load_proxy_request)
-    repository.stage(proxy_server_request, "resp_persisted", messages)
+    repository = SpendLogDeepSeekResponsesSessionRepository(
+        load_atomic_session=load_atomic_session,
+        commit_atomic_session=commit_atomic_session,
+    )
+    await repository.commit(create_deepseek_responses_session("resp_persisted", messages))
+    marker = repository.stage(proxy_server_request, "resp_persisted", messages)
 
     loaded = await repository.load("resp_persisted")
     assert loaded is not None
     assert loaded.messages == messages
     assert loaded.suffix_manifest is not None
+    assert loaded.durability == "atomic"
+    assert "messages" not in marker
     proxy_server_request["body"]["_deepseek_anthropic_session"]["suffix_manifest"]["digest"] = "bad"
-    assert await repository.load("resp_persisted") is None
+    assert await repository.load("resp_persisted") is not None
+
+    spend_log_only = SpendLogDeepSeekResponsesSessionRepository()
+    assert await spend_log_only.load("resp_persisted") is None
 
 
 def test_deepseek_responses_sync_stream_worker_forwards_events():

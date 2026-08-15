@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 
 from litellm.llms.deepseek.anthropic_protocol import (
@@ -5,8 +7,10 @@ from litellm.llms.deepseek.anthropic_protocol import (
     DeepSeekProtocolNonFallbackError,
     DeepSeekUpstreamError,
 )
+from litellm.llms.deepseek.responses_transport import DeepSeekRawResponse
 from litellm.router import Router
 from litellm.responses.deepseek_accounting import DeepSeekParentAccountingTracker, build_attempt_snapshot
+from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.router_protocol import protocol_context_from_kwargs
 from litellm.types.llms.openai import ResponsesAPIResponse
 
@@ -252,11 +256,52 @@ def test_router_responses_does_not_fallback_after_public_protocol_error_mapping(
     assert router.total_calls["anthropic/backup"] == 0
 
 
+def test_router_responses_encodes_deepseek_response_id(monkeypatch):
+    async def fake_send(*args: object) -> DeepSeekRawResponse:
+        import httpx
+
+        return DeepSeekRawResponse(
+            httpx.Response(
+                200,
+                json={
+                    "id": "resp-upstream",
+                    "content": [{"type": "text", "text": "answer"}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "stop_reason": "end_turn",
+                },
+            )
+        )
+
+    bridge_module = importlib.import_module("litellm.responses.deepseek_anthropic")
+    monkeypatch.setattr(bridge_module.DeepSeekResponsesRawTransport, "send", fake_send)
+    router = Router(
+        model_list=[
+            {
+                "model_name": "primary",
+                "litellm_params": {
+                    "model": "anthropic/primary",
+                    "api_base": "https://test.invalid",
+                    "api_key": "test-key",
+                },
+                "model_info": {"id": "primary-id", "reasoning_protocol": "deepseek_anthropic"},
+            }
+        ],
+        num_retries=0,
+    )
+
+    response = router.responses(model="primary", input="question")
+
+    decoded = ResponsesAPIRequestUtils._decode_responses_api_response_id(response.id)
+    assert decoded["response_id"] == "resp-upstream"
+    assert decoded["model_id"] == "primary-id"
+    assert response._hidden_params["custom_llm_provider"] == "anthropic"
+
+
 @pytest.mark.asyncio
-async def test_router_aresponses_cross_provider_success_does_not_finalize_deepseek_parent(
+async def test_router_aresponses_cross_provider_success_finalizes_deepseek_parent(
     monkeypatch,
 ):
-    """A native Responses fallback owns its own logging/cost lifecycle."""
+    """A native Responses fallback is folded into the DeepSeek parent lifecycle."""
     calls: list[str] = []
     logging_obj = _RecordingResponsesLogging()
 
@@ -296,7 +341,11 @@ async def test_router_aresponses_cross_provider_success_does_not_finalize_deepse
             {
                 "model_name": "backup",
                 "litellm_params": {"model": "openai/backup"},
-                "model_info": {"id": "backup-id"},
+                "model_info": {
+                    "id": "backup-id",
+                    "input_cost_per_token": 0.1,
+                    "output_cost_per_token": 0.2,
+                },
             },
         ],
         num_retries=0,
@@ -310,6 +359,8 @@ async def test_router_aresponses_cross_provider_success_does_not_finalize_deepse
     )
 
     assert calls == ["anthropic/primary", "openai/backup"]
-    assert response._hidden_params.get("deepseek_parent_accounting") is None
-    assert response._hidden_params.get("response_cost") is None
-    assert logging_obj.successes == []
+    assert response._hidden_params["deepseek_parent_accounting"]["attempt_count"] == 2
+    assert response._hidden_params["response_cost"] == pytest.approx(0.3)
+    assert response.usage.input_tokens == 1
+    assert response.usage.output_tokens == 1
+    assert logging_obj.successes == [response]
