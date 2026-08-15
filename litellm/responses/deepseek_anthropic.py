@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime
 from inspect import isawaitable
 from typing import Mapping
+from uuid import uuid4
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
@@ -58,6 +59,10 @@ _PROTOCOL_INTEGRITY_CODES = frozenset(
     }
 )
 _JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, object])
+
+
+def _new_deepseek_response_id() -> str:
+    return f"resp_ds_{uuid4().hex}"
 
 
 def _error_code_from_upstream_body(body: bytes) -> str | None:
@@ -374,7 +379,7 @@ def _anthropic_response_to_responses(
     request: ResponsesAPIOptionalRequestParams,
     accounting: ParentAccounting,
 ) -> ResponsesAPIResponse:
-    response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"resp_ds_{int(time.time() * 1000)}"
+    response_id = payload.get("id") if isinstance(payload.get("id"), str) else _new_deepseek_response_id()
     content_value = payload.get("content")
     content: list[object] = content_value if isinstance(content_value, list) else []
     output: list[dict[str, object]] = []
@@ -525,7 +530,7 @@ def _stream_terminal_response(
     request: ResponsesAPIOptionalRequestParams,
     accounting: ParentAccounting,
 ) -> ResponsesAPIResponse:
-    response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"resp_ds_{int(time.time() * 1000)}"
+    response_id = payload.get("id") if isinstance(payload.get("id"), str) else _new_deepseek_response_id()
     output = payload.get("output") if isinstance(payload.get("output"), list) else []
     status = payload.get("status") if isinstance(payload.get("status"), str) else "failed"
     return ResponsesAPIResponse(
@@ -774,7 +779,7 @@ class DeepSeekAnthropicResponsesBridge:
                 )
             raise error
         if stream:
-            raw_response_id = f"resp_ds_{int(time.time() * 1000)}"
+            raw_response_id = _new_deepseek_response_id()
             response_id = _encoded_stream_response_id(
                 raw_response_id,
                 protocol_context=protocol_context,

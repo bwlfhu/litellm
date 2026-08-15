@@ -1,3 +1,4 @@
+import importlib
 import json
 
 import httpx
@@ -1025,9 +1026,67 @@ async def test_proxy_deepseek_session_repository_encrypts_and_scopes_atomic_hist
         encryption_key_loader=key_loader,
     )
     assert await other_owner_repository.load("resp_persisted") is None
+    table.records["resp_persisted"]["owner_id"] = "hashed-owner-b"
+    assert await other_owner_repository.load("resp_persisted") is None
+    table.records["resp_persisted"]["owner_id"] = "hashed-owner-a"
+    assert await repository.load("resp_persisted") == session
 
     table.records["resp_persisted"]["encrypted_payload"] = {}
     assert await repository.load("resp_persisted") is None
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_response_ids_remain_unique_when_the_clock_collides(monkeypatch):
+    session_repository = _InMemorySessionRepository()
+    sse = (
+        "event: content_block_start\n"
+        'data: {"index":0,"content_block":{"type":"text"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"index":0,"delta":{"type":"text_delta","text":"answer"}}\n\n'
+        "event: message_stop\n"
+        "data: {}\n\n"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, content=sse)
+
+    bridge_module = importlib.import_module("litellm.responses.deepseek_anthropic")
+    monkeypatch.setattr(bridge_module.time, "time", lambda: 0)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    first_stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="first",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context(),
+        _deepseek_session_repository=session_repository,
+        client=client,
+    )
+    second_stream = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="second",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=True,
+        protocol_context=_context(),
+        _deepseek_session_repository=session_repository,
+        client=client,
+    )
+    first_events = [event async for event in first_stream]
+    second_events = [event async for event in second_stream]
+    await client.aclose()
+
+    first_response_id = ResponsesAPIRequestUtils._decode_responses_api_response_id(first_events[-1]["response"]["id"])[
+        "response_id"
+    ]
+    second_response_id = ResponsesAPIRequestUtils._decode_responses_api_response_id(second_events[-1]["response"]["id"])[
+        "response_id"
+    ]
+    assert first_response_id != second_response_id
+    assert set(session_repository._sessions) == {first_response_id, second_response_id}
 
 
 def test_deepseek_responses_sync_stream_worker_forwards_events():

@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
+from json import dumps
 from typing import cast
 
 from litellm.litellm_core_utils.app_crypto import AppCrypto
@@ -102,6 +103,10 @@ def _record_field(record: object, field: str) -> object:
     return getattr(record, field, None)
 
 
+def _session_aad(owner_id: str, response_id: str) -> bytes:
+    return dumps((owner_id, response_id), ensure_ascii=True, separators=(",", ":")).encode()
+
+
 class ProxyDeepSeekResponsesSessionRepository:
     def __init__(
         self,
@@ -154,7 +159,7 @@ class ProxyDeepSeekResponsesSessionRepository:
         try:
             payload = self._crypto().decrypt_json(
                 dict(encrypted_payload) if isinstance(encrypted_payload, Mapping) else {},
-                aad=response_id.encode(),
+                aad=_session_aad(self._owner_id, response_id),
             )
         except Exception:
             return None
@@ -167,7 +172,9 @@ class ProxyDeepSeekResponsesSessionRepository:
         upsert = getattr(self._table, "upsert", None)
         if not callable(upsert):
             raise RuntimeError("DeepSeek Responses session storage is unavailable")
-        encrypted_payload = self._crypto().encrypt_json(session.payload(), aad=session.response_id.encode())
+        encrypted_payload = self._crypto().encrypt_json(
+            session.payload(), aad=_session_aad(self._owner_id, session.response_id)
+        )
         await upsert(
             where={"response_id": session.response_id},
             data={
