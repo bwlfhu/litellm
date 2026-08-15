@@ -11,6 +11,11 @@ from uuid import uuid4
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
+from litellm.constants import (
+    DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET,
+    DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET,
+    DEFAULT_REASONING_EFFORT_MAX_THINKING_BUDGET,
+)
 from litellm.litellm_core_utils.asyncify import run_async_function
 from litellm.llms.deepseek.anthropic_protocol import (
     DeepSeekProtocolNonFallbackError,
@@ -66,6 +71,12 @@ _PROTOCOL_INTEGRITY_CODES = frozenset(
     }
 )
 _JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, object])
+_DEFAULT_MAX_OUTPUT_TOKENS = 4096
+_REASONING_EFFORT_BUDGETS = {
+    "low": DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET,
+    "high": DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET,
+    "max": DEFAULT_REASONING_EFFORT_MAX_THINKING_BUDGET,
+}
 
 
 def _new_deepseek_response_id() -> str:
@@ -132,7 +143,16 @@ def _raw_failure_exception(failure: DeepSeekRawFailure) -> DeepSeekProtocolError
     )
 
 
-def _effort_to_thinking(reasoning: object) -> tuple[dict[str, object], bool]:
+def _resolved_max_output_tokens(request: ResponsesAPIOptionalRequestParams) -> int:
+    max_output_tokens = request.get("max_output_tokens")
+    if max_output_tokens is None:
+        return _DEFAULT_MAX_OUTPUT_TOKENS
+    if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or max_output_tokens < 2:
+        raise DeepSeekProtocolError("reasoning_budget_invalid")
+    return max_output_tokens
+
+
+def _effort_to_thinking(reasoning: object, *, max_output_tokens: int) -> tuple[dict[str, object], bool]:
     if reasoning is None:
         effort = "high"
     elif isinstance(reasoning, Mapping):
@@ -146,7 +166,11 @@ def _effort_to_thinking(reasoning: object) -> tuple[dict[str, object], bool]:
         raise DeepSeekProtocolError("reasoning_effort_invalid")
     if effort == "none":
         return {"type": "disabled"}, False
-    return {"type": "enabled"}, True
+    # DeepSeek's Anthropic-compatible endpoint requires a thinking budget,
+    # unlike the Responses API's effort-only input. Keep it below max_tokens
+    # so the resulting Anthropic wire request is valid for budgeted thinking.
+    budget = min(_REASONING_EFFORT_BUDGETS[effort], max_output_tokens - 1)
+    return {"type": "enabled", "budget_tokens": budget}, True
 
 
 def _reasoning_text(item: Mapping[str, object]) -> str | None:
@@ -431,10 +455,11 @@ def _bridge_optional_params(
     request: ResponsesAPIOptionalRequestParams,
     thinking: Mapping[str, object],
     enabled: bool,
+    max_output_tokens: int,
 ) -> dict[str, object]:
     tools = _responses_tools_to_anthropic(request.get("tools"))
     params: dict[str, object] = {
-        "max_tokens": request.get("max_output_tokens") or 4096,
+        "max_tokens": max_output_tokens,
         "thinking": dict(thinking),
     }
     if tools:
@@ -970,7 +995,8 @@ class DeepSeekAnthropicResponsesBridge:
         kwargs: Mapping[str, object],
     ) -> object:
         reasoning = responses_api_request.get("reasoning")
-        thinking, enabled = _effort_to_thinking(reasoning)
+        max_output_tokens = _resolved_max_output_tokens(responses_api_request)
+        thinking, enabled = _effort_to_thinking(reasoning, max_output_tokens=max_output_tokens)
         previous_response_id = responses_api_request.get("previous_response_id")
         session_repository = _session_repository_from_kwargs(kwargs)
         session_history = await _load_session_history(previous_response_id, session_repository)
@@ -984,7 +1010,12 @@ class DeepSeekAnthropicResponsesBridge:
             thinking,
             max_suffix_tokens=protocol_context.suffix_token_budget,
         )
-        optional_params = _bridge_optional_params(responses_api_request, thinking, enabled)
+        optional_params = _bridge_optional_params(
+            responses_api_request,
+            thinking,
+            enabled,
+            max_output_tokens,
+        )
         optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
         optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.context_token_budget
         config = DeepSeekAnthropicMessagesConfig()

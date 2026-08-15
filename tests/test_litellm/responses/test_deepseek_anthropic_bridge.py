@@ -217,7 +217,7 @@ async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_
 
     assert len(requests) == 1
     assert requests[0]["messages"] == [{"role": "user", "content": "question"}]
-    assert requests[0]["thinking"] == {"type": "enabled"}
+    assert requests[0]["thinking"] == {"type": "enabled", "budget_tokens": 31}
     assert getattr(response.output[0], "type", None) == "reasoning"
     assert getattr(response.output[1], "type", None) == "message"
 
@@ -262,6 +262,72 @@ async def test_deepseek_responses_maps_system_sampling_and_tool_controls():
     assert body["temperature"] == 0.2
     assert body["top_p"] == 0.8
     assert body["output_config"] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reasoning", "expected_thinking", "expected_output_config"),
+    [
+        (None, {"type": "enabled", "budget_tokens": 31}, {"effort": "high"}),
+        ({"effort": "low"}, {"type": "enabled", "budget_tokens": 31}, {"effort": "low"}),
+        ({"effort": "high"}, {"type": "enabled", "budget_tokens": 31}, {"effort": "high"}),
+        ({"effort": "max"}, {"type": "enabled", "budget_tokens": 31}, {"effort": "max"}),
+        ({"effort": "none"}, {"type": "disabled"}, None),
+    ],
+)
+async def test_deepseek_responses_maps_effort_to_valid_budgeted_thinking(
+    reasoning, expected_thinking, expected_output_config
+):
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={"id": "resp_ds_effort", "content": [{"type": "text", "text": "ok"}], "usage": {}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    request: dict[str, object] = {"max_output_tokens": 32}
+    if reasoning is not None:
+        request["reasoning"] = reasoning
+    await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request=request,
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context(),
+        client=client,
+    )
+    await client.aclose()
+
+    assert requests[0]["max_tokens"] == 32
+    assert requests[0]["thinking"] == expected_thinking
+    if expected_output_config is None:
+        assert "output_config" not in requests[0]
+    else:
+        assert requests[0]["output_config"] == expected_output_config
+
+
+@pytest.mark.asyncio
+async def test_deepseek_responses_rejects_max_output_tokens_without_valid_thinking_budget():
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)))
+
+    with pytest.raises(DeepSeekProtocolError, match="reasoning_budget_invalid"):
+        await DeepSeekAnthropicResponsesBridge.response_api_handler(
+            model="deepseek-v4-pro",
+            input="question",
+            responses_api_request={"max_output_tokens": 1},
+            custom_llm_provider="anthropic",
+            _is_async=True,
+            stream=False,
+            protocol_context=_context(),
+            client=client,
+        )
+    await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -432,7 +498,7 @@ def test_deepseek_responses_sync_bridge_uses_same_raw_reconstruction_core():
 
     assert len(requests) == 1
     assert response.id == "resp_ds_sync"
-    assert requests[0]["thinking"] == {"type": "enabled"}
+    assert requests[0]["thinking"] == {"type": "enabled", "budget_tokens": 31}
 
 
 @pytest.mark.asyncio
