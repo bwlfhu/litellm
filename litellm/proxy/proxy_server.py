@@ -7227,13 +7227,20 @@ def _fast_serialize_simple_model_response_stream(
     return orjson.dumps(payload)
 
 
-def _serialize_streaming_chunk(chunk: BaseModel) -> Union[str, bytes]:
+def _serialize_streaming_chunk(chunk: Any) -> Union[str, bytes]:
     if isinstance(chunk, ModelResponseStream):
         serialized_chunk = _fast_serialize_simple_model_response_stream(chunk)
         if serialized_chunk is not None:
             return serialized_chunk
 
-    return chunk.model_dump_json(exclude_none=True, exclude_unset=True)
+    if isinstance(chunk, BaseModel):
+        return chunk.model_dump_json(exclude_none=True, exclude_unset=True)
+    if isinstance(chunk, Mapping):
+        # Responses bridge iterators intentionally yield plain dictionaries.
+        # Serialize them as JSON before adding the SSE frame; ``str(dict)``
+        # produces single-quoted Python repr that clients cannot parse.
+        return json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(chunk, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 async def _apply_streaming_chunk_hooks(
@@ -7367,7 +7374,7 @@ async def async_data_generator(
             )
 
             raw_passthrough = False
-            if isinstance(chunk, BaseModel):
+            if isinstance(chunk, (BaseModel, Mapping)):
                 chunk = _serialize_streaming_chunk(chunk)
             elif isinstance(chunk, bytes):
                 chunk = chunk.decode("utf-8", errors="replace")

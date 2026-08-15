@@ -43,15 +43,16 @@ async def test_deepseek_sse_decoder_emits_reasoning_text_and_tool_events_without
     decoded = [event async for event in decoder.decode(_lines(events))]
 
     assert decoder.output_started is True
-    assert [event["type"] for event in decoded] == [
-        "response.output_item.added",
-        "response.reasoning_summary_text.delta",
-        "response.output_item.added",
-        "response.output_text.delta",
-        "response.output_item.added",
-        "response.function_call_arguments.delta",
-        "response.completed",
-    ]
+    event_types = [event["type"] for event in decoded]
+    assert event_types[:2] == ["response.created", "response.in_progress"]
+    assert "response.reasoning_summary_text.delta" in event_types
+    assert "response.output_text.delta" in event_types
+    assert "response.function_call_arguments.delta" in event_types
+    assert event_types[-1] == "response.completed"
+    assert event_types.index("response.output_item.done") < event_types.index("response.completed")
+    text_delta = next(event for event in decoded if event["type"] == "response.output_text.delta")
+    assert text_delta["item_id"] == "msg_resp_1"
+    assert text_delta["content_index"] == 0
     assert decoded[-1]["response"]["status"] == "completed"
 
 
@@ -65,8 +66,9 @@ async def test_deepseek_sse_decoder_failed_event_does_not_emit_success():
         )
     ]
 
-    assert [event["type"] for event in decoded] == ["response.failed"]
-    assert decoded[0]["response"]["status"] == "failed"
+    assert [event["type"] for event in decoded][-1] == "response.failed"
+    assert [event["type"] for event in decoded][:2] == ["response.created", "response.in_progress"]
+    assert decoded[-1]["response"]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -84,7 +86,8 @@ async def test_deepseek_sse_decoder_ignores_message_stop_after_failed_event():
         )
     ]
 
-    assert [event["type"] for event in decoded] == ["response.failed"]
+    assert [event["type"] for event in decoded][-1] == "response.failed"
+    assert "response.completed" not in [event["type"] for event in decoded]
 
 
 @pytest.mark.asyncio
@@ -97,10 +100,8 @@ async def test_deepseek_sse_decoder_eof_emits_one_incomplete_terminal_event():
         )
     ]
 
-    assert [event["type"] for event in decoded] == [
-        "response.output_item.added",
-        "response.incomplete",
-    ]
+    assert [event["type"] for event in decoded][:2] == ["response.created", "response.in_progress"]
+    assert [event["type"] for event in decoded][-1] == "response.incomplete"
     assert decoded[-1]["response"]["status"] == "incomplete"
 
 
@@ -150,6 +151,11 @@ async def test_deepseek_async_stream_cancellation_closes_response_and_propagates
             self.closed = True
 
     body = DelayedBody()
+    terminal_events: list[dict[str, object]] = []
+
+    async def on_terminal(event, output_started):
+        terminal_events.append({"event": event, "output_started": output_started})
+
     response = httpx.Response(200, request=httpx.Request("POST", "https://provider.invalid"), stream=body)
     stream = DeepSeekAnthropicResponsesAsyncStream(
         response,
@@ -157,6 +163,7 @@ async def test_deepseek_async_stream_cancellation_closes_response_and_propagates
         "resp_3",
         False,
         httpx.AsyncClient(),
+        on_terminal=on_terminal,
     )
     task = asyncio.create_task(stream.__anext__())
     await body.started.wait()
@@ -164,6 +171,7 @@ async def test_deepseek_async_stream_cancellation_closes_response_and_propagates
     with pytest.raises(asyncio.CancelledError):
         await task
     assert body.closed is True
+    assert terminal_events[0]["event"]["_local_cancellation"] is True
 
 
 @pytest.mark.asyncio
@@ -248,7 +256,10 @@ async def test_deepseek_async_stream_post_output_error_is_terminal_event():
         httpx.AsyncClient(),
     )
 
+    assert (await stream.__anext__())["type"] == "response.created"
+    assert (await stream.__anext__())["type"] == "response.in_progress"
     assert (await stream.__anext__())["type"] == "response.output_item.added"
+    assert (await stream.__anext__())["type"] == "response.content_part.added"
     assert (await stream.__anext__())["type"] == "response.failed"
     await stream.aclose()
 

@@ -239,6 +239,36 @@ def test_router_responses_sync_stream_worker_falls_back_before_output(monkeypatc
     assert calls == ["primary-id", "backup-id"]
 
 
+def test_router_responses_sync_stream_worker_does_not_fallback_after_output(monkeypatch):
+    calls: list[str] = []
+
+    async def failed_stream_after_output() -> object:
+        async def events() -> object:
+            yield {"type": "response.output_item.added"}
+            raise DeepSeekUpstreamError("connect_error", None)
+
+        return events()
+
+    def fake_responses(*, model: str, **kwargs: object) -> object:
+        context = protocol_context_from_kwargs(kwargs)
+        assert context is not None
+        calls.append(context.deployment_id)
+        return DeepSeekAnthropicResponsesSyncStream(
+            failed_stream_after_output(),
+            model=model,
+            pre_output_fallback_enabled=True,
+        )
+
+    monkeypatch.setattr("litellm.responses", fake_responses)
+    router = _router_with_deepseek_backup()
+    stream = router.responses(model="primary", input="question", stream=True, fallbacks=["backup"])
+
+    assert next(stream) == {"type": "response.output_item.added"}
+    with pytest.raises(DeepSeekUpstreamError):
+        next(stream)
+    assert calls == ["primary-id"]
+
+
 def _router_with_deepseek_backup() -> Router:
     return Router(
         model_list=[

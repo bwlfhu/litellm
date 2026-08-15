@@ -523,11 +523,9 @@ def test_serialize_streaming_chunk_simple_uses_fast_path_bytes():
     }
 
 
-def test_serialize_streaming_chunk_invalid_input_raises_attribute_error():
-    """The helper is typed as ``BaseModel`` — handing it a plain dict trips
-    the attribute-access path (no ``model_dump_json``)."""
-    with pytest.raises(AttributeError):
-        _serialize_streaming_chunk({"not": "a model"})  # type: ignore[arg-type]
+def test_serialize_streaming_chunk_serializes_responses_dict_as_json():
+    result = _serialize_streaming_chunk({"type": "response.output_text.delta", "delta": "hi"})
+    assert json.loads(result) == {"type": "response.output_text.delta", "delta": "hi"}
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +662,28 @@ async def test_async_data_generator_yields_sse_chunks_and_done(monkeypatch):
                 "delta": {"role": "assistant", "content": "hello"},
             }
         ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_async_data_generator_formats_responses_dict_as_valid_json_sse(monkeypatch):
+    _patch_logging_flags(monkeypatch)
+
+    response = _async_iter([{"type": "response.output_text.delta", "item_id": "msg_1", "delta": "hi"}])
+    out = [
+        line
+        async for line in async_data_generator(
+            response=response,
+            user_api_key_dict=_user_auth(),
+            request_data={"model": "deepseek-v4-pro"},
+        )
+    ]
+
+    assert out[-1] == "data: [DONE]\n\n"
+    assert json.loads(out[0].removeprefix("data: ").removesuffix("\n\n")) == {
+        "type": "response.output_text.delta",
+        "item_id": "msg_1",
+        "delta": "hi",
     }
 
 
