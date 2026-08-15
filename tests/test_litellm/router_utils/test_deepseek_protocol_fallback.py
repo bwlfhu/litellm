@@ -329,9 +329,16 @@ async def test_router_async_responses_stream_does_not_fallback_after_public_outp
             return {"id": "fallback"}
 
     router = RouterWithFallback(model_list=[])
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.mark_deepseek_parent()
     wrapped = await router._aresponses_streaming_iterator(
         response=Source(),
-        initial_kwargs={"model": "primary", "fallbacks": ["backup"], "input": "original"},
+        initial_kwargs={
+            "model": "primary",
+            "fallbacks": ["backup"],
+            "input": "original",
+            "_deepseek_parent_accounting_tracker": tracker,
+        },
     )
 
     assert (await wrapped.__anext__())["type"] == "response.output_text.delta"
@@ -369,9 +376,16 @@ async def test_router_async_responses_stream_recompiles_pre_output_fallback_from
 
     original_input = [{"role": "user", "content": "original"}]
     router = RouterWithFallback(model_list=[])
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.mark_deepseek_parent()
     wrapped = await router._aresponses_streaming_iterator(
         response=Source(),
-        initial_kwargs={"model": "primary", "fallbacks": ["backup"], "input": original_input},
+        initial_kwargs={
+            "model": "primary",
+            "fallbacks": ["backup"],
+            "input": original_input,
+            "_deepseek_parent_accounting_tracker": tracker,
+        },
     )
 
     assert await wrapped.__anext__() == {"id": "fallback"}
@@ -409,9 +423,16 @@ def test_router_sync_responses_stream_does_not_fallback_after_public_output():
             return {"id": "fallback"}
 
     router = RouterWithFallback(model_list=[])
+    tracker = DeepSeekParentAccountingTracker()
+    tracker.mark_deepseek_parent()
     wrapped = router._responses_streaming_iterator(
         response=Source(),
-        initial_kwargs={"model": "primary", "fallbacks": ["backup"], "input": "original"},
+        initial_kwargs={
+            "model": "primary",
+            "fallbacks": ["backup"],
+            "input": "original",
+            "_deepseek_parent_accounting_tracker": tracker,
+        },
         original_function=lambda **kwargs: None,
     )
 

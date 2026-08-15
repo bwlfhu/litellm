@@ -2654,12 +2654,16 @@ class Router:
             fallback_response = None
             original_input = copy.deepcopy(initial_kwargs.get("input"))
             source_output_started = False
+            accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+            deepseek_parent_stream = (
+                isinstance(accounting_tracker, ParentAccountingTracker) and accounting_tracker.parent_started
+            )
             try:
                 async for item in source_iterator:
                     source_output_started = source_output_started or _is_responses_public_output_event(item)
                     yield item
             except MidStreamFallbackError as e:
-                if source_output_started:
+                if deepseek_parent_stream and source_output_started:
                     raise
                 try:
                     partial_usage = Router._extract_partial_responses_usage(source_iterator)
@@ -2681,7 +2685,12 @@ class Router:
                     # the helper knows what underlying API to invoke per attempt.
                     fallback_kwargs = dict(initial_kwargs)
                     fallback_kwargs["original_function"] = self._ageneric_api_call_with_fallbacks_helper
-                    fallback_kwargs["input"] = copy.deepcopy(original_input)
+                    if deepseek_parent_stream:
+                        fallback_kwargs["input"] = copy.deepcopy(original_input)
+                    elif not e.is_pre_first_chunk and e.generated_content:
+                        fallback_kwargs["input"] = Router._build_responses_continuation_input(
+                            initial_kwargs.get("input"), e.generated_content
+                        )
                     # The Responses-API path stores observability metadata
                     # under "litellm_metadata" (not the default "metadata") —
                     # see _ageneric_api_call_with_fallbacks. Mirroring that
@@ -2747,9 +2756,14 @@ class Router:
                                 raise
                             next_kwargs = dict(initial_kwargs)
                             next_kwargs["fallbacks"] = candidates[next_index:]
-                            if output_started:
+                            if deepseek_parent_stream and output_started:
                                 raise
-                            next_kwargs["input"] = copy.deepcopy(original_input)
+                            if deepseek_parent_stream:
+                                next_kwargs["input"] = copy.deepcopy(original_input)
+                            elif not next_error.is_pre_first_chunk and next_error.generated_content:
+                                next_kwargs["input"] = Router._build_responses_continuation_input(
+                                    initial_kwargs.get("input"), next_error.generated_content
+                                )
                             next_response = await self.async_function_with_fallbacks_common_utils(
                                 e=next_error,
                                 disable_fallbacks=False,
@@ -2910,12 +2924,16 @@ class Router:
             fallback_response: object | None = None
             original_input = copy.deepcopy(initial_kwargs.get("input"))
             source_output_started = False
+            accounting_tracker = initial_kwargs.get("_deepseek_parent_accounting_tracker")
+            deepseek_parent_stream = (
+                isinstance(accounting_tracker, ParentAccountingTracker) and accounting_tracker.parent_started
+            )
             try:
                 for item in source_iterator:
                     source_output_started = source_output_started or _is_responses_public_output_event(item)
                     yield item
             except MidStreamFallbackError as error:
-                if source_output_started:
+                if deepseek_parent_stream and source_output_started:
                     raise
                 try:
                     model_group = cast(str, initial_kwargs.get("model"))
@@ -2933,7 +2951,12 @@ class Router:
                     fallback_kwargs = dict(initial_kwargs)
                     fallback_kwargs["original_function"] = router_self._ageneric_api_call_with_fallbacks_helper
                     fallback_kwargs["original_generic_function"] = async_original_function
-                    fallback_kwargs["input"] = copy.deepcopy(original_input)
+                    if deepseek_parent_stream:
+                        fallback_kwargs["input"] = copy.deepcopy(original_input)
+                    elif not error.is_pre_first_chunk and error.generated_content:
+                        fallback_kwargs["input"] = Router._build_responses_continuation_input(
+                            initial_kwargs.get("input"), error.generated_content
+                        )
                     router_self._update_kwargs_before_fallbacks(
                         model=model_group,
                         kwargs=fallback_kwargs,
@@ -2989,9 +3012,14 @@ class Router:
                                 raise
                             next_kwargs = dict(initial_kwargs)
                             next_kwargs["fallbacks"] = candidates[next_index:]
-                            if output_started:
+                            if deepseek_parent_stream and output_started:
                                 raise
-                            next_kwargs["input"] = copy.deepcopy(original_input)
+                            if deepseek_parent_stream:
+                                next_kwargs["input"] = copy.deepcopy(original_input)
+                            elif not next_error.is_pre_first_chunk and next_error.generated_content:
+                                next_kwargs["input"] = Router._build_responses_continuation_input(
+                                    initial_kwargs.get("input"), next_error.generated_content
+                                )
                             next_response = run_async_function(
                                 router_self.async_function_with_fallbacks_common_utils,
                                 e=next_error,
