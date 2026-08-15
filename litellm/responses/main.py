@@ -1152,6 +1152,15 @@ def responses(
                 litellm_call_id=litellm_call_id,
                 api_base=litellm_params.api_base,
             )
+            bridge_kwargs = {
+                **kwargs,
+                # These values are resolved from the Router-selected deployment
+                # above. Do not rely on the residual public kwargs, which can be
+                # incomplete after the sync/async Responses dispatch boundary.
+                "api_key": litellm_params.api_key,
+                "api_base": litellm_params.api_base,
+                "headers": litellm_params.headers,
+            }
             response = DeepSeekAnthropicResponsesBridge.response_api_handler(
                 model=model,
                 input=input,
@@ -1160,7 +1169,7 @@ def responses(
                 _is_async=_is_async,
                 stream=stream,
                 protocol_context=protocol_context,
-                **kwargs,
+                **bridge_kwargs,
             )
             return _finalize_deepseek_anthropic_response(
                 response,

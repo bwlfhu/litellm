@@ -17,6 +17,8 @@ from litellm.constants import (
     DEFAULT_REASONING_EFFORT_MAX_THINKING_BUDGET,
 )
 from litellm.litellm_core_utils.asyncify import run_async_function
+from litellm.anthropic_beta_headers_manager import update_headers_with_filtered_beta
+from litellm.litellm_core_utils.get_provider_specific_headers import ProviderSpecificHeaderUtils
 from litellm.llms.deepseek.anthropic_protocol import (
     DeepSeekProtocolNonFallbackError,
     DeepSeekProtocolError,
@@ -1039,23 +1041,23 @@ class DeepSeekAnthropicResponsesBridge:
         optional_params["_deepseek_reasoning_suffix_token_budget"] = protocol_context.suffix_token_budget
         optional_params["_deepseek_reasoning_context_token_budget"] = protocol_context.context_token_budget
         config = DeepSeekAnthropicMessagesConfig()
-        request_body = config.transform_anthropic_messages_request(
-            model=model,
-            messages=list(canonical.messages),
-            anthropic_messages_optional_request_params=optional_params,
-            litellm_params=GenericLiteLLMParams(**dict(kwargs)),
-            headers={},
-        )
-        if system_prompt is not None:
-            request_body["system"] = system_prompt
-        if stream is True:
-            # DeepSeek selects Anthropic SSE mode from the wire body. The
-            # transport stream flag only controls how httpx reads the response.
-            request_body["stream"] = True
         api_key = kwargs.get("api_key") if isinstance(kwargs.get("api_key"), str) else None
         api_base = kwargs.get("api_base") if isinstance(kwargs.get("api_base"), str) else None
+        forwarded_headers = kwargs.get("headers")
+        extra_headers = kwargs.get("extra_headers")
+        provider_specific_headers = ProviderSpecificHeaderUtils.get_provider_specific_headers(
+            provider_specific_header=kwargs.get("provider_specific_header"),
+            custom_llm_provider=custom_llm_provider,
+        )
+        request_headers: dict[str, object] = {}
+        if isinstance(forwarded_headers, Mapping):
+            request_headers.update(forwarded_headers)
+        if isinstance(extra_headers, Mapping):
+            request_headers.update(extra_headers)
+        if provider_specific_headers:
+            request_headers.update(provider_specific_headers)
         headers, resolved_base = config.validate_anthropic_messages_environment(
-            headers=dict(kwargs.get("headers", {})) if isinstance(kwargs.get("headers"), Mapping) else {},
+            headers=request_headers,
             model=model,
             messages=list(canonical.messages),
             optional_params=optional_params,
@@ -1063,6 +1065,21 @@ class DeepSeekAnthropicResponsesBridge:
             api_key=api_key,
             api_base=api_base,
         )
+        if config.should_filter_anthropic_beta_headers():
+            headers = update_headers_with_filtered_beta(headers=headers, provider=custom_llm_provider)
+        request_body = config.transform_anthropic_messages_request(
+            model=model,
+            messages=list(canonical.messages),
+            anthropic_messages_optional_request_params=optional_params,
+            litellm_params=GenericLiteLLMParams(**dict(kwargs)),
+            headers=headers,
+        )
+        if system_prompt is not None:
+            request_body["system"] = system_prompt
+        if stream is True:
+            # DeepSeek selects Anthropic SSE mode from the wire body. The
+            # transport stream flag only controls how httpx reads the response.
+            request_body["stream"] = True
         url = config.get_complete_url(
             api_base=resolved_base,
             api_key=api_key,
@@ -1070,12 +1087,27 @@ class DeepSeekAnthropicResponsesBridge:
             optional_params=optional_params,
             litellm_params=dict(kwargs),
         )
+        headers, signed_body = config.sign_request(
+            headers=headers,
+            optional_params=dict(kwargs),
+            request_data=request_body,
+            api_base=url,
+            api_key=api_key,
+            stream=stream,
+            fake_stream=False,
+            model=model,
+        )
         http_client, owns_client = _http_client_from_kwargs(kwargs)
         accounting_tracker = _accounting_tracker(kwargs)
         router_owns_accounting = _router_owns_parent_accounting(kwargs)
         _log_parent_pre_call(kwargs.get("litellm_logging_obj"), input)
         raw_result = await DeepSeekResponsesRawTransport(http_client).send(
-            freeze_deepseek_request(url=url, headers=headers, body=request_body, stream=stream is True)
+            freeze_deepseek_request(
+                url=url,
+                headers=headers,
+                body=signed_body if signed_body is not None else request_body,
+                stream=stream is True,
+            )
         )
         if isinstance(raw_result, DeepSeekRawFailure):
             if owns_client:
