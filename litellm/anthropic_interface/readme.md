@@ -59,6 +59,12 @@ async for chunk in response:
 
 ### LiteLLM Proxy Server 
 
+#### DeepSeek Anthropic-compatible Messages deployments
+
+Configure `reasoning_protocol: deepseek_anthropic` only on the Router deployment that uses the DeepSeek Anthropic-compatible Messages API. The Router selects the DeepSeek protocol from deployment configuration; request metadata cannot enable it. Existing non-empty assistant reasoning is replayed for tool-result turns, including when the current request sets `thinking: disabled`.
+
+Set `deepseek_anthropic_messages_path` only when the deployment needs an explicit endpoint path. Supported values are `anthropic/v1/messages` and `v1/messages`; omit it to use the standard DeepSeek Messages path.
+
 
 1. Setup config.yaml
 
