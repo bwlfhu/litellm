@@ -525,7 +525,10 @@ async def _read_raw_payload(response: httpx.Response, owns_client: bool, client:
     try:
         body = await response.aread()
         try:
-            return json.loads(body.decode())
+            # ``json.loads`` accepts bytes and handles a UTF-8 BOM. Some
+            # Anthropic-compatible gateways emit one, while decoding first
+            # makes otherwise valid JSON fail with ``Unexpected UTF-8 BOM``.
+            return json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise DeepSeekProtocolError(
                 "upstream_response_invalid",

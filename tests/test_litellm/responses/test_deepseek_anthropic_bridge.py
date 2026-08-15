@@ -223,6 +223,35 @@ async def test_deepseek_responses_async_bridge_sends_one_anthropic_wire_request_
 
 
 @pytest.mark.asyncio
+async def test_deepseek_responses_accepts_utf8_bom_upstream_json():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            content=(
+                b'\xef\xbb\xbf{"id":"resp_ds_bom","content":[{"type":"text","text":"answer"}],'
+                b'"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"end_turn"}'
+            ),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await DeepSeekAnthropicResponsesBridge.response_api_handler(
+        model="deepseek-v4-pro",
+        input="question",
+        responses_api_request={"max_output_tokens": 32},
+        custom_llm_provider="anthropic",
+        _is_async=True,
+        stream=False,
+        protocol_context=_context(),
+        client=client,
+    )
+    await client.aclose()
+
+    assert response.id == "resp_ds_bom"
+    assert response.status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_deepseek_responses_maps_system_sampling_and_tool_controls():
     requests: list[dict[str, object]] = []
 
