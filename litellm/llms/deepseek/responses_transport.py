@@ -41,7 +41,9 @@ def freeze_deepseek_request(
     body: Mapping[str, object] | bytes,
     stream: bool = False,
 ) -> DeepSeekPreparedRequest:
-    encoded_body = body if isinstance(body, bytes) else json.dumps(body, separators=(",", ":"), ensure_ascii=True).encode()
+    encoded_body = (
+        body if isinstance(body, bytes) else json.dumps(body, separators=(",", ":"), ensure_ascii=True).encode()
+    )
     return DeepSeekPreparedRequest(
         url=url,
         headers=MappingProxyType(dict(headers)),
