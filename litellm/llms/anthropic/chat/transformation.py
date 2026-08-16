@@ -1796,11 +1796,11 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         preserve_unsigned_thinking_blocks = protocol_context is not None
         if preserve_unsigned_thinking_blocks:
             from litellm.llms.deepseek.messages.transformation import (
-                deepseek_history_requires_disabled_thinking,
+                deepseek_history_has_reasoningless_tool_use,
                 prepare_deepseek_chat_history,
             )
 
-            requires_disabled_thinking = deepseek_history_requires_disabled_thinking(messages)
+            has_reasoningless_tool_history = deepseek_history_has_reasoningless_tool_use(messages)
             messages = prepare_deepseek_chat_history(messages)
 
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
@@ -1831,7 +1831,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             and bool(optional_params.get("tools"))
         ):
             optional_params["thinking"] = {"type": "disabled"}
-        elif preserve_unsigned_thinking_blocks and requires_disabled_thinking:
+        elif preserve_unsigned_thinking_blocks and has_reasoningless_tool_history:
             optional_params["thinking"] = {"type": "disabled"}
 
         AnthropicConfig._maybe_drop_speed_param(

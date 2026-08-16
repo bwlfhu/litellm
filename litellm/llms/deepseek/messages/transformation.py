@@ -100,11 +100,37 @@ def _unsigned_content_blocks(content: list[object]) -> tuple[list[object], bool,
     return transformed_content, has_tool_use, has_redacted_thinking, has_reasoning
 
 
+def _promoted_tool_reasoning_content(content: list[object]) -> list[object] | None:
+    tool_index = next(
+        (
+            index
+            for index, block in enumerate(content)
+            if isinstance(block, Mapping) and block.get("type") in {"tool_use", "server_tool_use"}
+        ),
+        -1,
+    )
+    if tool_index <= 0:
+        return None
+    leading_blocks = content[:tool_index]
+    if not all(
+        isinstance(block, Mapping)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        and bool(block["text"].strip())
+        for block in leading_blocks
+    ):
+        return None
+    if any(isinstance(block, Mapping) and block.get("type") == "text" for block in content[tool_index:]):
+        return None
+    thinking = "".join(str(block["text"]) for block in leading_blocks if isinstance(block, Mapping))
+    return [{"type": "thinking", "thinking": thinking}, *deepcopy(content[tool_index:])]
+
+
 def _deepseek_history_validation_error(message: str) -> AnthropicError:
     return _DeepSeekHistoryValidationError(message=message, status_code=400)
 
 
-def _deepseek_history_message(message: dict) -> dict:
+def _deepseek_history_message(message: dict, promote_tool_reasoning_text: bool = False) -> dict:
     transformed_message = deepcopy(message)
     if transformed_message.get("role") != "assistant":
         return transformed_message
@@ -126,12 +152,19 @@ def _deepseek_history_message(message: dict) -> dict:
     if not has_reasoning and reasoning_content is not None:
         transformed_content = [{"type": "thinking", "thinking": reasoning_content}, *transformed_content]
         has_reasoning = True
+    if has_tool_use and not has_reasoning and promote_tool_reasoning_text:
+        promoted_content = _promoted_tool_reasoning_content(transformed_content)
+        if promoted_content is not None:
+            transformed_content = promoted_content
     transformed_message["content"] = transformed_content
     return transformed_message
 
 
-def _deepseek_history(messages: list[dict]) -> list[dict]:
-    return [_deepseek_history_message(message) for message in messages]
+def _deepseek_history(messages: list[dict], promote_tool_reasoning_text: bool = False) -> list[dict]:
+    return [
+        _deepseek_history_message(message, promote_tool_reasoning_text=promote_tool_reasoning_text)
+        for message in messages
+    ]
 
 
 def _without_reasoning_content_fields(message: dict) -> dict:
@@ -177,7 +210,7 @@ def _chat_message_has_tool_history(message: Mapping[str, object]) -> bool:
     )
 
 
-def deepseek_history_requires_disabled_thinking(messages: list[dict]) -> bool:
+def deepseek_history_has_reasoningless_tool_use(messages: list[dict]) -> bool:
     return any(
         message.get("role") == "assistant"
         and _chat_message_has_tool_history(message)
@@ -392,13 +425,21 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         request_params = dict(anthropic_messages_optional_request_params)
         request_params.pop("_deepseek_anthropic_messages_path", None)
         disable_tool_thinking = litellm_params.get("_deepseek_anthropic_tool_thinking") == "disabled"
-        if (disable_tool_thinking and bool(request_params.get("tools"))) or deepseek_history_requires_disabled_thinking(
-            messages
-        ):
+        thinking = request_params.get("thinking")
+        thinking_enabled = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
+        transformed_messages = _deepseek_history(
+            messages,
+            promote_tool_reasoning_text=thinking_enabled and not disable_tool_thinking,
+        )
+        if disable_tool_thinking and bool(request_params.get("tools")):
             request_params["thinking"] = {"type": "disabled"}
+        elif thinking_enabled and deepseek_history_has_reasoningless_tool_use(transformed_messages):
+            raise _deepseek_history_validation_error(
+                "DeepSeek Anthropic thinking tool history requires non-empty reasoning"
+            )
         anthropic_messages_request = super().transform_anthropic_messages_request(
             model=model,
-            messages=_deepseek_history(messages),
+            messages=transformed_messages,
             anthropic_messages_optional_request_params=request_params,
             litellm_params=litellm_params,
             headers=headers,
@@ -442,6 +483,13 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         )
         if isinstance(reasoning_content, str) and reasoning_content.strip() and not has_thinking:
             response["content"] = [{"type": "thinking", "thinking": reasoning_content}, *content_blocks]
+        elif not has_thinking:
+            model_call_details = getattr(logging_obj, "model_call_details", None)
+            request_thinking = model_call_details.get("thinking") if isinstance(model_call_details, Mapping) else None
+            if isinstance(request_thinking, Mapping) and request_thinking.get("type") == "enabled":
+                promoted_content = _promoted_tool_reasoning_content(content_blocks)
+                if promoted_content is not None:
+                    response["content"] = promoted_content
         return response
 
     @property
