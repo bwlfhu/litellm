@@ -189,6 +189,19 @@ def test_use_custom_pricing_for_model_via_litellm_metadata():
     assert use_custom_pricing_for_model(litellm_params) is True
 
 
+def test_use_custom_pricing_for_model_via_direct_model_info():
+    from litellm.litellm_core_utils.litellm_logging import use_custom_pricing_for_model
+
+    litellm_params = {
+        "model_info": {
+            "id": "claude-sonnet-4-custom",
+            "input_cost_per_token": 0.0003,
+            "output_cost_per_token": 0.0015,
+        },
+    }
+    assert use_custom_pricing_for_model(litellm_params) is True
+
+
 def test_use_custom_pricing_not_detected_litellm_metadata_no_pricing():
     """Should return False when litellm_metadata.model_info has no pricing keys."""
     from litellm.litellm_core_utils.litellm_logging import use_custom_pricing_for_model
@@ -287,6 +300,12 @@ class TestGetRouterModelId:
         }
         assert logging_obj.get_router_model_id() == "custom-deploy-1"
 
+    def test_returns_id_from_direct_model_info(self, logging_obj):
+        logging_obj.litellm_params = {
+            "model_info": {"id": "custom-deploy-direct"},
+        }
+        assert logging_obj.get_router_model_id() == "custom-deploy-direct"
+
     def test_returns_id_from_metadata(self, logging_obj):
         """Should fall back to metadata when litellm_metadata has no model_info."""
         logging_obj.litellm_params = {
@@ -363,12 +382,10 @@ class TestAnthropicPassthroughCustomPricing:
             optional_params={},
             litellm_params={
                 "api_base": "",
-                "litellm_metadata": {
-                    "model_info": {
-                        "id": "claude-custom-pricing",
-                        "input_cost_per_token": 0.5,
-                        "output_cost_per_token": 1.5,
-                    },
+                "model_info": {
+                    "id": "claude-custom-pricing",
+                    "input_cost_per_token": 0.5,
+                    "output_cost_per_token": 1.5,
                 },
             },
         )

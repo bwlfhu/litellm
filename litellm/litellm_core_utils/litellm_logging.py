@@ -521,6 +521,10 @@ class Logging(LiteLLMLoggingBaseClass):
         """
         if not hasattr(self, "litellm_params"):
             return None
+        model_info = self.litellm_params.get("model_info", {}) or {}
+        model_id = model_info.get("id")
+        if model_id is not None:
+            return model_id
         for key in ("litellm_metadata", "metadata"):
             meta = self.litellm_params.get(key, {}) or {}
             info = meta.get("model_info", {}) or {}
@@ -4448,6 +4452,12 @@ def use_custom_pricing_for_model(litellm_params: Optional[dict]) -> bool:
     matching_keys = _CUSTOM_PRICING_KEYS & litellm_params.keys()
     for key in matching_keys:
         if litellm_params.get(key) is not None:
+            return True
+
+    model_info: dict = litellm_params.get("model_info", {}) or {}
+    matching_keys = _CUSTOM_PRICING_KEYS & model_info.keys()
+    for key in matching_keys:
+        if model_info.get(key) is not None:
             return True
 
     # Check model_info from metadata or litellm_metadata (generic_api_call routes
