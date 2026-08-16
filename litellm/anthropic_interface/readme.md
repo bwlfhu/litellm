@@ -61,7 +61,9 @@ async for chunk in response:
 
 #### DeepSeek Anthropic-compatible Messages deployments
 
-Configure `reasoning_protocol: deepseek_anthropic` only on the Router deployment that uses the DeepSeek Anthropic-compatible Messages API. The Router selects the DeepSeek protocol from deployment configuration; request metadata cannot enable it. Existing non-empty assistant reasoning is replayed for tool-result turns, including when the current request sets `thinking: disabled`.
+Configure `reasoning_protocol: deepseek_anthropic` only on the Router deployment that uses the DeepSeek Anthropic-compatible Messages API. The Router selects the DeepSeek protocol from deployment configuration; request metadata cannot enable it. Existing non-empty assistant reasoning is replayed for tool-result turns, including when the current request sets `thinking: disabled`. Tool history without a thinking block remains valid; the proxy does not synthesize reasoning that the model did not return.
+
+DeepSeek ignores `thinking.budget_tokens`. Use `thinking.type` to enable or disable thinking and `output_config.effort` to select its strength.
 
 Set `deepseek_anthropic_messages_path` only when the deployment needs an explicit endpoint path. Supported values are `anthropic/v1/messages` and `v1/messages`; omit it to use the standard DeepSeek Messages path.
 
