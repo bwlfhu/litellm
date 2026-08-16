@@ -147,6 +147,34 @@ def _without_reasoning_content_fields(message: dict) -> dict:
     return {key: value for key, value in transformed_message.items() if key != "provider_specific_fields"}
 
 
+def _message_blocks(message: Mapping[str, object], field: str) -> list[object]:
+    value = message.get(field)
+    return value if isinstance(value, list) else []
+
+
+def _chat_message_has_reasoning(message: Mapping[str, object]) -> bool:
+    if _nonempty_reasoning_content(message) is not None:
+        return True
+    return any(
+        isinstance(block, Mapping)
+        and block.get("type") == "thinking"
+        and isinstance(block.get("thinking"), str)
+        and bool(block["thinking"].strip())
+        for field in ("content", "thinking_blocks")
+        for block in _message_blocks(message, field)
+    )
+
+
+def deepseek_chat_history_requires_disabled_thinking(messages: list[dict]) -> bool:
+    return any(
+        message.get("role") == "assistant"
+        and isinstance(message.get("tool_calls"), list)
+        and bool(message["tool_calls"])
+        and not _chat_message_has_reasoning(message)
+        for message in messages
+    )
+
+
 def _prepare_deepseek_chat_message(message: dict) -> dict:
     transformed_message = deepcopy(message)
     if transformed_message.get("role") != "assistant":
@@ -181,8 +209,6 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
     has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
     if has_tool_calls and has_redacted_thinking:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
-    if has_tool_calls and not has_reasoning:
-        raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
 
     transformed_message = _without_reasoning_content_fields(transformed_message)
     if thinking_blocks:
