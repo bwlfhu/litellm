@@ -87,6 +87,56 @@ async def test_anthropic_messages_route_prioritizes_deepseek_protocol_deployment
     assert "_litellm_router_call_type" not in dispatch.call_args.kwargs
 
 
+@pytest.mark.asyncio(loop_scope="module")
+async def test_router_protocol_context_stops_at_anthropic_messages_boundary():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "deepseek-v4-pro",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://provider.example.test",
+                    "api_key": "test-key",
+                },
+                "model_info": {
+                    "id": "deepseek-deployment",
+                    "reasoning_protocol": "deepseek_anthropic",
+                    "deepseek_anthropic_messages_path": "v1/messages",
+                },
+            }
+        ],
+        num_retries=0,
+    )
+
+    try:
+        with patch(
+            "litellm.llms.anthropic.experimental_pass_through.messages.handler.base_llm_http_handler.anthropic_messages_handler",
+            return_value={"content": []},
+        ) as dispatch:
+            await router.aanthropic_messages(
+                model="deepseek-v4-pro",
+                max_tokens=100,
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        router.discard()
+
+    dispatched = dispatch.call_args.kwargs
+    request_body = dispatched["anthropic_messages_provider_config"].transform_anthropic_messages_request(
+        model=dispatched["model"],
+        messages=dispatched["messages"],
+        anthropic_messages_optional_request_params=dispatched["anthropic_messages_optional_request_params"],
+        litellm_params=dispatched["litellm_params"],
+        headers={},
+    )
+
+    assert "_litellm_deployment_protocol_context" not in dispatched["kwargs"]
+    assert "_litellm_deployment_protocol_context" not in dispatched["anthropic_messages_optional_request_params"]
+    assert "_litellm_deployment_protocol_context" not in dispatched["litellm_params"].model_dump()
+    json.dumps(request_body)
+
+
 def test_untrusted_protocol_context_dict_does_not_select_deepseek_config():
     from litellm.llms.anthropic.experimental_pass_through.messages import handler
 

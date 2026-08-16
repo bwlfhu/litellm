@@ -500,6 +500,7 @@ def anthropic_messages_handler(
     original_model = model
 
     protocol_context = get_deployment_protocol_context(kwargs)
+    kwargs.pop("_litellm_deployment_protocol_context", None)
     kwargs.pop("_deepseek_anthropic_messages_path", None)
     kwargs.pop("_deepseek_anthropic_tool_thinking", None)
     litellm_params = GenericLiteLLMParams(
