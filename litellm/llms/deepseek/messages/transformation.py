@@ -177,7 +177,7 @@ def _chat_message_has_tool_history(message: Mapping[str, object]) -> bool:
     )
 
 
-def deepseek_chat_history_requires_disabled_thinking(messages: list[dict]) -> bool:
+def deepseek_history_requires_disabled_thinking(messages: list[dict]) -> bool:
     return any(
         message.get("role") == "assistant"
         and _chat_message_has_tool_history(message)
@@ -392,7 +392,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         request_params = dict(anthropic_messages_optional_request_params)
         request_params.pop("_deepseek_anthropic_messages_path", None)
         disable_tool_thinking = litellm_params.get("_deepseek_anthropic_tool_thinking") == "disabled"
-        if disable_tool_thinking and bool(request_params.get("tools")):
+        if (disable_tool_thinking and bool(request_params.get("tools"))) or deepseek_history_requires_disabled_thinking(
+            messages
+        ):
             request_params["thinking"] = {"type": "disabled"}
         anthropic_messages_request = super().transform_anthropic_messages_request(
             model=model,

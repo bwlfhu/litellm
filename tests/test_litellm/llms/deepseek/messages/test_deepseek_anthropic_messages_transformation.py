@@ -375,9 +375,92 @@ def test_deepseek_anthropic_messages_replays_tool_history_without_thinking():
     )
 
     assert request["messages"] == original_messages
-    assert request["thinking"] == {"type": "enabled"}
+    assert request["thinking"] == {"type": "disabled"}
     assert request["output_config"] == {"effort": "high"}
     assert messages == original_messages
+
+
+@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize("stream", [False, True])
+async def test_router_selected_deepseek_messages_disables_thinking_for_reasoningless_tool_history(stream):
+    captured_requests = []
+
+    def mock_transport(request):
+        request_body = json.loads(request.content)
+        captured_requests.append(request_body)
+        if request_body["stream"]:
+            return httpx.Response(
+                200,
+                request=request,
+                content=(
+                    b'event: message_start\ndata: {"type":"message_start"}\n\n'
+                    b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+                ),
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done"}],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "deepseek-group",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://deepseek.example.test",
+                    "api_key": "test",
+                },
+                "model_info": {"id": "deepseek-anthropic", "reasoning_protocol": "deepseek_anthropic"},
+            }
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I will use the tool."},
+                {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}],
+        },
+    ]
+
+    try:
+        with patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client", return_value=http_client):
+            response = await router.aanthropic_messages(
+                max_tokens=100,
+                messages=messages,
+                model="deepseek-group",
+                stream=stream,
+                thinking={"type": "enabled"},
+            )
+            if stream:
+                _ = [chunk async for chunk in response]
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["thinking"] == {"type": "disabled"}
+    assert captured_requests[0]["messages"] == messages
 
 
 def test_deepseek_anthropic_tool_thinking_policy_leaves_non_tool_request_enabled():

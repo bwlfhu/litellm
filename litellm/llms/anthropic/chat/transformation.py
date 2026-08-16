@@ -1796,11 +1796,11 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         preserve_unsigned_thinking_blocks = protocol_context is not None
         if preserve_unsigned_thinking_blocks:
             from litellm.llms.deepseek.messages.transformation import (
-                deepseek_chat_history_requires_disabled_thinking,
+                deepseek_history_requires_disabled_thinking,
                 prepare_deepseek_chat_history,
             )
 
-            requires_disabled_thinking = deepseek_chat_history_requires_disabled_thinking(messages)
+            requires_disabled_thinking = deepseek_history_requires_disabled_thinking(messages)
             messages = prepare_deepseek_chat_history(messages)
 
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
