@@ -516,7 +516,7 @@ def test_deepseek_anthropic_messages_restores_reasoning_content_without_mutating
         headers={},
     )
 
-    assert request["thinking"] == {"type": "disabled"}
+    assert "thinking" not in request
     assert request["messages"] == [
         {
             "role": "assistant",
@@ -857,7 +857,7 @@ async def test_router_configured_deepseek_messages_disables_tool_thinking_on_fir
         router.discard()
 
     assert len(captured_requests) == 1
-    assert captured_requests[0]["thinking"] == {"type": "disabled"}
+    assert "thinking" not in captured_requests[0]
 
 
 @pytest.mark.asyncio(loop_scope="module")
