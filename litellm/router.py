@@ -3118,7 +3118,9 @@ class Router:
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
         raw_model_info = deployment.get("model_info", {})
-        model_info = raw_model_info.copy()
+        model_info = (
+            raw_model_info.copy() if isinstance(raw_model_info, dict) else raw_model_info.model_dump(exclude_none=True)
+        )
         protocol_context = _build_deployment_protocol_context(raw_model_info)
         kwargs.pop("_litellm_deployment_protocol_context", None)
         if protocol_context is not None:
@@ -3138,14 +3140,64 @@ class Router:
             function_name=function_name,
         )
 
-        kwargs.setdefault(metadata_variable_name, {}).update(
-            {
-                "deployment": deployment_litellm_model_name,
-                "model_info": model_info,
+        # Routing telemetry must use this router-authored snapshot rather than
+        # either metadata container. The other metadata container can remain
+        # caller-provided for Chat/Responses compatibility.
+        kwargs.pop("_litellm_routing_stats_metadata", None)
+        deployment_metadata = {
+            "deployment": deployment_litellm_model_name,
+            "model_info": model_info,
+            "api_base": deployment_api_base,
+            "deployment_model_name": deployment_model_name,
+        }
+        kwargs.setdefault(metadata_variable_name, {}).update(deployment_metadata)
+        logging_obj = kwargs.get("litellm_logging_obj")
+        if logging_obj is not None:
+            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
+            if isinstance(logging_litellm_params, dict):
+                logging_litellm_params.setdefault(metadata_variable_name, {}).update(deployment_metadata)
+
+            model_call_details = getattr(logging_obj, "model_call_details", None)
+            if isinstance(model_call_details, dict):
+                model_call_litellm_params = model_call_details.get("litellm_params")
+                if isinstance(model_call_litellm_params, dict):
+                    model_call_litellm_params.setdefault(metadata_variable_name, {}).update(deployment_metadata)
+        model_group = kwargs[metadata_variable_name].get("model_group")
+        access_groups = model_info.get("access_groups")
+        model_id = model_info.get("id")
+        if (
+            model_id is not None
+            and isinstance(model_group, str)
+            and isinstance(access_groups, list)
+            and access_groups
+            and isinstance(access_groups[0], str)
+            and access_groups[0]
+        ):
+            kwargs["_litellm_routing_stats_metadata"] = {
+                "model_id": str(model_id),
+                "model_group": model_group,
+                "channel": access_groups[0],
                 "api_base": deployment_api_base,
-                "deployment_model_name": deployment_model_name,
             }
-        )
+
+        routing_stats_metadata = kwargs.get("_litellm_routing_stats_metadata")
+        if isinstance(routing_stats_metadata, dict) and logging_obj is not None:
+            # The proxy creates its logging object before Router selects a
+            # deployment. Keep that callback payload in sync here, rather than
+            # waiting for function_setup(), which is skipped for prebuilt loggers.
+            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
+            if isinstance(logging_litellm_params, dict):
+                logging_litellm_params["routing_stats_metadata"] = routing_stats_metadata
+
+            model_call_details = getattr(logging_obj, "model_call_details", None)
+            if isinstance(model_call_details, dict):
+                model_call_litellm_params = model_call_details.get("litellm_params")
+                if isinstance(model_call_litellm_params, dict):
+                    model_call_litellm_params["routing_stats_metadata"] = routing_stats_metadata
+
+            # This is callback-only state. Do not let it flow through the Chat
+            # provider parameter builder after a prebuilt logger was updated.
+            kwargs.pop("_litellm_routing_stats_metadata", None)
 
         # A retry/fallback reuses this same kwargs dict for the next deployment.
         # Refund and clear any reservation the previous deployment attempt left
