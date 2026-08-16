@@ -119,7 +119,9 @@ def test_untrusted_protocol_context_object_does_not_select_deepseek_config():
             model="anthropic/claude-test",
             custom_llm_provider="anthropic",
             _litellm_deployment_protocol_context=_RouterDeploymentProtocolContext(
-                protocol="deepseek_anthropic", messages_path="v1/messages", _owner=object()
+                protocol="deepseek_anthropic",
+                messages_path="v1/messages",
+                _owner=object(),
             ),
         )
 
@@ -296,7 +298,8 @@ def test_deepseek_anthropic_messages_preserves_thinking_and_sanitizes_custom_too
         messages=messages,
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
-            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "thinking": {"type": "enabled"},
+            "output_config": {"effort": "high"},
             "tools": [
                 {
                     "type": "custom",
@@ -329,13 +332,49 @@ def test_deepseek_anthropic_messages_preserves_thinking_and_sanitizes_custom_too
         },
         messages[2],
     ]
-    assert request["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+    assert request["thinking"] == {"type": "enabled"}
+    assert request["output_config"] == {"effort": "high"}
     assert request["tools"][0] == {
         "name": "get_weather",
         "description": "Get weather",
         "input_schema": {"type": "object"},
     }
     assert request["tools"][1]["type"] == "web_search_20260209"
+    assert messages == original_messages
+
+
+def test_deepseek_anthropic_messages_replays_tool_history_without_thinking():
+    config = DeepSeekAnthropicMessagesConfig()
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I will check the weather."},
+                {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {"city": "Tokyo"}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}],
+        },
+    ]
+    original_messages = deepcopy(messages)
+
+    request = config.transform_anthropic_messages_request(
+        model="deepseek-v4-flash",
+        messages=messages,
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+            "output_config": {"effort": "high"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"] == original_messages
+    assert request["thinking"] == {"type": "enabled"}
+    assert request["output_config"] == {"effort": "high"}
     assert messages == original_messages
 
 
@@ -395,21 +434,7 @@ def test_deepseek_anthropic_messages_promotes_nonempty_provider_reasoning_conten
 
 
 @pytest.mark.asyncio(loop_scope="module")
-@pytest.mark.parametrize(
-    "content",
-    [
-        [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-        [
-            {"type": "thinking", "thinking": " "},
-            {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
-        ],
-        [
-            {"type": "redacted_thinking", "data": "encrypted"},
-            {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
-        ],
-    ],
-)
-async def test_deepseek_invalid_tool_history_skips_http_and_router_fallback(content):
+async def test_deepseek_redacted_tool_history_skips_http_and_router_fallback():
     requests = []
 
     def mock_transport(request):
@@ -460,7 +485,15 @@ async def test_deepseek_invalid_tool_history_skips_http_and_router_fallback(cont
             with pytest.raises(AnthropicError, match="DeepSeek Anthropic tool history") as error:
                 await router.aanthropic_messages(
                     max_tokens=100,
-                    messages=[{"role": "assistant", "content": content}],
+                    messages=[
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "redacted_thinking", "data": "encrypted"},
+                                {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
+                            ],
+                        }
+                    ],
                     model="primary",
                 )
     finally:

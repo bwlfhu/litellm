@@ -126,8 +126,6 @@ def _deepseek_history_message(message: Dict) -> Dict:
     if not has_reasoning and reasoning_content is not None:
         transformed_content = [{"type": "thinking", "thinking": reasoning_content}, *transformed_content]
         has_reasoning = True
-    if has_tool_use and not has_reasoning:
-        raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
     transformed_message["content"] = transformed_content
     return transformed_message
 
@@ -152,6 +150,12 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
     def should_strip_billing_metadata(self) -> bool:
         return True
+
+    @staticmethod
+    def _translate_adaptive_effort_for_non_adaptive_model(
+        model: str, optional_params: Dict, max_tokens: Optional[int], custom_llm_provider: str
+    ) -> None:
+        return
 
     @staticmethod
     def get_api_key(api_key: Optional[str] = None) -> Optional[str]:
