@@ -2344,6 +2344,7 @@ def anthropic_messages_pt(
     messages: List[AllMessageValues],
     model: str,
     llm_provider: str,
+    preserve_unsigned_thinking_blocks: bool = False,
 ) -> List[
     Union[
         AnthropicMessagesUserMessageParam,
@@ -2530,7 +2531,11 @@ def anthropic_messages_pt(
 
             _raw_thinking_blocks = assistant_content_block.get("thinking_blocks", None)
             thinking_blocks = (
-                _drop_unsignable_thinking_blocks(_raw_thinking_blocks) if _raw_thinking_blocks is not None else None
+                _raw_thinking_blocks
+                if preserve_unsigned_thinking_blocks
+                else (
+                    _drop_unsignable_thinking_blocks(_raw_thinking_blocks) if _raw_thinking_blocks is not None else None
+                )
             )
 
             # Check if tool_calls contain server tool calls (web search, etc.)
@@ -2697,7 +2702,7 @@ def anthropic_messages_pt(
                         if (
                             m.get("type", "") == "thinking"
                             and len(thinking_block) > 0
-                            and not _is_unsignable_thinking_block(m)
+                            and (preserve_unsigned_thinking_blocks or not _is_unsignable_thinking_block(m))
                         ):  # don't pass empty text blocks. anthropic api raises errors.
                             anthropic_message: Union[
                                 ChatCompletionThinkingBlock,

@@ -745,6 +745,205 @@ async def test_router_selected_deepseek_chat_strips_custom_tool_type(reasoning_p
 
 
 @pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize(
+    ("stream", "reasoning_message_field"),
+    [(False, "reasoning_content"), (True, "provider_specific_fields")],
+)
+async def test_router_selected_deepseek_chat_replays_reasoning_content(stream, reasoning_message_field):
+    captured_requests = []
+
+    def mock_transport(request):
+        captured_requests.append(json.loads(request.content))
+        if stream:
+            return httpx.Response(
+                200,
+                request=request,
+                content=(
+                    b'event: message_start\ndata: {"type":"message_start"}\n\n'
+                    b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+                ),
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done"}],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    assistant_message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_123",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+            }
+        ],
+    }
+    if reasoning_message_field == "reasoning_content":
+        assistant_message[reasoning_message_field] = "I should call the weather tool."
+    else:
+        assistant_message[reasoning_message_field] = {
+            "reasoning_content": "I should call the weather tool.",
+            "source": "provider",
+        }
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "deepseek-group",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://deepseek.example.test/v1/messages",
+                    "api_key": "test",
+                },
+                "model_info": {"id": "deepseek-anthropic", "reasoning_protocol": "deepseek_anthropic"},
+            }
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+
+    try:
+        await router.acompletion(
+            model="deepseek-group",
+            messages=[
+                {"role": "user", "content": "Use the weather tool."},
+                assistant_message,
+                {"role": "tool", "tool_call_id": "call_123", "content": "Sunny"},
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather.",
+                        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                    },
+                }
+            ],
+            thinking={"type": "disabled"},
+            allowed_openai_params=["thinking"],
+            max_tokens=100,
+            stream=stream,
+            client=http_client,
+        )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert len(captured_requests) == 1
+    assistant_wire_message = captured_requests[0]["messages"][1]
+    assert assistant_wire_message == {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "I should call the weather tool."},
+            {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {"city": "Paris"}},
+        ],
+    }
+    assert captured_requests[0]["messages"][2] == {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "call_123", "content": "Sunny"}],
+    }
+    assert captured_requests[0]["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize(
+    "assistant_message",
+    [
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": " ",
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "redacted_thinking", "data": "encrypted"}],
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }
+            ],
+        },
+    ],
+)
+async def test_invalid_deepseek_chat_tool_history_skips_http_and_fallback(assistant_message):
+    requests = []
+
+    def mock_transport(request):
+        requests.append(request)
+        return httpx.Response(200, request=request, json={})
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "primary",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://deepseek.example.test/v1/messages",
+                    "api_key": "test",
+                    "order": 1,
+                },
+                "model_info": {"id": "deepseek-anthropic", "reasoning_protocol": "deepseek_anthropic"},
+            },
+            {
+                "model_name": "primary",
+                "litellm_params": {
+                    "model": "anthropic/claude-order-2",
+                    "api_base": "https://order-2.example.test/v1/messages",
+                    "api_key": "test",
+                    "order": 2,
+                },
+                "model_info": {"id": "order-2"},
+            },
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+
+    try:
+        with pytest.raises(litellm.BadRequestError, match="DeepSeek Anthropic tool history") as error:
+            await router.acompletion(
+                model="primary",
+                messages=[{"role": "user", "content": "Use the tool."}, assistant_message],
+                max_tokens=100,
+                client=http_client,
+            )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert getattr(error.value, "_litellm_disable_fallbacks") is True
+    assert requests == []
+    assert router.total_calls["anthropic/claude-test"] == 1
+    assert router.total_calls["anthropic/claude-order-2"] == 0
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_deepseek_anthropic_messages_streams_through_mock_transport():
     captured_requests = []
 

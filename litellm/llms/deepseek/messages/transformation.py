@@ -4,10 +4,11 @@ DeepSeek Anthropic-compatible messages transformation config.
 
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+
 import litellm
 from litellm.llms.anthropic.common_utils import AnthropicError
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
@@ -16,7 +17,6 @@ from litellm.llms.anthropic.experimental_pass_through.messages.transformation im
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
 from litellm.types.router import GenericLiteLLMParams
-
 
 _DEEPSEEK_MESSAGES_PATHS = frozenset({"anthropic/v1/messages", "v1/messages"})
 
@@ -104,7 +104,7 @@ def _deepseek_history_validation_error(message: str) -> AnthropicError:
     return _DeepSeekHistoryValidationError(message=message, status_code=400)
 
 
-def _deepseek_history_message(message: Dict) -> Dict:
+def _deepseek_history_message(message: dict) -> dict:
     transformed_message = deepcopy(message)
     if transformed_message.get("role") != "assistant":
         return transformed_message
@@ -130,8 +130,70 @@ def _deepseek_history_message(message: Dict) -> Dict:
     return transformed_message
 
 
-def _deepseek_history(messages: List[Dict]) -> List[Dict]:
+def _deepseek_history(messages: list[dict]) -> list[dict]:
     return [_deepseek_history_message(message) for message in messages]
+
+
+def _without_reasoning_content_fields(message: dict) -> dict:
+    transformed_message = {key: value for key, value in message.items() if key != "reasoning_content"}
+    provider_specific_fields = transformed_message.get("provider_specific_fields")
+    if not isinstance(provider_specific_fields, Mapping):
+        return transformed_message
+    remaining_provider_specific_fields = {
+        key: value for key, value in provider_specific_fields.items() if key != "reasoning_content"
+    }
+    if remaining_provider_specific_fields:
+        return {**transformed_message, "provider_specific_fields": remaining_provider_specific_fields}
+    return {key: value for key, value in transformed_message.items() if key != "provider_specific_fields"}
+
+
+def _prepare_deepseek_chat_message(message: dict) -> dict:
+    transformed_message = deepcopy(message)
+    if transformed_message.get("role") != "assistant":
+        return transformed_message
+
+    content = transformed_message.get("content")
+    if isinstance(content, list):
+        transformed_content, _, content_has_redacted_thinking, content_has_reasoning = _unsigned_content_blocks(content)
+        transformed_message["content"] = transformed_content
+    else:
+        content_has_redacted_thinking = False
+        content_has_reasoning = False
+
+    raw_thinking_blocks = transformed_message.get("thinking_blocks")
+    if isinstance(raw_thinking_blocks, list):
+        thinking_blocks, _, blocks_have_redacted_thinking, blocks_have_reasoning = _unsigned_content_blocks(
+            raw_thinking_blocks
+        )
+    else:
+        thinking_blocks = []
+        blocks_have_redacted_thinking = False
+        blocks_have_reasoning = False
+
+    has_reasoning = content_has_reasoning or blocks_have_reasoning
+    has_redacted_thinking = content_has_redacted_thinking or blocks_have_redacted_thinking
+    reasoning_content = _nonempty_reasoning_content(message)
+    if not has_reasoning and reasoning_content is not None:
+        thinking_blocks.insert(0, {"type": "thinking", "thinking": reasoning_content})
+        has_reasoning = True
+
+    tool_calls = transformed_message.get("tool_calls")
+    has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
+    if has_tool_calls and has_redacted_thinking:
+        raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
+    if has_tool_calls and not has_reasoning:
+        raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
+
+    transformed_message = _without_reasoning_content_fields(transformed_message)
+    if thinking_blocks:
+        transformed_message["thinking_blocks"] = thinking_blocks
+    else:
+        transformed_message.pop("thinking_blocks", None)
+    return transformed_message
+
+
+def prepare_deepseek_chat_history(messages: list[dict]) -> list[dict]:
+    return [_prepare_deepseek_chat_message(message) for message in messages]
 
 
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
@@ -145,7 +207,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     """
 
     @property
-    def custom_llm_provider(self) -> Optional[str]:
+    def custom_llm_provider(self) -> str | None:
         return "deepseek"
 
     def should_strip_billing_metadata(self) -> bool:
@@ -153,16 +215,16 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
     @staticmethod
     def _translate_adaptive_effort_for_non_adaptive_model(
-        model: str, optional_params: Dict, max_tokens: Optional[int], custom_llm_provider: str
+        model: str, optional_params: dict, max_tokens: int | None, custom_llm_provider: str
     ) -> None:
         return
 
     @staticmethod
-    def get_api_key(api_key: Optional[str] = None) -> Optional[str]:
+    def get_api_key(api_key: str | None = None) -> str | None:
         return api_key or get_secret_str("DEEPSEEK_API_KEY") or litellm.api_key
 
     @staticmethod
-    def get_api_base(api_base: Optional[str] = None) -> str:
+    def get_api_base(api_base: str | None = None) -> str:
         return (
             api_base
             or get_secret_str("DEEPSEEK_ANTHROPIC_API_BASE")
@@ -174,12 +236,12 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         self,
         headers: dict,
         model: str,
-        messages: List[Any],
+        messages: list[Any],
         optional_params: dict,
         litellm_params: dict,
-        api_key: Optional[str] = None,
-        api_base: Optional[str] = None,
-    ) -> Tuple[dict, Optional[str]]:
+        api_key: str | None = None,
+        api_base: str | None = None,
+    ) -> tuple[dict, str | None]:
         dynamic_api_key = self.get_api_key(api_key=api_key)
 
         if "x-api-key" not in headers and "authorization" not in headers and dynamic_api_key is not None:
@@ -200,12 +262,12 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
     def get_complete_url(
         self,
-        api_base: Optional[str],
-        api_key: Optional[str],
+        api_base: str | None,
+        api_key: str | None,
         model: str,
         optional_params: dict,
         litellm_params: dict,
-        stream: Optional[bool] = None,
+        stream: bool | None = None,
     ) -> str:
         base_url = self.get_api_base(api_base=api_base).rstrip("/")
         configured_path = optional_params.get("_deepseek_anthropic_messages_path")
@@ -234,11 +296,11 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     def transform_anthropic_messages_request(
         self,
         model: str,
-        messages: List[Dict],
-        anthropic_messages_optional_request_params: Dict,
+        messages: list[dict],
+        anthropic_messages_optional_request_params: dict,
         litellm_params: GenericLiteLLMParams,
         headers: dict,
-    ) -> Dict:
+    ) -> dict:
         request_params = dict(anthropic_messages_optional_request_params)
         request_params.pop("_deepseek_anthropic_messages_path", None)
         anthropic_messages_request = super().transform_anthropic_messages_request(
