@@ -1,4 +1,5 @@
 import json
+import time
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,7 @@ from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
 )
 from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+from litellm.litellm_core_utils.litellm_logging import Logging
 from litellm.proxy.pass_through_endpoints import streaming_handler
 from litellm.router import Router
 from litellm.router_protocol import _RouterDeploymentProtocolContext
@@ -835,6 +837,15 @@ async def test_router_configured_deepseek_messages_disables_tool_thinking_on_fir
     http_client = AsyncHTTPHandler()
     await http_client.client.aclose()
     http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+    logging_obj = Logging(
+        model="deepseek-group",
+        messages=[{"role": "user", "content": "Use the weather tool."}],
+        stream=False,
+        call_type="anthropic_messages",
+        start_time=time.time(),
+        litellm_call_id="test-call-id",
+        function_id="test-function-id",
+    )
 
     try:
         with patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client", return_value=http_client):
@@ -842,6 +853,7 @@ async def test_router_configured_deepseek_messages_disables_tool_thinking_on_fir
                 max_tokens=100,
                 messages=[{"role": "user", "content": "Use the weather tool."}],
                 model="deepseek-group",
+                litellm_logging_obj=logging_obj,
                 thinking={"type": "enabled"},
                 tools=[
                     {
@@ -858,6 +870,7 @@ async def test_router_configured_deepseek_messages_disables_tool_thinking_on_fir
 
     assert len(captured_requests) == 1
     assert "thinking" not in captured_requests[0]
+    assert logging_obj.litellm_params["model_info"]["id"] == "deepseek-anthropic"
 
 
 @pytest.mark.asyncio(loop_scope="module")

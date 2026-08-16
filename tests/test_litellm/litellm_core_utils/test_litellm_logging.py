@@ -385,6 +385,7 @@ class TestAnthropicPassthroughCustomPricing:
                 "model_info": {
                     "id": "claude-custom-pricing",
                     "input_cost_per_token": 0.5,
+                    "litellm_provider": "deepseek",
                     "output_cost_per_token": 1.5,
                 },
             },
@@ -407,6 +408,8 @@ class TestAnthropicPassthroughCustomPricing:
             mock_cost.assert_called_once()
             call_kwargs = mock_cost.call_args
             assert call_kwargs.kwargs.get("custom_pricing") is True
+            assert call_kwargs.kwargs.get("custom_llm_provider") == "deepseek"
+            assert call_kwargs.kwargs.get("model") == "deepseek/claude-sonnet-4-20250514"
             assert call_kwargs.kwargs.get("router_model_id") == "claude-custom-pricing"
 
 

@@ -246,20 +246,23 @@ class AnthropicPassthroughLoggingHandler:
 
             model = AnthropicPassthroughLoggingHandler._resolve_costing_model(model, logging_obj)
 
-            # Prepend custom_llm_provider to model if not already present
-            model_for_cost = model
-            if custom_llm_provider and not model.startswith(f"{custom_llm_provider}/"):
-                model_for_cost = f"{custom_llm_provider}/{model}"
-
             router_model_id = logging_obj.get_router_model_id()
             custom_pricing = use_custom_pricing_for_model(
                 litellm_params=(logging_obj.litellm_params if hasattr(logging_obj, "litellm_params") else None)
             )
+            model_info = logging_obj.litellm_params.get("model_info", {}) or {}
+            model_info_provider = model_info.get("litellm_provider") if isinstance(model_info, dict) else None
+            costing_provider = (
+                model_info_provider if custom_pricing and isinstance(model_info_provider, str) else custom_llm_provider
+            )
+            model_for_cost = model
+            if costing_provider and not model.startswith(f"{costing_provider}/"):
+                model_for_cost = f"{costing_provider}/{model}"
 
             response_cost = litellm.completion_cost(
                 completion_response=litellm_model_response,
                 model=model_for_cost,
-                custom_llm_provider=custom_llm_provider,
+                custom_llm_provider=costing_provider,
                 custom_pricing=custom_pricing,
                 router_model_id=router_model_id,
             )
