@@ -745,9 +745,9 @@ async def test_anthropic_messages_streaming_response_aclose_closes_agentic_upstr
 
 @pytest.mark.asyncio
 async def test_async_anthropic_messages_handler_passes_litellm_metadata():
-    """Ensure litellm_metadata from kwargs is forwarded via update_from_kwargs.
+    """Ensure litellm_metadata from router params is forwarded via update_from_kwargs.
 
-    Routes like /messages store model_info under kwargs['litellm_metadata'].
+    Routes like /messages store model_info under GenericLiteLLMParams.litellm_metadata.
     The handler must forward this so that use_custom_pricing_for_model can
     detect custom pricing. Regression test for #23185.
     """
@@ -784,11 +784,9 @@ async def test_async_anthropic_messages_handler_passes_litellm_metadata():
         "input_cost_per_token": 0.0003,
         "output_cost_per_token": 0.0015,
     }
-    kwargs = {
-        "litellm_metadata": {
-            "model_info": custom_model_info,
-            "deployment": "anthropic/claude-sonnet-4-20250514",
-        },
+    litellm_metadata = {
+        "model_info": custom_model_info,
+        "deployment": "anthropic/claude-sonnet-4-20250514",
     }
 
     try:
@@ -798,24 +796,23 @@ async def test_async_anthropic_messages_handler_passes_litellm_metadata():
             anthropic_messages_provider_config=mock_config,
             anthropic_messages_optional_request_params={},
             custom_llm_provider="anthropic",
-            litellm_params=GenericLiteLLMParams(),
+            litellm_params=GenericLiteLLMParams(litellm_metadata=litellm_metadata),
             logging_obj=mock_logging_obj,
             client=mock_client,
-            kwargs=kwargs,
+            kwargs={},
         )
     except Exception:
         pass
 
     mock_logging_obj.update_from_kwargs.assert_called_once()
     call_kwargs = mock_logging_obj.update_from_kwargs.call_args
-    kwargs_arg = (
-        call_kwargs.kwargs.get("kwargs", call_kwargs[1].get("kwargs", {}))
+    litellm_params_arg = (
+        call_kwargs.kwargs.get("litellm_params", call_kwargs[1].get("litellm_params", {}))
         if call_kwargs.kwargs
-        else call_kwargs[1].get("kwargs", {})
+        else call_kwargs[1].get("litellm_params", {})
     )
 
-    assert "litellm_metadata" in kwargs_arg
-    assert kwargs_arg["litellm_metadata"]["model_info"] == custom_model_info
+    assert litellm_params_arg["litellm_metadata"] == litellm_metadata
 
 
 @pytest.mark.asyncio

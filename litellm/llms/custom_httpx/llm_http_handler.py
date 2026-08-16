@@ -2091,6 +2091,7 @@ class BaseLLMHTTPHandler:
                 "preset_cache_key": None,
                 "stream_response": {},
                 "model_info": kwargs.get("model_info"),
+                "litellm_metadata": litellm_params.get("litellm_metadata"),
                 **anthropic_messages_optional_request_params,
             },
             custom_llm_provider=custom_llm_provider,
