@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -418,6 +419,19 @@ class TestAnthropicPassthroughCustomPricing:
             assert call_kwargs.kwargs.get("custom_llm_provider") == "deepseek"
             assert call_kwargs.kwargs.get("model") == "deepseek/claude-sonnet-4-20250514"
             assert call_kwargs.kwargs.get("router_model_id") == "claude-custom-pricing"
+
+    def test_streaming_success_preserves_precomputed_response_cost(self, logging_obj):
+        logging_obj.stream = True
+        logging_obj.model_call_details["response_cost"] = 0.125
+
+        logging_obj._success_handler_helper_fn(
+            result=ModelResponse(),
+            start_time=datetime.datetime.now(),
+            end_time=datetime.datetime.now(),
+            cache_hit=False,
+        )
+
+        assert logging_obj.model_call_details["response_cost"] == 0.125
 
 
 class TestUpdateFromKwargs:
