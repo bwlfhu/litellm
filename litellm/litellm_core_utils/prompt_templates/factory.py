@@ -2340,6 +2340,15 @@ def _drop_unsignable_thinking_blocks(
     return [block for block in thinking_blocks if not _is_unsignable_thinking_block(block)]
 
 
+def _validated_anthropic_tool_use(block: dict) -> AnthropicMessagesToolUseParam | None:
+    tool_use_id = block.get("id")
+    name = block.get("name")
+    tool_input = block.get("input")
+    if not isinstance(tool_use_id, str) or not isinstance(name, str) or not isinstance(tool_input, dict):
+        return None
+    return AnthropicMessagesToolUseParam(type="tool_use", id=tool_use_id, name=name, input=tool_input)
+
+
 def anthropic_messages_pt(
     messages: List[AllMessageValues],
     model: str,
@@ -2723,7 +2732,18 @@ def anthropic_messages_pt(
                         # handle server_tool_use blocks (tool search, web search, etc.)
                         # Pass through as-is since these are Anthropic-native content types
                         elif m.get("type", "") == "server_tool_use":
+                            item_id = m.get("id")
+                            if isinstance(item_id, str) and item_id in unique_tool_ids:
+                                continue
+                            if isinstance(item_id, str):
+                                unique_tool_ids.add(item_id)
                             assistant_content.append(m)  # type: ignore
+                        elif preserve_unsigned_thinking_blocks and m.get("type", "") == "tool_use":
+                            native_tool_use = _validated_anthropic_tool_use(m)
+                            if native_tool_use is None or native_tool_use["id"] in unique_tool_ids:
+                                continue
+                            unique_tool_ids.add(native_tool_use["id"])
+                            assistant_content.append(native_tool_use)
                         # handle all *_tool_result blocks (tool_search_tool_result,
                         # web_search_tool_result, bash_code_execution_tool_result, etc.)
                         # Pass through as-is since these are Anthropic-native content types

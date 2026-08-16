@@ -860,7 +860,42 @@ async def test_router_selected_deepseek_chat_replays_reasoning_content(stream, r
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_redacted_deepseek_chat_tool_history_skips_http_and_fallback():
+@pytest.mark.parametrize(
+    "assistant_message",
+    [
+        {
+            "role": "assistant",
+            "content": [{"type": "redacted_thinking", "data": "encrypted"}],
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "encrypted"},
+                {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "encrypted"},
+                {"type": "server_tool_use", "id": "srvtoolu_123", "name": "web_search", "input": {}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "redacted_thinking", "data": "encrypted"}],
+            "function_call": {"name": "get_weather", "arguments": "{}"},
+        },
+    ],
+)
+async def test_redacted_deepseek_chat_tool_history_skips_http_and_fallback(assistant_message):
     requests = []
 
     def mock_transport(request):
@@ -902,17 +937,7 @@ async def test_redacted_deepseek_chat_tool_history_skips_http_and_fallback():
                 model="primary",
                 messages=[
                     {"role": "user", "content": "Use the tool."},
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "redacted_thinking", "data": "encrypted"}],
-                        "tool_calls": [
-                            {
-                                "id": "call_123",
-                                "type": "function",
-                                "function": {"name": "get_weather", "arguments": "{}"},
-                            }
-                        ],
-                    },
+                    assistant_message,
                 ],
                 max_tokens=100,
                 client=http_client,
@@ -1000,6 +1025,184 @@ async def test_deepseek_chat_tool_history_without_reasoning_disables_thinking(mo
         "role": "assistant",
         "content": [{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {"city": "Paris"}}],
     }
+
+
+@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize(
+    ("assistant_message", "expected_tool_type"),
+    [
+        (
+            {
+                "role": "assistant",
+                "content": None,
+                "function_call": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+            },
+            "tool_use",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_123",
+                        "name": "get_weather",
+                        "input": {"city": "Paris"},
+                    }
+                ],
+            },
+            "tool_use",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_123",
+                        "name": "web_search",
+                        "input": {"query": "weather Paris"},
+                    }
+                ],
+            },
+            "server_tool_use",
+        ),
+    ],
+)
+async def test_deepseek_chat_non_tool_calls_history_without_reasoning_disables_thinking(
+    assistant_message, expected_tool_type
+):
+    captured_requests = []
+
+    def mock_transport(request):
+        captured_requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done"}],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "deepseek-group",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://deepseek.example.test/v1/messages",
+                    "api_key": "test",
+                },
+                "model_info": {"id": "deepseek-anthropic", "reasoning_protocol": "deepseek_anthropic"},
+            }
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+
+    try:
+        messages = [{"role": "user", "content": "Use the tool."}, assistant_message]
+        if assistant_message.get("function_call") is not None:
+            messages.append({"role": "function", "name": "get_weather", "content": "Sunny"})
+        await router.acompletion(
+            model="deepseek-group",
+            messages=messages,
+            max_tokens=100,
+            client=http_client,
+        )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["thinking"] == {"type": "disabled"}
+    wire_tool_block = captured_requests[0]["messages"][1]["content"][0]
+    assert wire_tool_block["type"] == expected_tool_type
+    if isinstance(assistant_message["content"], list):
+        assert wire_tool_block == assistant_message["content"][0]
+    if assistant_message.get("function_call") is not None:
+        assert wire_tool_block["id"] == "legacy_function_call_1"
+        assert captured_requests[0]["messages"][2] == {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "legacy_function_call_1", "content": "Sunny"}],
+        }
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_deepseek_chat_deduplicates_native_and_openai_tool_history():
+    captured_requests = []
+
+    def mock_transport(request):
+        captured_requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done"}],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "deepseek-group",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://deepseek.example.test/v1/messages",
+                    "api_key": "test",
+                },
+                "model_info": {"id": "deepseek-anthropic", "reasoning_protocol": "deepseek_anthropic"},
+            }
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+
+    try:
+        await router.acompletion(
+            model="deepseek-group",
+            messages=[
+                {"role": "user", "content": "Use the tool."},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}}],
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": "{}"},
+                        }
+                    ],
+                },
+            ],
+            max_tokens=100,
+            client=http_client,
+        )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert len(captured_requests) == 1
+    assistant_content = captured_requests[0]["messages"][1]["content"]
+    assert assistant_content == [{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}}]
 
 
 @pytest.mark.asyncio(loop_scope="module")

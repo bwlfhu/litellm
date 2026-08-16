@@ -92,7 +92,7 @@ def _unsigned_content_blocks(content: list[object]) -> tuple[list[object], bool,
             transformed_block.pop("signature", None)
             thinking = transformed_block.get("thinking")
             has_reasoning = has_reasoning or (isinstance(thinking, str) and bool(thinking.strip()))
-        elif block_type == "tool_use":
+        elif block_type in {"tool_use", "server_tool_use"}:
             has_tool_use = True
         elif block_type == "redacted_thinking":
             has_redacted_thinking = True
@@ -165,11 +165,22 @@ def _chat_message_has_reasoning(message: Mapping[str, object]) -> bool:
     )
 
 
+def _chat_message_has_tool_history(message: Mapping[str, object]) -> bool:
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list) and bool(tool_calls):
+        return True
+    if isinstance(message.get("function_call"), Mapping):
+        return True
+    return any(
+        isinstance(block, Mapping) and block.get("type") in {"tool_use", "server_tool_use"}
+        for block in _message_blocks(message, "content")
+    )
+
+
 def deepseek_chat_history_requires_disabled_thinking(messages: list[dict]) -> bool:
     return any(
         message.get("role") == "assistant"
-        and isinstance(message.get("tool_calls"), list)
-        and bool(message["tool_calls"])
+        and _chat_message_has_tool_history(message)
         and not _chat_message_has_reasoning(message)
         for message in messages
     )
@@ -182,9 +193,12 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
 
     content = transformed_message.get("content")
     if isinstance(content, list):
-        transformed_content, _, content_has_redacted_thinking, content_has_reasoning = _unsigned_content_blocks(content)
+        transformed_content, content_has_tool_use, content_has_redacted_thinking, content_has_reasoning = (
+            _unsigned_content_blocks(content)
+        )
         transformed_message["content"] = transformed_content
     else:
+        content_has_tool_use = False
         content_has_redacted_thinking = False
         content_has_reasoning = False
 
@@ -205,9 +219,8 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
         thinking_blocks.insert(0, {"type": "thinking", "thinking": reasoning_content})
         has_reasoning = True
 
-    tool_calls = transformed_message.get("tool_calls")
-    has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
-    if has_tool_calls and has_redacted_thinking:
+    has_tool_history = content_has_tool_use or _chat_message_has_tool_history(transformed_message)
+    if has_tool_history and has_redacted_thinking:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
 
     transformed_message = _without_reasoning_content_fields(transformed_message)
@@ -218,8 +231,57 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
     return transformed_message
 
 
+def _legacy_function_call_id(message_index: int) -> str:
+    return f"legacy_function_call_{message_index}"
+
+
+def _upgrade_legacy_function_call(message: dict, message_index: int) -> dict:
+    function_call = message.get("function_call")
+    if message.get("role") != "assistant" or not isinstance(function_call, Mapping):
+        return message
+    existing_tool_calls = message.get("tool_calls")
+    tool_calls = existing_tool_calls if isinstance(existing_tool_calls, list) else []
+    return {
+        **{key: value for key, value in message.items() if key != "function_call"},
+        "tool_calls": [
+            *tool_calls,
+            {
+                "id": _legacy_function_call_id(message_index),
+                "type": "function",
+                "function": deepcopy(dict(function_call)),
+            },
+        ],
+    }
+
+
+def _legacy_function_result_call_id(messages: list[dict], message_index: int) -> str | None:
+    tool_call_id = messages[message_index].get("tool_call_id")
+    if isinstance(tool_call_id, str) and tool_call_id:
+        return tool_call_id
+    for prior_index in range(message_index - 1, -1, -1):
+        prior_message = messages[prior_index]
+        if prior_message.get("role") == "assistant" and isinstance(prior_message.get("function_call"), Mapping):
+            return _legacy_function_call_id(prior_index)
+        if prior_message.get("role") in {"user", "tool", "function"}:
+            return None
+    return None
+
+
+def _upgrade_legacy_function_result(message: dict, tool_call_id: str | None) -> dict:
+    if message.get("role") != "function" or tool_call_id is None:
+        return message
+    return {**message, "role": "tool", "tool_call_id": tool_call_id}
+
+
 def prepare_deepseek_chat_history(messages: list[dict]) -> list[dict]:
-    return [_prepare_deepseek_chat_message(message) for message in messages]
+    prepared_messages = [_prepare_deepseek_chat_message(message) for message in messages]
+    return [
+        _upgrade_legacy_function_result(
+            _upgrade_legacy_function_call(message, message_index),
+            _legacy_function_result_call_id(prepared_messages, message_index),
+        )
+        for message_index, message in enumerate(prepared_messages)
+    ]
 
 
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
