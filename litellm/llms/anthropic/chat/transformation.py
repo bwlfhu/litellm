@@ -32,6 +32,7 @@ from litellm.litellm_core_utils.core_helpers import map_finish_reason
 from litellm.litellm_core_utils.prompt_templates.common_utils import unpack_legacy_defs
 from litellm.llms.base_llm.base_utils import type_to_response_format_param
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.types.llms.anthropic import (
     ANTHROPIC_ADVISOR_TOOL_TYPE,
     ANTHROPIC_BETA_HEADER_VALUES,
@@ -1850,6 +1851,15 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             messages = self._rewrite_tool_names_in_messages(messages, _name_forward_map)
         if _name_reverse_map and isinstance(litellm_params, dict):
             litellm_params[ANTHROPIC_TOOL_NAME_REVERSE_MAP_KEY] = _name_reverse_map
+        if get_deployment_protocol_context(litellm_params) is not None and isinstance(
+            optional_params.get("tools"), list
+        ):
+            optional_params["tools"] = [
+                {key: value for key, value in tool.items() if key != "type"}
+                if isinstance(tool, dict) and tool.get("type") == "custom"
+                else tool
+                for tool in optional_params["tools"]
+            ]
 
         # Separate system prompt from rest of message
         anthropic_system_message_list = self.translate_system_message(messages=messages)

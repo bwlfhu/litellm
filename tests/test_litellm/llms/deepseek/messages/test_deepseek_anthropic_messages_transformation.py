@@ -671,6 +671,80 @@ async def test_router_clears_deepseek_protocol_context_for_next_deployment():
 
 
 @pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize(
+    ("reasoning_protocol", "expected_tool_type"),
+    [("deepseek_anthropic", None), (None, "custom")],
+)
+async def test_router_selected_deepseek_chat_strips_custom_tool_type(reasoning_protocol, expected_tool_type):
+    captured_requests = []
+
+    def mock_transport(request):
+        captured_requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            content=(
+                b'event: message_start\ndata: {"type":"message_start"}\n\n'
+                b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+            ),
+        )
+
+    model_info = {"id": "deployment"}
+    if reasoning_protocol is not None:
+        model_info["reasoning_protocol"] = reasoning_protocol
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "model-group",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://provider.example.test/v1/messages",
+                    "api_key": "test",
+                },
+                "model_info": model_info,
+            }
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+
+    try:
+        await router.acompletion(
+            model="model-group",
+            messages=[{"role": "user", "content": "Use the weather tool."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            max_tokens=100,
+            stream=True,
+            client=http_client,
+        )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert len(captured_requests) == 1
+    tool = captured_requests[0]["tools"][0]
+    assert tool.get("type") == expected_tool_type
+    assert tool["name"] == "get_weather"
+    assert tool["input_schema"]["required"] == ["city"]
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_deepseek_anthropic_messages_streams_through_mock_transport():
     captured_requests = []
 
