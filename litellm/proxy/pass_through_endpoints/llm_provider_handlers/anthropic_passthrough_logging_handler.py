@@ -267,6 +267,7 @@ class AnthropicPassthroughLoggingHandler:
                 router_model_id=router_model_id,
             )
 
+            litellm_model_response._hidden_params["response_cost"] = response_cost
             kwargs["response_cost"] = response_cost
             kwargs["model"] = model
             # the pass-through success path reads spend from

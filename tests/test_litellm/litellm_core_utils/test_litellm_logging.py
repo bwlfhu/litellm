@@ -420,19 +420,60 @@ class TestAnthropicPassthroughCustomPricing:
             assert call_kwargs.kwargs.get("model") == "deepseek/claude-sonnet-4-20250514"
             assert call_kwargs.kwargs.get("router_model_id") == "claude-custom-pricing"
 
-    def test_streaming_success_preserves_precomputed_response_cost(self, logging_obj):
-        logging_obj.stream = True
-        logging_obj.model_call_details["response_cost"] = 0.125
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_precomputed_cost_reaches_standard_logging_payload(self, stream):
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import (
+            AnthropicPassthroughLoggingHandler,
+        )
 
-        logging_obj._success_handler_helper_fn(
-            result=ModelResponse(),
+        logging_obj = LitellmLogging(
+            model="custom-messages-model",
+            messages=[{"role": "user", "content": "hello"}],
+            stream=stream,
+            call_type="anthropic_messages",
+            start_time=datetime.datetime.now(),
+            litellm_call_id="test-call-id",
+            function_id="test-function-id",
+        )
+        logging_obj.update_environment_variables(
+            model="custom-messages-model",
+            user="",
+            optional_params={},
+            litellm_params={
+                "model_info": {
+                    "id": "custom-messages-deployment",
+                    "input_cost_per_token": 0.5,
+                    "output_cost_per_token": 1.5,
+                    "litellm_provider": "deepseek",
+                }
+            },
+        )
+        logging_obj.model_call_details["custom_llm_provider"] = "anthropic"
+        response = ModelResponse(
+            model="custom-messages-model",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+        with patch("litellm.completion_cost", return_value=0.125):
+            AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                litellm_model_response=response,
+                model="custom-messages-model",
+                kwargs={},
+                start_time=datetime.datetime.now(),
+                end_time=datetime.datetime.now(),
+                logging_obj=logging_obj,
+            )
+        await logging_obj.async_success_handler(
+            result=response,
             start_time=datetime.datetime.now(),
             end_time=datetime.datetime.now(),
             cache_hit=False,
         )
 
+        assert response._hidden_params["response_cost"] == 0.125
         assert logging_obj.model_call_details["response_cost"] == 0.125
-
+        assert logging_obj.model_call_details["standard_logging_object"]["response_cost"] == 0.125
 
 class TestUpdateFromKwargs:
     """Tests for the update_from_kwargs convenience wrapper."""
