@@ -590,7 +590,7 @@ def test_deepseek_anthropic_messages_restores_reasoning_content_without_mutating
         headers={},
     )
 
-    assert "thinking" not in request
+    assert request["thinking"] == {"type": "disabled"}
     assert request["messages"] == [
         {
             "role": "assistant",
@@ -658,25 +658,30 @@ def test_deepseek_anthropic_messages_normalizes_nonstream_tool_reasoning_text(th
     ]
 
 
-def test_deepseek_anthropic_messages_rejects_unrecoverable_thinking_tool_history():
-    with pytest.raises(AnthropicError, match="requires non-empty reasoning") as error:
-        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
-            model="deepseek-v4-pro",
-            messages=[
-                {
-                    "role": "assistant",
-                    "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-                }
-            ],
-            anthropic_messages_optional_request_params={
-                "max_tokens": 100,
-                "thinking": {"type": "enabled"},
-            },
-            litellm_params=GenericLiteLLMParams(),
-            headers={},
-        )
+def test_deepseek_anthropic_messages_disables_thinking_for_reasoningless_tool_history():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
+            }
+        ],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
 
-    assert getattr(error.value, "_litellm_disable_fallbacks") is True
+    assert request["thinking"] == {"type": "disabled"}
+    assert request["messages"] == [
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
+        }
+    ]
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -941,7 +946,7 @@ async def test_router_configured_deepseek_messages_disables_tool_thinking_on_fir
         router.discard()
 
     assert len(captured_requests) == 1
-    assert "thinking" not in captured_requests[0]
+    assert captured_requests[0]["thinking"] == {"type": "disabled"}
     assert logging_obj.litellm_params["model_info"]["id"] == "deepseek-anthropic"
 
 
