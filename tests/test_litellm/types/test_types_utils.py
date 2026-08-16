@@ -336,12 +336,51 @@ def test_parallel_request_limiter_internal_fields_in_all_litellm_params():
         "_litellm_tpm_reserved_model",
         "_litellm_tpm_reserved_scopes",
         "_litellm_tpm_reservation_released",
+        "_litellm_deployment_protocol_context",
     ]
     for field in internal_fields:
         assert field in all_litellm_params, (
             f"{field!r} is not in all_litellm_params. "
             "It will be forwarded to upstream providers and cause 400 errors."
         )
+
+
+def test_router_protocol_context_is_not_forwarded_as_completion_param():
+    import json
+
+    import litellm
+    from litellm.utils import get_non_default_completion_params, get_optional_params
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "deepseek-group",
+                "litellm_params": {"model": "anthropic/claude-test", "api_key": "test"},
+                "model_info": {"reasoning_protocol": "deepseek_anthropic"},
+            }
+        ],
+        num_retries=0,
+    )
+    request_kwargs = {}
+    try:
+        deployment = router.get_available_deployment(model="deepseek-group", messages=[], request_kwargs=request_kwargs)
+        router._update_kwargs_with_deployment(
+            deployment=deployment,
+            kwargs=request_kwargs,
+            function_name="_ageneric_api_call_with_fallbacks",
+        )
+        non_default_params = get_non_default_completion_params(request_kwargs)
+        optional_params = get_optional_params(
+            model="claude-test",
+            custom_llm_provider="anthropic",
+            messages=[],
+            **non_default_params,
+        )
+    finally:
+        router.discard()
+
+    json.dumps(optional_params)
+    assert "_litellm_deployment_protocol_context" not in optional_params
 
 
 def test_delta_maps_reasoning_to_reasoning_content():
