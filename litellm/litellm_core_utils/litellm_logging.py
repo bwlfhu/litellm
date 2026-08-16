@@ -1858,7 +1858,7 @@ class Logging(LiteLLMLoggingBaseClass):
                     )
             elif standard_logging_object is not None:
                 self.model_call_details["standard_logging_object"] = standard_logging_object
-            else:
+            elif self.model_call_details.get("response_cost") is None:
                 self.model_call_details["response_cost"] = None
 
             result = self._transform_usage_objects(result=result)
