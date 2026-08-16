@@ -3118,9 +3118,7 @@ class Router:
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
         raw_model_info = deployment.get("model_info", {})
-        model_info = (
-            raw_model_info.copy() if isinstance(raw_model_info, dict) else raw_model_info.model_dump(exclude_none=True)
-        )
+        model_info = raw_model_info.copy()
         protocol_context = _build_deployment_protocol_context(raw_model_info)
         kwargs.pop("_litellm_deployment_protocol_context", None)
         if protocol_context is not None:
@@ -3144,24 +3142,14 @@ class Router:
         # either metadata container. The other metadata container can remain
         # caller-provided for Chat/Responses compatibility.
         kwargs.pop("_litellm_routing_stats_metadata", None)
-        deployment_metadata = {
-            "deployment": deployment_litellm_model_name,
-            "model_info": model_info,
-            "api_base": deployment_api_base,
-            "deployment_model_name": deployment_model_name,
-        }
-        kwargs.setdefault(metadata_variable_name, {}).update(deployment_metadata)
-        logging_obj = kwargs.get("litellm_logging_obj")
-        if logging_obj is not None:
-            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
-            if isinstance(logging_litellm_params, dict):
-                logging_litellm_params.setdefault(metadata_variable_name, {}).update(deployment_metadata)
-
-            model_call_details = getattr(logging_obj, "model_call_details", None)
-            if isinstance(model_call_details, dict):
-                model_call_litellm_params = model_call_details.get("litellm_params")
-                if isinstance(model_call_litellm_params, dict):
-                    model_call_litellm_params.setdefault(metadata_variable_name, {}).update(deployment_metadata)
+        kwargs.setdefault(metadata_variable_name, {}).update(
+            {
+                "deployment": deployment_litellm_model_name,
+                "model_info": model_info,
+                "api_base": deployment_api_base,
+                "deployment_model_name": deployment_model_name,
+            }
+        )
         model_group = kwargs[metadata_variable_name].get("model_group")
         access_groups = model_info.get("access_groups")
         model_id = model_info.get("id")
@@ -3181,6 +3169,7 @@ class Router:
             }
 
         routing_stats_metadata = kwargs.get("_litellm_routing_stats_metadata")
+        logging_obj = kwargs.get("litellm_logging_obj")
         if isinstance(routing_stats_metadata, dict) and logging_obj is not None:
             # The proxy creates its logging object before Router selects a
             # deployment. Keep that callback payload in sync here, rather than
