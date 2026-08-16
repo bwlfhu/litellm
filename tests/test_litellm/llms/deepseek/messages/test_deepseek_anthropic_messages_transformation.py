@@ -11,6 +11,7 @@ from litellm.llms.anthropic.experimental_pass_through.messages.handler import an
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
+from litellm.llms.anthropic.chat.transformation import AnthropicConfig
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
 from litellm.llms.deepseek.messages.transformation import (
@@ -50,6 +51,27 @@ def test_anthropic_provider_keeps_default_config_for_deepseek_named_model():
 
     assert isinstance(config, AnthropicMessagesConfig)
     assert not isinstance(config, DeepSeekAnthropicMessagesConfig)
+
+
+def test_anthropic_chat_transform_does_not_serialize_router_protocol_context():
+    context = _RouterDeploymentProtocolContext(
+        protocol="deepseek_anthropic",
+        messages_path="v1/messages",
+        _owner=object(),
+    )
+    request = AnthropicConfig().transform_request(
+        model="claude-test",
+        messages=[{"role": "user", "content": "Hello"}],
+        optional_params={
+            "max_tokens": 100,
+            "_litellm_deployment_protocol_context": context,
+        },
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert "_litellm_deployment_protocol_context" not in request
+    json.dumps(request)
 
 
 @pytest.mark.asyncio

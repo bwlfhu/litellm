@@ -1793,6 +1793,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         )
 
         protocol_context = get_deployment_protocol_context(litellm_params)
+        optional_params.pop("_litellm_deployment_protocol_context", None)
         preserve_unsigned_thinking_blocks = protocol_context is not None
         if preserve_unsigned_thinking_blocks:
             from litellm.llms.deepseek.messages.transformation import (
