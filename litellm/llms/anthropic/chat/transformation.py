@@ -1792,7 +1792,8 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             anthropic_messages_pt,
         )
 
-        preserve_unsigned_thinking_blocks = get_deployment_protocol_context(litellm_params) is not None
+        protocol_context = get_deployment_protocol_context(litellm_params)
+        preserve_unsigned_thinking_blocks = protocol_context is not None
         if preserve_unsigned_thinking_blocks:
             from litellm.llms.deepseek.messages.transformation import (
                 deepseek_chat_history_requires_disabled_thinking,
@@ -1824,7 +1825,13 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     "Dropping 'thinking' param because the last assistant message with tool_calls "
                     "has no thinking_blocks. The model won't use extended thinking for this turn."
                 )
-        if preserve_unsigned_thinking_blocks and requires_disabled_thinking:
+        if (
+            protocol_context is not None
+            and protocol_context.tool_thinking == "disabled"
+            and bool(optional_params.get("tools"))
+        ):
+            optional_params["thinking"] = {"type": "disabled"}
+        elif preserve_unsigned_thinking_blocks and requires_disabled_thinking:
             optional_params["thinking"] = {"type": "disabled"}
 
         AnthropicConfig._maybe_drop_speed_param(

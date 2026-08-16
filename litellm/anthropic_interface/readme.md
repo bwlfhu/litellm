@@ -67,6 +67,8 @@ DeepSeek ignores `thinking.budget_tokens`. Use `thinking.type` to enable or disa
 
 Set `deepseek_anthropic_messages_path` only when the deployment needs an explicit endpoint path. Supported values are `anthropic/v1/messages` and `v1/messages`; omit it to use the standard DeepSeek Messages path.
 
+Set `deepseek_anthropic_tool_thinking: disabled` only on deployments whose upstream cannot reliably replay reasoning for tool calls. It forces thinking off for requests containing tools while leaving non-tool requests unchanged.
+
 
 1. Setup config.yaml
 

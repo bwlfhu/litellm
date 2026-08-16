@@ -391,6 +391,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     ) -> dict:
         request_params = dict(anthropic_messages_optional_request_params)
         request_params.pop("_deepseek_anthropic_messages_path", None)
+        disable_tool_thinking = litellm_params.get("_deepseek_anthropic_tool_thinking") == "disabled"
+        if disable_tool_thinking and bool(request_params.get("tools")):
+            request_params["thinking"] = {"type": "disabled"}
         anthropic_messages_request = super().transform_anthropic_messages_request(
             model=model,
             messages=_deepseek_history(messages),

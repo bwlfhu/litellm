@@ -501,6 +501,7 @@ def anthropic_messages_handler(
 
     protocol_context = get_deployment_protocol_context(kwargs)
     kwargs.pop("_deepseek_anthropic_messages_path", None)
+    kwargs.pop("_deepseek_anthropic_tool_thinking", None)
     litellm_params = GenericLiteLLMParams(
         **kwargs,
         api_key=api_key,
@@ -509,6 +510,11 @@ def anthropic_messages_handler(
         **(
             {"_deepseek_anthropic_messages_path": protocol_context.messages_path}
             if protocol_context is not None and protocol_context.messages_path is not None
+            else {}
+        ),
+        **(
+            {"_deepseek_anthropic_tool_thinking": protocol_context.tool_thinking}
+            if protocol_context is not None and protocol_context.tool_thinking is not None
             else {}
         ),
     )

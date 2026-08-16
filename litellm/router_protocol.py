@@ -4,6 +4,7 @@ from typing import Literal
 
 
 _DeepSeekAnthropicMessagesPath = Literal["anthropic/v1/messages", "v1/messages"]
+_DeepSeekAnthropicToolThinking = Literal["disabled"]
 _PROTOCOL_CONTEXT_OWNER = object()
 
 
@@ -12,6 +13,7 @@ class _RouterDeploymentProtocolContext:
     protocol: Literal["deepseek_anthropic"]
     messages_path: _DeepSeekAnthropicMessagesPath | None
     _owner: object
+    tool_thinking: _DeepSeekAnthropicToolThinking | None = None
 
 
 def _build_deployment_protocol_context(model_info: object) -> _RouterDeploymentProtocolContext | None:
@@ -20,22 +22,26 @@ def _build_deployment_protocol_context(model_info: object) -> _RouterDeploymentP
     if model_info.get("reasoning_protocol") != "deepseek_anthropic":
         return None
     messages_path = model_info.get("deepseek_anthropic_messages_path")
+    tool_thinking = "disabled" if model_info.get("deepseek_anthropic_tool_thinking") == "disabled" else None
     if messages_path == "anthropic/v1/messages":
         return _RouterDeploymentProtocolContext(
             protocol="deepseek_anthropic",
             messages_path="anthropic/v1/messages",
             _owner=_PROTOCOL_CONTEXT_OWNER,
+            tool_thinking=tool_thinking,
         )
     if messages_path == "v1/messages":
         return _RouterDeploymentProtocolContext(
             protocol="deepseek_anthropic",
             messages_path="v1/messages",
             _owner=_PROTOCOL_CONTEXT_OWNER,
+            tool_thinking=tool_thinking,
         )
     return _RouterDeploymentProtocolContext(
         protocol="deepseek_anthropic",
         messages_path=None,
         _owner=_PROTOCOL_CONTEXT_OWNER,
+        tool_thinking=tool_thinking,
     )
 
 
