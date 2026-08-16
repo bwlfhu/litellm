@@ -6221,9 +6221,18 @@ class Router:
         # Use wildcard-aware lookup so order-based fallback also works for model
         # groups resolved via pattern routing (e.g. `openai/*` -> `openai/gpt-4.1-mini`).
         all_deployments = self.get_model_list(model_name=original_model_group, team_id=_request_team_id) or []
+        order_fallback_deployments = self._filter_blocked_deployments(all_deployments)
+        if kwargs.get("_litellm_router_call_type") == "anthropic_messages":
+            protocol_deployments = [
+                deployment
+                for deployment in order_fallback_deployments
+                if (deployment.get("model_info") or {}).get("reasoning_protocol") == "deepseek_anthropic"
+            ]
+            if protocol_deployments:
+                order_fallback_deployments = protocol_deployments
         _order_set: set = {
             litellm.utils._get_deployment_order(d)
-            for d in all_deployments
+            for d in order_fallback_deployments
             if litellm.utils._get_deployment_order(d) is not None
         }
         order_values: list = sorted(_order_set)

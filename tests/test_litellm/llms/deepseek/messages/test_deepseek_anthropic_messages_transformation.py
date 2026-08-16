@@ -12,6 +12,7 @@ from litellm.llms.anthropic.experimental_pass_through.messages.transformation im
     AnthropicMessagesConfig,
 )
 from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
 from litellm.llms.deepseek.messages.transformation import (
@@ -627,8 +628,8 @@ def test_deepseek_anthropic_messages_promotes_nonempty_provider_reasoning_conten
     assert response["provider_specific_fields"] == {"source": "deepseek"}
 
 
-@pytest.mark.parametrize(("thinking_type", "expected_type"), [("enabled", "thinking"), ("disabled", "text")])
-def test_deepseek_anthropic_messages_normalizes_nonstream_tool_reasoning_text(thinking_type, expected_type):
+@pytest.mark.parametrize("thinking_type", ["enabled", "disabled"])
+def test_deepseek_anthropic_messages_normalizes_nonstream_tool_reasoning_text(thinking_type):
     logging_obj = MagicMock()
     logging_obj.model_call_details = {"thinking": {"type": thinking_type}}
 
@@ -653,7 +654,7 @@ def test_deepseek_anthropic_messages_normalizes_nonstream_tool_reasoning_text(th
     )
 
     assert response["content"] == [
-        {"type": expected_type, expected_type: "I should use the tool."},
+        {"type": "thinking", "thinking": "I should use the tool."},
         {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
     ]
 
@@ -681,6 +682,47 @@ def test_deepseek_anthropic_messages_disables_thinking_for_reasoningless_tool_hi
             "role": "assistant",
             "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
         }
+    ]
+
+
+def test_deepseek_anthropic_messages_replays_tool_reasoning_while_generation_is_disabled():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-flash",
+        messages=[
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I will use the tool."},
+                    {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}],
+            },
+        ],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+        },
+        litellm_params=GenericLiteLLMParams(_deepseek_anthropic_tool_thinking="disabled"),
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "disabled"}
+    assert request["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "I will use the tool."},
+                {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}],
+        },
     ]
 
 
@@ -757,6 +799,76 @@ async def test_deepseek_redacted_tool_history_skips_http_and_router_fallback():
     assert router.total_calls["anthropic/claude-test"] == 1
     assert router.total_calls["anthropic/claude-order-2"] == 0
     assert router.total_calls["anthropic/claude-fallback"] == 0
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_deepseek_messages_error_does_not_retry_blocked_non_protocol_orders():
+    requests = []
+
+    def mock_transport(request):
+        requests.append(request)
+        return httpx.Response(
+            400,
+            request=request,
+            json={"type": "error", "error": {"type": "invalid_request_error", "message": "upstream error"}},
+        )
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "primary",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://deepseek.example.test",
+                    "api_key": "test",
+                    "order": 1,
+                },
+                "model_info": {"id": "deepseek-anthropic", "reasoning_protocol": "deepseek_anthropic"},
+            },
+            {
+                "model_name": "primary",
+                "litellm_params": {
+                    "model": "anthropic/claude-order-2",
+                    "api_base": "https://order-2.example.test",
+                    "api_key": "test",
+                    "order": 2,
+                },
+                "model_info": {"id": "order-2", "blocked": True},
+            },
+            {
+                "model_name": "primary",
+                "litellm_params": {
+                    "model": "anthropic/claude-order-3",
+                    "api_base": "https://order-3.example.test",
+                    "api_key": "test",
+                    "order": 3,
+                },
+                "model_info": {"id": "order-3", "blocked": True},
+            },
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+
+    try:
+        with patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client", return_value=http_client):
+            with pytest.raises(BaseLLMException, match="upstream error"):
+                await router.aanthropic_messages(
+                    max_tokens=100,
+                    messages=[{"role": "user", "content": "Hello"}],
+                    model="primary",
+                )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert len(requests) == 1
+    assert router.total_calls["anthropic/claude-test"] == 1
+    assert router.total_calls["anthropic/claude-order-2"] == 0
+    assert router.total_calls["anthropic/claude-order-3"] == 0
 
 
 @pytest.mark.asyncio(loop_scope="module")

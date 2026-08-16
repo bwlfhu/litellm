@@ -427,10 +427,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         disable_tool_thinking = litellm_params.get("_deepseek_anthropic_tool_thinking") == "disabled"
         thinking = request_params.get("thinking")
         thinking_enabled = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
-        transformed_messages = _deepseek_history(
-            messages,
-            promote_tool_reasoning_text=thinking_enabled and not disable_tool_thinking,
-        )
+        transformed_messages = _deepseek_history(messages, promote_tool_reasoning_text=True)
         if disable_tool_thinking and bool(request_params.get("tools")):
             request_params["thinking"] = {"type": "disabled"}
         elif thinking_enabled and deepseek_history_has_reasoningless_tool_use(transformed_messages):
@@ -482,12 +479,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         if isinstance(reasoning_content, str) and reasoning_content.strip() and not has_thinking:
             response["content"] = [{"type": "thinking", "thinking": reasoning_content}, *content_blocks]
         elif not has_thinking:
-            model_call_details = getattr(logging_obj, "model_call_details", None)
-            request_thinking = model_call_details.get("thinking") if isinstance(model_call_details, Mapping) else None
-            if isinstance(request_thinking, Mapping) and request_thinking.get("type") == "enabled":
-                promoted_content = _promoted_tool_reasoning_content(content_blocks)
-                if promoted_content is not None:
-                    response["content"] = promoted_content
+            promoted_content = _promoted_tool_reasoning_content(content_blocks)
+            if promoted_content is not None:
+                response["content"] = promoted_content
         return response
 
     @property
