@@ -450,6 +450,29 @@ class TestUpdateFromKwargs:
         assert logging_obj.litellm_params["litellm_metadata"] == lm_meta
         assert logging_obj.litellm_params["litellm_call_id"] == "call-2"
 
+    def test_preserves_router_model_info(self, logging_obj):
+        model_info = {
+            "id": "deploy-1",
+            "input_cost_per_token": 0.001,
+            "output_cost_per_token": 0.002,
+        }
+        logging_obj.litellm_params["model_info"] = model_info
+
+        logging_obj.update_from_kwargs(
+            kwargs={},
+            litellm_params={"litellm_call_id": "call-2"},
+        )
+
+        assert logging_obj.litellm_params["model_info"] == model_info
+
+    def test_current_router_model_info_replaces_existing_value(self, logging_obj):
+        logging_obj.litellm_params["model_info"] = {"id": "previous-deploy"}
+        current_model_info = {"id": "current-deploy"}
+
+        logging_obj.update_from_kwargs(kwargs={"model_info": current_model_info})
+
+        assert logging_obj.litellm_params["model_info"] == current_model_info
+
     def test_backfills_metadata_from_litellm_metadata(self, logging_obj):
         """When only litellm_metadata is present, metadata should be backfilled."""
         lm_meta = {"model_info": {"id": "deploy-1"}}
