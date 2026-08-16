@@ -1182,7 +1182,18 @@ async def test_deepseek_chat_deduplicates_native_and_openai_tool_history():
                 {"role": "user", "content": "Use the tool."},
                 {
                     "role": "assistant",
-                    "content": [{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}}],
+                    "content": [
+                        {"type": "thinking", "thinking": "I should check the weather."},
+                        {"type": "text", "text": "Checking now."},
+                        {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}},
+                        {"type": "text", "text": "The tool will provide the result."},
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_123",
+                            "name": "web_search",
+                            "input": {"query": "weather Paris"},
+                        },
+                    ],
                     "tool_calls": [
                         {
                             "id": "call_123",
@@ -1191,6 +1202,7 @@ async def test_deepseek_chat_deduplicates_native_and_openai_tool_history():
                         }
                     ],
                 },
+                {"role": "tool", "tool_call_id": "call_123", "content": "Sunny"},
             ],
             max_tokens=100,
             client=http_client,
@@ -1202,7 +1214,22 @@ async def test_deepseek_chat_deduplicates_native_and_openai_tool_history():
 
     assert len(captured_requests) == 1
     assistant_content = captured_requests[0]["messages"][1]["content"]
-    assert assistant_content == [{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}}]
+    assert assistant_content == [
+        {"type": "thinking", "thinking": "I should check the weather."},
+        {"type": "text", "text": "Checking now."},
+        {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}},
+        {"type": "text", "text": "The tool will provide the result."},
+        {
+            "type": "server_tool_use",
+            "id": "srvtoolu_123",
+            "name": "web_search",
+            "input": {"query": "weather Paris"},
+        },
+    ]
+    assert captured_requests[0]["messages"][2] == {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "call_123", "content": "Sunny"}],
+    }
 
 
 @pytest.mark.asyncio(loop_scope="module")
