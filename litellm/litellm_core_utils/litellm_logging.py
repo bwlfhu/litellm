@@ -598,6 +598,12 @@ class Logging(LiteLLMLoggingBaseClass):
         """
         base_litellm_params: Dict[str, Any] = {}
 
+        existing_model_info = self.litellm_params.get("model_info")
+        if isinstance(existing_model_info, dict):
+            base_litellm_params["model_info"] = existing_model_info
+        if isinstance(kwargs.get("model_info"), dict):
+            base_litellm_params["model_info"] = kwargs["model_info"]
+
         if "metadata" in kwargs:
             base_litellm_params["metadata"] = kwargs["metadata"]
         if "litellm_metadata" in kwargs and isinstance(kwargs["litellm_metadata"], dict):
