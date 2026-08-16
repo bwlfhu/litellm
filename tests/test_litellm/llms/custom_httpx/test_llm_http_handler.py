@@ -813,6 +813,7 @@ async def test_async_anthropic_messages_handler_passes_litellm_metadata():
     )
 
     assert litellm_params_arg["litellm_metadata"] == litellm_metadata
+    assert "model_info" not in litellm_params_arg
 
 
 @pytest.mark.asyncio

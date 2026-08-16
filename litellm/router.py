@@ -3156,6 +3156,17 @@ class Router:
             kwargs[metadata_variable_name]["tags"] = existing_tags
 
         kwargs["model_info"] = model_info
+        logging_obj = kwargs.get("litellm_logging_obj")
+        if logging_obj is not None:
+            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
+            if isinstance(logging_litellm_params, dict):
+                logging_litellm_params["model_info"] = model_info
+
+            model_call_details = getattr(logging_obj, "model_call_details", None)
+            if isinstance(model_call_details, dict):
+                model_call_litellm_params = model_call_details.get("litellm_params")
+                if isinstance(model_call_litellm_params, dict):
+                    model_call_litellm_params["model_info"] = model_info
 
         if function_name == "_ageneric_api_call_with_fallbacks":
             from litellm.passthrough.timeout_utils import (
