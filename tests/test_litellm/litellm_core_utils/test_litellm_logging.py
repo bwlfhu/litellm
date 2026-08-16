@@ -220,6 +220,32 @@ def test_use_custom_pricing_not_detected_litellm_metadata_no_pricing():
     assert use_custom_pricing_for_model(litellm_params) is False
 
 
+@pytest.mark.parametrize("model_info_location", ["model_info", "metadata", "litellm_metadata"])
+def test_get_custom_pricing_provider_uses_deployment_model_info(model_info_location):
+    from litellm.litellm_core_utils.litellm_logging import get_custom_pricing_provider
+
+    model_info = {
+        "litellm_provider": "deepseek",
+        "input_cost_per_token": 0.001,
+        "output_cost_per_token": 0.002,
+    }
+    litellm_params = (
+        {"model_info": model_info}
+        if model_info_location == "model_info"
+        else {model_info_location: {"model_info": model_info}}
+    )
+
+    assert get_custom_pricing_provider(litellm_params, "anthropic") == "deepseek"
+
+
+def test_get_custom_pricing_provider_keeps_transport_provider_without_custom_pricing():
+    from litellm.litellm_core_utils.litellm_logging import get_custom_pricing_provider
+
+    litellm_params = {"model_info": {"litellm_provider": "deepseek"}}
+
+    assert get_custom_pricing_provider(litellm_params, "anthropic") == "anthropic"
+
+
 def test_response_cost_calculator_uses_router_model_id_from_litellm_metadata():
     """_response_cost_calculator should extract router_model_id from
     litellm_params.litellm_metadata.model_info.id when the result object
@@ -292,6 +318,47 @@ def test_response_cost_calculator_uses_router_model_id_from_litellm_metadata():
         assert cost == pytest.approx(
             expected_cost
         ), f"Expected {expected_cost}, got {cost}"
+    finally:
+        litellm.model_cost.pop(custom_model_id, None)
+
+
+def test_response_cost_calculator_uses_custom_pricing_provider_from_deployment():
+    import litellm
+    from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+    from litellm.types.utils import ModelResponse, Usage
+
+    custom_model_id = "custom-priced-anthropic-compatible-deployment"
+    model_info = {
+        "id": custom_model_id,
+        "litellm_provider": "deepseek",
+        "input_cost_per_token": 0.001,
+        "output_cost_per_token": 0.002,
+    }
+    litellm.register_model(model_cost={custom_model_id: model_info})
+
+    try:
+        logging_obj = LiteLLMLoggingObj(
+            model="provider-model",
+            messages=[{"role": "user", "content": "Hi"}],
+            stream=False,
+            call_type="anthropic_messages",
+            start_time=time.time(),
+            litellm_call_id="test-123",
+            function_id="test-fn",
+        )
+        logging_obj.update_environment_variables(
+            model="provider-model",
+            user="",
+            optional_params={},
+            litellm_params={"model_info": model_info},
+            custom_llm_provider="anthropic",
+        )
+        response_obj = ModelResponse(
+            model="provider-model",
+            usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+        assert logging_obj._response_cost_calculator(result=response_obj) == pytest.approx(0.02)
     finally:
         litellm.model_cost.pop(custom_model_id, None)
 
@@ -474,6 +541,7 @@ class TestAnthropicPassthroughCustomPricing:
         assert response._hidden_params["response_cost"] == 0.125
         assert logging_obj.model_call_details["response_cost"] == 0.125
         assert logging_obj.model_call_details["standard_logging_object"]["response_cost"] == 0.125
+
 
 class TestUpdateFromKwargs:
     """Tests for the update_from_kwargs convenience wrapper."""

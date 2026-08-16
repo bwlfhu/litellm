@@ -41,6 +41,114 @@ from litellm.proxy.utils import ProxyLogging
 
 
 class TestProxyBaseLLMRequestProcessing:
+    @pytest.mark.asyncio(loop_scope="module")
+    async def test_routed_anthropic_messages_non_streaming_logs_deployment_cost(self):
+        from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+        from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+        from litellm.litellm_core_utils.litellm_logging import Logging
+        from litellm.proxy._types import UserAPIKeyAuth
+        from litellm.router import Router
+
+        def mock_transport(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "id": "msg_123",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Done"}],
+                    "model": "provider-model",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            )
+
+        model_info = {
+            "id": "custom-priced-messages-deployment",
+            "reasoning_protocol": "deepseek_anthropic",
+            "litellm_provider": "deepseek",
+            "input_cost_per_token": 0.001,
+            "output_cost_per_token": 0.002,
+        }
+        router = Router(
+            model_list=[
+                {
+                    "model_name": "messages-group",
+                    "litellm_params": {
+                        "model": "anthropic/provider-model",
+                        "api_base": "https://provider.example.test",
+                        "api_key": "test-key",
+                    },
+                    "model_info": model_info,
+                }
+            ],
+            num_retries=0,
+        )
+        http_client = AsyncHTTPHandler()
+        await http_client.client.aclose()
+        http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+        logging_obj = Logging(
+            model="messages-group",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=False,
+            call_type="anthropic_messages",
+            start_time=datetime.datetime.now(),
+            litellm_call_id="test-call-id",
+            function_id="test-function-id",
+        )
+        data = {
+            "model": "messages-group",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 100,
+            "stream": False,
+            "litellm_logging_obj": logging_obj,
+        }
+        processing_obj = ProxyBaseLLMRequestProcessing(data=data)
+        proxy_logging_obj = MagicMock(spec=ProxyLogging)
+        proxy_logging_obj.during_call_hook = AsyncMock(return_value=None)
+        proxy_logging_obj.update_request_status = AsyncMock(return_value=None)
+        proxy_logging_obj.post_call_response_headers_hook = AsyncMock(return_value={})
+        proxy_logging_obj.post_call_success_hook = AsyncMock(side_effect=lambda **kwargs: kwargs["response"])
+        request = MagicMock(spec=Request)
+        request.headers = {}
+
+        try:
+            with (
+                patch.object(ProxyBaseLLMRequestProcessing, "_has_post_call_guardrails", return_value=False),
+                patch(
+                    "litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client",
+                    return_value=http_client,
+                ),
+            ):
+                response = await processing_obj.base_process_llm_request(
+                    request=request,
+                    fastapi_response=Response(),
+                    user_api_key_dict=UserAPIKeyAuth(api_key="test-key"),
+                    route_type="anthropic_messages",
+                    proxy_logging_obj=proxy_logging_obj,
+                    general_settings={},
+                    proxy_config=MagicMock(spec=ProxyConfig),
+                    select_data_generator=None,
+                    llm_router=router,
+                    skip_pre_call_logic=True,
+                )
+            for _ in range(100):
+                if logging_obj.model_call_details.get("standard_logging_object") is not None:
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            await GLOBAL_LOGGING_WORKER.stop()
+            await http_client.client.aclose()
+            router.discard()
+
+        assert response["usage"] == {"input_tokens": 10, "output_tokens": 5}
+        logged_model_info = logging_obj.litellm_params["model_info"]
+        assert all(logged_model_info[key] == value for key, value in model_info.items())
+        assert logging_obj.model_call_details["custom_llm_provider"] == "anthropic"
+        standard_logging_object = logging_obj.model_call_details["standard_logging_object"]
+        assert standard_logging_object["response_cost"] == pytest.approx(0.02)
+
     @pytest.mark.asyncio
     async def test_base_passthrough_process_llm_request_preserves_litellm_headers_for_non_streaming_response(
         self, monkeypatch
