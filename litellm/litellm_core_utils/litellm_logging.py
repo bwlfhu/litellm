@@ -1420,6 +1420,10 @@ class Logging(LiteLLMLoggingBaseClass):
         custom_pricing = use_custom_pricing_for_model(
             litellm_params=(self.litellm_params if hasattr(self, "litellm_params") else None)
         )
+        custom_llm_provider = get_custom_pricing_provider(
+            litellm_params=(self.litellm_params if hasattr(self, "litellm_params") else None),
+            custom_llm_provider=self.model_call_details.get("custom_llm_provider", None),
+        )
 
         prompt = ""  # use for tts cost calc
         _input = self.model_call_details.get("input", None)
@@ -1434,7 +1438,7 @@ class Logging(LiteLLMLoggingBaseClass):
                 "response_object": result,
                 "model": litellm_model_name or self.model,
                 "cache_hit": cache_hit,
-                "custom_llm_provider": self.model_call_details.get("custom_llm_provider", None),
+                "custom_llm_provider": custom_llm_provider,
                 "base_model": _get_base_model_from_metadata(model_call_details=self.model_call_details),
                 "call_type": self.call_type,
                 "optional_params": self.optional_params,
@@ -4479,6 +4483,25 @@ def use_custom_pricing_for_model(litellm_params: Optional[dict]) -> bool:
                     return True
 
     return False
+
+
+def get_custom_pricing_provider(
+    litellm_params: Optional[dict],
+    custom_llm_provider: Optional[str],
+) -> Optional[str]:
+    if not use_custom_pricing_for_model(litellm_params) or litellm_params is None:
+        return custom_llm_provider
+
+    for model_info in (
+        litellm_params.get("model_info", {}) or {},
+        (litellm_params.get("metadata", {}) or {}).get("model_info", {}) or {},
+        (litellm_params.get("litellm_metadata", {}) or {}).get("model_info", {}) or {},
+    ):
+        pricing_provider = model_info.get("litellm_provider") if isinstance(model_info, dict) else None
+        if isinstance(pricing_provider, str):
+            return pricing_provider
+
+    return custom_llm_provider
 
 
 def is_valid_sha256_hash(value: str) -> bool:
