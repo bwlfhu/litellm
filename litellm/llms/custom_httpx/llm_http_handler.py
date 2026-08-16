@@ -2028,8 +2028,12 @@ class BaseLLMHTTPHandler:
             litellm_params={
                 "preset_cache_key": None,
                 "stream_response": {},
-                "model_info": kwargs.get("model_info"),
-                "litellm_metadata": litellm_params.get("litellm_metadata"),
+                **({"model_info": kwargs["model_info"]} if kwargs.get("model_info") is not None else {}),
+                **(
+                    {"litellm_metadata": litellm_params["litellm_metadata"]}
+                    if litellm_params.get("litellm_metadata") is not None
+                    else {}
+                ),
                 **anthropic_messages_optional_request_params,
             },
             custom_llm_provider=custom_llm_provider,

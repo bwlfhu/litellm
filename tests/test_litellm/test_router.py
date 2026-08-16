@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -4934,6 +4935,50 @@ def test_update_kwargs_with_deployment_model_info_in_litellm_metadata():
     assert model_info["id"] == "custom-pricing-id"
     assert model_info["input_cost_per_token"] == 0.0003
     assert model_info["output_cost_per_token"] == 0.0015
+
+
+def test_update_kwargs_with_deployment_syncs_model_info_to_prebuilt_logger():
+    from litellm.litellm_core_utils.litellm_logging import Logging
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "claude-sonnet-4",
+                "litellm_params": {
+                    "model": "anthropic/claude-sonnet-4-20250514",
+                    "api_key": "fake-key",
+                },
+                "model_info": {
+                    "id": "custom-pricing-id",
+                    "input_cost_per_token": 0.0003,
+                    "output_cost_per_token": 0.0015,
+                },
+            },
+        ],
+    )
+    logging_obj = Logging(
+        model="claude-sonnet-4",
+        messages=[{"role": "user", "content": "Hi"}],
+        stream=True,
+        call_type="anthropic_messages",
+        start_time=time.time(),
+        litellm_call_id="test-call-id",
+        function_id="test-function-id",
+    )
+    kwargs: dict = {"litellm_logging_obj": logging_obj}
+    deployment = router.get_deployment_by_model_group_name(model_group_name="claude-sonnet-4")
+
+    try:
+        router._update_kwargs_with_deployment(
+            deployment=deployment,
+            kwargs=kwargs,
+            function_name="_ageneric_api_call_with_fallbacks",
+        )
+    finally:
+        router.discard()
+
+    assert logging_obj.litellm_params["model_info"]["id"] == "custom-pricing-id"
+    assert logging_obj.model_call_details["litellm_params"]["model_info"]["input_cost_per_token"] == 0.0003
 
 
 def test_update_kwargs_with_deployment_model_info_in_metadata():
