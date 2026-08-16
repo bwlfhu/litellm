@@ -2203,12 +2203,10 @@ class TestAnthropicUsageOnlyFallback:
         assert result["kwargs"] == {}
 
 
-class TestAnthropicResponseCostRecordedOnModelCallDetails:
-    """The pass-through success path reads spend from
-    model_call_details["response_cost"], not from kwargs, so the streaming payload
-    builder must record it there or streaming pass-through logs $0."""
+class TestAnthropicResponseCostRecordedOnResponse:
+    """The calculated pass-through cost is owned by the transformed response."""
 
-    def test_create_payload_records_response_cost_on_model_call_details(self):
+    def test_create_payload_records_response_cost_on_response(self):
         from litellm.types.utils import Choices, Message, ModelResponse
 
         logging_obj = MagicMock()
@@ -2227,20 +2225,20 @@ class TestAnthropicResponseCostRecordedOnModelCallDetails:
                 )
             ],
             created=1234567890,
-            model="claude-3-7-sonnet-20250219",
+            model="custom-messages-model",
             usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         )
 
-        kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
-            litellm_model_response=response,
-            model="claude-3-7-sonnet-20250219",
-            kwargs={},
-            start_time=datetime.now(),
-            end_time=datetime.now(),
-            logging_obj=logging_obj,
-        )
+        with patch("litellm.completion_cost", return_value=0.125):
+            kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                litellm_model_response=response,
+                model="custom-messages-model",
+                kwargs={},
+                start_time=datetime.now(),
+                end_time=datetime.now(),
+                logging_obj=logging_obj,
+            )
 
-        assert (
-            logging_obj.model_call_details["response_cost"] == kwargs["response_cost"]
-        )
-        assert logging_obj.model_call_details["response_cost"] > 0
+        assert response._hidden_params["response_cost"] == 0.125
+        assert logging_obj.model_call_details["response_cost"] == 0.125
+        assert kwargs["response_cost"] == 0.125
