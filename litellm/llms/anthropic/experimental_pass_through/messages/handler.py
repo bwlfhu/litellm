@@ -252,9 +252,9 @@ async def anthropic_messages(
     messages = strip_empty_text_blocks_from_anthropic_messages(messages)
     # Replay of cross-provider tool history (e.g. kimi -> Anthropic) may carry
     # ids like ``functions.Bash:0`` that violate Anthropic's id pattern.
+    tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
+    tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
     if not _has_deepseek_anthropic_protocol_context(kwargs):
-        tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
-        tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
         messages = _sanitize_anthropic_tool_history_with_diagnostics(
             messages=messages,
             model=model,
@@ -463,9 +463,9 @@ def anthropic_messages_handler(
     # full-messages scan. Pop it so it never leaks into provider params.
     if not kwargs.pop("_litellm_messages_presanitized", False):
         messages = strip_empty_text_blocks_from_anthropic_messages(messages)
+        tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
+        tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
         if not _has_deepseek_anthropic_protocol_context(kwargs):
-            tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
-            tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
             messages = _sanitize_anthropic_tool_history_with_diagnostics(
                 messages=messages,
                 model=model,

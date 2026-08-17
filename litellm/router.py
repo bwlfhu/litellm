@@ -2151,7 +2151,10 @@ class Router:
                 return self
 
             async def __anext__(self):
-                return await self._async_generator.__anext__()
+                item = await self._async_generator.__anext__()
+                if not self.chunks or self.chunks[-1] is not item:
+                    self.chunks.append(item)
+                return item
 
         async def stream_with_fallbacks():
             fallback_response = None  # Track for cleanup in finally
@@ -2709,7 +2712,10 @@ class Router:
                 return self
 
             def __next__(self):
-                return next(self._sync_generator)
+                item = next(self._sync_generator)
+                if not self.chunks or self.chunks[-1] is not item:
+                    self.chunks.append(item)
+                return item
 
         router_self: Final = self
 
