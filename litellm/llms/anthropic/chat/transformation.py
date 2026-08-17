@@ -1803,10 +1803,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             )
 
             thinking = optional_params.get("thinking")
-            thinking_disabled = isinstance(thinking, dict) and thinking.get("type") == "disabled"
+            thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"
             messages = prepare_deepseek_chat_history(
                 messages,
-                require_reasoning=protocol_context.tool_thinking != "disabled" and not thinking_disabled,
+                require_reasoning=protocol_context.tool_thinking != "disabled" and thinking_enabled,
                 missing_reasoning=protocol_context.missing_reasoning,
             )
 

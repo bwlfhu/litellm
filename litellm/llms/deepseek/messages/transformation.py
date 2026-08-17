@@ -642,7 +642,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             else request_params_with_tool_choice
         )
         thinking: Final = request_params.get("thinking")
-        require_reasoning: Final = not (isinstance(thinking, Mapping) and thinking.get("type") == "disabled")
+        require_reasoning: Final = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
         transformed_messages: Final = _deepseek_history(
             messages,
             require_reasoning=require_reasoning,
