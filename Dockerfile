@@ -6,6 +6,9 @@ ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:42df77a9974d6ec8b17
 # Runtime image
 ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:42df77a9974d6ec8b17a5ee8bc23b532600a44d705acef2409e0933c1251b45f
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG APK_REPOSITORY=https://packages.wolfi.dev/os
 # Pinned by digest like the other base images; bump explicitly on Node upgrades.
 ARG UI_BUILD_IMAGE=node:24.19-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
 
@@ -16,9 +19,12 @@ FROM $UV_IMAGE AS uvbin
 # instead of once per target arch under QEMU.
 FROM --platform=$BUILDPLATFORM $UI_BUILD_IMAGE AS ui-builder
 
+ARG NPM_REGISTRY
+
 ENV NEXT_TELEMETRY_DISABLED=1 \
     npm_config_fund=false \
-    npm_config_audit=false
+    npm_config_audit=false \
+    npm_config_registry=${NPM_REGISTRY}
 
 WORKDIR /ui
 
@@ -31,13 +37,17 @@ RUN npm run build
 # Builder stage
 FROM $LITELLM_BUILD_IMAGE AS builder
 
+ARG NPM_REGISTRY
+ARG UV_INDEX_URL
+ARG APK_REPOSITORY
+
 WORKDIR /app
 USER root
 
 COPY --from=uvbin /uv /usr/local/bin/uv
 COPY --from=uvbin /uvx /usr/local/bin/uvx
 
-RUN apk add --no-cache \
+RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
     bash \
     gcc \
     python3 \
@@ -51,6 +61,8 @@ RUN apk add --no-cache \
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy \
+    UV_INDEX_URL=${UV_INDEX_URL} \
+    npm_config_registry=${NPM_REGISTRY} \
     PATH="/app/.venv/bin:${PATH}"
 
 # Copy dependency metadata first for layer caching
@@ -100,8 +112,11 @@ FROM $LITELLM_RUNTIME_IMAGE AS runtime
 
 USER root
 
+ARG APK_REPOSITORY
+
 # node (without npm) is required by the prisma CLI at runtime
-RUN apk add --no-cache bash openssl tzdata nodejs python3 libsndfile
+RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
+    bash openssl tzdata nodejs python3 libsndfile
 
 WORKDIR /app
 ENV PATH="/app/.venv/bin:${PATH}" \
