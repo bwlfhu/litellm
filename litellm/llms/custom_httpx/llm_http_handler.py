@@ -5737,11 +5737,14 @@ class BaseLLMHTTPHandler:
                 headers=error_headers,
             )
 
-        raise provider_config.get_error_class(
+        mapped_error = provider_config.get_error_class(
             error_message=error_text,
             status_code=status_code,
             headers=error_headers,
         )
+        if getattr(e, "_litellm_disable_fallbacks", False):
+            setattr(mapped_error, "_litellm_disable_fallbacks", True)
+        raise mapped_error
 
     @staticmethod
     def _append_query_params(url: str, query_params: RealtimeQueryParams | None) -> str:

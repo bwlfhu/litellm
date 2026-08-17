@@ -2492,6 +2492,9 @@ def exception_type(
             exception=e,
         )
 
+        if getattr(original_exception, "_litellm_disable_fallbacks", False):
+            e.__dict__["_litellm_disable_fallbacks"] = True
+
         # don't let an error with mapping interrupt the user from receiving an error from the llm api calls
         if exception_mapping_worked:
             setattr(e, "litellm_response_headers", litellm_response_headers)
