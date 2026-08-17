@@ -245,6 +245,13 @@ def deepseek_history_has_reasoningless_tool_use(messages: list[dict]) -> bool:
     )
 
 
+def deepseek_tool_choice_requires_disabled_thinking(tool_choice: object) -> bool:
+    if not isinstance(tool_choice, Mapping):
+        return False
+    choice_type = tool_choice.get("type")
+    return choice_type in {"tool", "function"}
+
+
 def _prepare_deepseek_chat_message(message: dict) -> dict:
     transformed_message = deepcopy(message)
     if transformed_message.get("role") != "assistant":

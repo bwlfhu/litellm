@@ -22,7 +22,7 @@ from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 from litellm.litellm_core_utils.litellm_logging import Logging
 from litellm.proxy.pass_through_endpoints import streaming_handler
 from litellm.router import Router
-from litellm.router_protocol import _RouterDeploymentProtocolContext
+from litellm.router_protocol import _RouterDeploymentProtocolContext, _build_deployment_protocol_context
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
 
@@ -73,6 +73,42 @@ def test_anthropic_chat_transform_does_not_serialize_router_protocol_context():
 
     assert "_litellm_deployment_protocol_context" not in request
     json.dumps(request)
+
+
+def test_deepseek_chat_explicit_tool_choice_disables_thinking_generation():
+    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    request = AnthropicConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the weather tool."}],
+        optional_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "tool", "name": "get_weather"},
+        },
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "disabled"}
+
+
+def test_deepseek_chat_auto_tool_choice_keeps_thinking_generation_enabled():
+    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    request = AnthropicConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the weather tool."}],
+        optional_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "auto"},
+        },
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "enabled"}
 
 
 @pytest.mark.asyncio
