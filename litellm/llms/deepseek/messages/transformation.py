@@ -126,6 +126,32 @@ def _promoted_tool_reasoning_content(content: list[object]) -> list[object] | No
     return [{"type": "thinking", "thinking": thinking}, *deepcopy(content[tool_index:])]
 
 
+def _promote_chat_text_to_thinking(content: object, has_tool_history: bool) -> tuple[object, str] | None:
+    if not has_tool_history:
+        return None
+    if isinstance(content, str) and content.strip():
+        return None, content
+    if not isinstance(content, list):
+        return None
+    text_blocks = tuple(
+        block
+        for block in content
+        if isinstance(block, Mapping)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        and block["text"].strip()
+    )
+    if not text_blocks or len(text_blocks) != len(content):
+        promoted = _promoted_tool_reasoning_content(content)
+        if promoted is None or not promoted or not isinstance(promoted[0], Mapping):
+            return None
+        thinking = promoted[0].get("thinking")
+        if not isinstance(thinking, str) or not thinking.strip():
+            return None
+        return promoted[1:], thinking
+    return [], "".join(str(block["text"]) for block in text_blocks)
+
+
 def _deepseek_history_validation_error(message: str) -> AnthropicError:
     return _DeepSeekHistoryValidationError(message=message, status_code=400)
 
@@ -245,6 +271,7 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
         blocks_have_redacted_thinking = False
         blocks_have_reasoning = False
 
+    has_tool_history = content_has_tool_use or _chat_message_has_tool_history(transformed_message)
     has_reasoning = content_has_reasoning or blocks_have_reasoning
     has_redacted_thinking = content_has_redacted_thinking or blocks_have_redacted_thinking
     reasoning_content = _nonempty_reasoning_content(message)
@@ -252,9 +279,25 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
         thinking_blocks.insert(0, {"type": "thinking", "thinking": reasoning_content})
         has_reasoning = True
 
-    has_tool_history = content_has_tool_use or _chat_message_has_tool_history(transformed_message)
+    if not has_reasoning and not has_redacted_thinking:
+        promoted = _promote_chat_text_to_thinking(transformed_message.get("content"), has_tool_history)
+        if promoted is not None:
+            promoted_content, promoted_reasoning = promoted
+            transformed_message["content"] = promoted_content
+            thinking_blocks.insert(0, {"type": "thinking", "thinking": promoted_reasoning})
+            has_reasoning = True
     if has_tool_history and has_redacted_thinking:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
+
+    if has_tool_history and isinstance(transformed_message.get("content"), str):
+        content_text = transformed_message["content"]
+        thinking_text = tuple(
+            block.get("thinking")
+            for block in thinking_blocks
+            if isinstance(block, Mapping) and isinstance(block.get("thinking"), str)
+        )
+        if content_text.strip() and (content_text == reasoning_content or content_text in thinking_text):
+            transformed_message["content"] = None
 
     transformed_message = _without_reasoning_content_fields(transformed_message)
     if thinking_blocks:

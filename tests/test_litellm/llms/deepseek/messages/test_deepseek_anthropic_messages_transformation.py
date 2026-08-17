@@ -1300,6 +1300,123 @@ async def test_router_selected_deepseek_chat_replays_reasoning_content(stream, r
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_router_selected_deepseek_chat_normalizes_text_tool_reasoning_two_turns():
+    captured_requests = []
+
+    def mock_transport(request):
+        captured_requests.append(json.loads(request.content))
+        if len(captured_requests) == 1:
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "id": "msg_tool",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I should call the weather tool."},
+                        {
+                            "type": "tool_use",
+                            "id": "call_123",
+                            "name": "get_weather",
+                            "input": {"city": "Paris"},
+                        },
+                    ],
+                    "model": "deepseek-v4-pro",
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 1, "output_tokens": 2},
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "msg_done",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "It is sunny."}],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 1},
+            },
+        )
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "deepseek-group",
+                "litellm_params": {
+                    "model": "anthropic/claude-test",
+                    "api_base": "https://deepseek.example.test/v1/messages",
+                    "api_key": "test",
+                },
+                "model_info": {"id": "deepseek-anthropic", "reasoning_protocol": "deepseek_anthropic"},
+            }
+        ],
+        num_retries=0,
+    )
+    http_client = AsyncHTTPHandler()
+    await http_client.client.aclose()
+    http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+
+    try:
+        first_response = await router.acompletion(
+            model="deepseek-group",
+            messages=[{"role": "user", "content": "Use the weather tool."}],
+            tools=tools,
+            thinking={"type": "enabled"},
+            allowed_openai_params=["thinking"],
+            max_tokens=100,
+            client=http_client,
+        )
+        first_message = first_response.choices[0].message
+        assert first_message.reasoning_content == "I should call the weather tool."
+        assert first_message.thinking_blocks == [{"type": "thinking", "thinking": "I should call the weather tool."}]
+
+        await router.acompletion(
+            model="deepseek-group",
+            messages=[
+                {"role": "user", "content": "Use the weather tool."},
+                first_message.model_dump(exclude_none=True),
+                {"role": "tool", "tool_call_id": "call_123", "content": "Sunny"},
+            ],
+            tools=tools,
+            thinking={"type": "enabled"},
+            allowed_openai_params=["thinking"],
+            max_tokens=100,
+            client=http_client,
+        )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+        await http_client.client.aclose()
+        router.discard()
+
+    assert len(captured_requests) == 2
+    assert captured_requests[1]["thinking"] == {"type": "enabled"}
+    assert captured_requests[1]["messages"][1] == {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "I should call the weather tool."},
+            {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {"city": "Paris"}},
+        ],
+    }
+
+
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "assistant_message",
     [

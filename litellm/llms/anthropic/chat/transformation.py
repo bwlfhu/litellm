@@ -1801,8 +1801,8 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 prepare_deepseek_chat_history,
             )
 
-            has_reasoningless_tool_history = deepseek_history_has_reasoningless_tool_use(messages)
             messages = prepare_deepseek_chat_history(messages)
+            has_reasoningless_tool_history = deepseek_history_has_reasoningless_tool_use(messages)
 
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
             optional_params["tools"], _ = self._map_tools(add_dummy_tool(custom_llm_provider="anthropic"))
@@ -2336,6 +2336,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         prefix_prompt: Optional[str] = None,
         speed: Optional[str] = None,
         tool_name_reverse_map: Optional[Dict[str, str]] = None,
+        deepseek_anthropic_protocol: bool = False,
     ):
         _hidden_params: Dict = {}
         _hidden_params["additional_headers"] = process_anthropic_headers(dict(raw_response.headers))
@@ -2357,6 +2358,18 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             tool_results,
             compaction_blocks,
         ) = self.extract_response_content(completion_response=completion_response)
+
+        if (
+            deepseek_anthropic_protocol
+            and completion_response.get("stop_reason") == "tool_use"
+            and tool_calls
+            and not reasoning_content
+            and not thinking_blocks
+            and isinstance(text_content, str)
+            and text_content.strip()
+        ):
+            reasoning_content = text_content
+            thinking_blocks = [{"type": "thinking", "thinking": text_content}]
 
         # Reverse-map rewritten tool names back to caller's originals so a
         # downstream OpenAI-style dispatcher can match on the registered name.
@@ -2501,6 +2514,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             prefix_prompt=prefix_prompt,
             speed=speed,
             tool_name_reverse_map=tool_name_reverse_map,
+            deepseek_anthropic_protocol=get_deployment_protocol_context(litellm_params) is not None,
         )
         return model_response
 
