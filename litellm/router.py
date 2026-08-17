@@ -81,6 +81,7 @@ from litellm.router_strategy.tag_based_routing import (
     get_deployments_for_tag,
     is_valid_deployment_tag,
 )
+from litellm.router_protocol import _build_deployment_protocol_context
 from litellm.router_utils.add_retry_fallback_headers import (
     _HiddenParamsHost,
     add_fallback_headers_to_response,
@@ -3116,7 +3117,12 @@ class Router:
         """
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
-        model_info = deployment.get("model_info", {}).copy()
+        raw_model_info = deployment.get("model_info", {})
+        model_info = raw_model_info.copy()
+        protocol_context = _build_deployment_protocol_context(raw_model_info)
+        kwargs.pop("_litellm_deployment_protocol_context", None)
+        if protocol_context is not None:
+            kwargs["_litellm_deployment_protocol_context"] = protocol_context
         deployment_litellm_model_name = deployment["litellm_params"]["model"]
         deployment_api_base = deployment["litellm_params"].get("api_base")
         deployment_model_name: Final = deployment["model_name"]
@@ -4514,7 +4520,13 @@ class Router:
             kwargs["endpoint"] = kwargs["endpoint"].replace(model, replacement_model_name)
         return kwargs
 
-    async def _ageneric_api_call_with_fallbacks_helper(self, model: str, original_generic_function: Callable, **kwargs):
+    async def _ageneric_api_call_with_fallbacks_helper(
+        self,
+        model: str,
+        original_generic_function: Callable,
+        _litellm_router_call_type: str | None = None,
+        **kwargs,
+    ):
         """
         Helper function to make a generic LLM API call through the router, this allows you to use retries/fallbacks with litellm router
         """
@@ -4522,6 +4534,8 @@ class Router:
         passthrough_on_no_deployment: Final = kwargs.pop("passthrough_on_no_deployment", False)
         function_name: Final = "_ageneric_api_call_with_fallbacks"
         try:
+            if _litellm_router_call_type == "anthropic_messages":
+                kwargs["_litellm_router_call_type"] = _litellm_router_call_type
             parent_otel_span: Final = _get_parent_otel_span_from_kwargs(kwargs)
             try:
                 deployment: Final = await self.async_get_available_deployment(
@@ -4536,6 +4550,7 @@ class Router:
                     return await original_generic_function(model=model, **kwargs)
                 raise e
 
+            kwargs.pop("_litellm_router_call_type", None)
             self._update_kwargs_with_deployment(deployment=deployment, kwargs=kwargs, function_name=function_name)
 
             data: Final = deployment["litellm_params"].copy()
@@ -5758,6 +5773,7 @@ class Router:
             client: Any | None = None,
             **kwargs,
         ):
+            kwargs.pop("_litellm_router_call_type", None)
             if call_type == "assistants":
                 return await self._pass_through_assistants_endpoint_factory(
                     original_function=original_function,
@@ -5832,6 +5848,7 @@ class Router:
             ):
                 return await self._ageneric_api_call_with_fallbacks(
                     original_function=original_function,
+                    _litellm_router_call_type=call_type,
                     **kwargs,
                 )
             elif call_type in (
@@ -6172,7 +6189,7 @@ class Router:
         original_model_group: Final[str | None] = kwargs.get("model")
         fallback_failure_exception_str = ""
 
-        if disable_fallbacks is True or original_model_group is None:
+        if disable_fallbacks is True or getattr(e, "_litellm_disable_fallbacks", False) or original_model_group is None:
             raise e
 
         input_kwargs: Final = {
@@ -6198,9 +6215,18 @@ class Router:
         # Use wildcard-aware lookup so order-based fallback also works for model
         # groups resolved via pattern routing (e.g. `openai/*` -> `openai/gpt-4.1-mini`).
         all_deployments: Final = self.get_model_list(model_name=original_model_group, team_id=_request_team_id) or []
+        order_fallback_deployments = self._filter_blocked_deployments(all_deployments)
+        if kwargs.get("_litellm_router_call_type") == "anthropic_messages":
+            protocol_deployments = [
+                deployment
+                for deployment in order_fallback_deployments
+                if (deployment.get("model_info") or {}).get("reasoning_protocol") == "deepseek_anthropic"
+            ]
+            if protocol_deployments:
+                order_fallback_deployments = protocol_deployments
         _order_set: Final[set] = {
             litellm.utils._get_deployment_order(d)
-            for d in all_deployments
+            for d in order_fallback_deployments
             if litellm.utils._get_deployment_order(d) is not None
         }
         order_values: Final[list] = sorted(_order_set)
@@ -10575,6 +10601,14 @@ class Router:
             request_kwargs=request_kwargs,
             request_team_id=request_team_id,
         )
+        if request_kwargs is not None and request_kwargs.get("_litellm_router_call_type") == "anthropic_messages":
+            deepseek_anthropic_deployments = [
+                deployment
+                for deployment in healthy_deployments
+                if (deployment.get("model_info") or {}).get("reasoning_protocol") == "deepseek_anthropic"
+            ]
+            if deepseek_anthropic_deployments:
+                healthy_deployments = deepseek_anthropic_deployments
         _access_group_filter_emptied_candidates = (
             _pre_model_access_group_filter_len > 0 and len(healthy_deployments) == 0
         )

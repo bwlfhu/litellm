@@ -5378,6 +5378,7 @@ def completion(
             max_retries=max_retries,
             timeout=timeout,
             litellm_request_debug=kwargs.get("litellm_request_debug", False),
+            _litellm_deployment_protocol_context=kwargs.get("_litellm_deployment_protocol_context"),
             tpm=kwargs.get("tpm"),
             rpm=kwargs.get("rpm"),
             use_xai_oauth=kwargs.get("use_xai_oauth", False),
