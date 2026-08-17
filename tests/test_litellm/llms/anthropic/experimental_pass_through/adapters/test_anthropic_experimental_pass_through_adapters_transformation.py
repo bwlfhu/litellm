@@ -1983,6 +1983,25 @@ def test_translate_openai_response_to_anthropic_with_reasoning_content_only():
     assert anthropic_response.get("stop_reason") == "end_turn"
 
 
+def test_reasoning_content_is_suppressed_when_thinking_is_disabled():
+    choices = [
+        Choices(
+            message=Message(
+                role="assistant",
+                content="visible answer",
+                reasoning_content="internal reasoning",
+            )
+        )
+    ]
+
+    content = LiteLLMAnthropicMessagesAdapter()._translate_openai_content_to_anthropic(
+        choices=choices,
+        thinking_disabled=True,
+    )
+
+    assert content == [{"type": "text", "text": "visible answer"}]
+
+
 # =====================================================================
 # Tool Name Truncation Tests (Issue #17904)
 # OpenAI has a 64-character limit for function/tool names

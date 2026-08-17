@@ -311,6 +311,10 @@ ANTHROPIC_ADAPTER: Final = AnthropicAdapter()
 
 class LiteLLMMessagesToCompletionTransformationHandler:
     @staticmethod
+    def _is_thinking_disabled(thinking: Mapping[str, object] | None) -> bool:
+        return thinking is None or thinking.get("type") == "disabled"
+
+    @staticmethod
     def _route_openai_thinking_to_responses_api_if_needed(
         completion_kwargs: dict[str, Any],
         *,
@@ -598,6 +602,7 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         )
 
         completion_response: Final = await litellm.acompletion(**completion_kwargs)
+        thinking_disabled: Final = LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(thinking)
 
         if stream:
             transformed_stream: Final = ANTHROPIC_ADAPTER.translate_completion_output_params_streaming(
@@ -606,6 +611,7 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 tool_name_mapping=tool_name_mapping,
                 polyfill_result=polyfill_result,
                 is_async=True,
+                thinking_disabled=thinking_disabled,
             )
             if transformed_stream is not None:
                 return transformed_stream
@@ -615,6 +621,7 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 cast(ModelResponse, completion_response),
                 tool_name_mapping=tool_name_mapping,
                 polyfill_result=polyfill_result,
+                thinking_disabled=thinking_disabled,
             )
             if anthropic_response is not None:
                 return anthropic_response
@@ -732,6 +739,7 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         )
 
         completion_response: Final = litellm.completion(**completion_kwargs)
+        thinking_disabled: Final = LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(thinking)
 
         if stream:
             transformed_stream: Final = ANTHROPIC_ADAPTER.translate_completion_output_params_streaming(
@@ -740,6 +748,7 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 tool_name_mapping=tool_name_mapping,
                 polyfill_result=polyfill_result,
                 is_async=False,
+                thinking_disabled=thinking_disabled,
             )
             if transformed_stream is not None:
                 return transformed_stream
@@ -749,6 +758,7 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 cast(ModelResponse, completion_response),
                 tool_name_mapping=tool_name_mapping,
                 polyfill_result=polyfill_result,
+                thinking_disabled=thinking_disabled,
             )
             if anthropic_response is not None:
                 return anthropic_response

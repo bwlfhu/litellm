@@ -187,6 +187,7 @@ class AnthropicAdapter:
         response: ModelResponse,
         tool_name_mapping: dict[str, str] | None = None,
         polyfill_result: PolyfillResult | None = None,
+        thinking_disabled: bool = False,
     ) -> AnthropicMessagesResponse | None:
         """
         Translate OpenAI response to Anthropic format.
@@ -202,6 +203,7 @@ class AnthropicAdapter:
             response=response,
             tool_name_mapping=tool_name_mapping,
             polyfill_result=polyfill_result,
+            thinking_disabled=thinking_disabled,
         )
 
     def translate_completion_output_params_streaming(
@@ -211,6 +213,7 @@ class AnthropicAdapter:
         tool_name_mapping: dict[str, str] | None = None,
         polyfill_result: PolyfillResult | None = None,
         is_async: bool = True,
+        thinking_disabled: bool = False,
     ) -> AsyncIterator[bytes] | Iterator[bytes] | None:
         """
         Translate OpenAI streaming response to Anthropic format.
@@ -237,6 +240,7 @@ class AnthropicAdapter:
             applied_edits=applied_edits,
             compaction_block=compaction_block,
             iterations_usage=iterations_usage,
+            thinking_disabled=thinking_disabled,
         )
         # Return the SSE-wrapped version for proper event formatting.
         if is_async:
@@ -1135,6 +1139,7 @@ class LiteLLMAnthropicMessagesAdapter:
         self,
         choices: list[Choices],
         tool_name_mapping: dict[str, str] | None = None,
+        thinking_disabled: bool = False,
     ) -> list[dict[str, Any]]:
         new_content: Final[list[dict[str, Any]]] = []
         for choice in choices:
@@ -1160,7 +1165,11 @@ class LiteLLMAnthropicMessagesAdapter:
                             ).model_dump()
                         )
             # Handle reasoning_content when thinking_blocks is not present
-            elif hasattr(choice.message, "reasoning_content") and choice.message.reasoning_content:
+            elif (
+                not thinking_disabled
+                and hasattr(choice.message, "reasoning_content")
+                and choice.message.reasoning_content
+            ):
                 new_content.append(
                     AnthropicResponseContentBlockThinking(
                         type="thinking",
@@ -1299,6 +1308,7 @@ class LiteLLMAnthropicMessagesAdapter:
         response: ModelResponse,
         tool_name_mapping: dict[str, str] | None = None,
         polyfill_result: PolyfillResult | None = None,
+        thinking_disabled: bool = False,
     ) -> AnthropicMessagesResponse:
         """
         Translate OpenAI response to Anthropic format.
@@ -1314,6 +1324,7 @@ class LiteLLMAnthropicMessagesAdapter:
         anthropic_content: Final = self._translate_openai_content_to_anthropic(
             choices=response.choices,
             tool_name_mapping=tool_name_mapping,
+            thinking_disabled=thinking_disabled,
         )
 
         if polyfill_result is not None and polyfill_result.compaction_block is not None:
@@ -1353,7 +1364,9 @@ class LiteLLMAnthropicMessagesAdapter:
         return translated_obj
 
     def _translate_streaming_openai_chunk_to_anthropic_content_block(
-        self, choices: list[OpenAIStreamingChoice | StreamingChoices]
+        self,
+        choices: list[OpenAIStreamingChoice | StreamingChoices],
+        thinking_disabled: bool = False,
     ) -> tuple[
         Literal["text", "tool_use", "thinking"],
         "ContentBlockContentBlockDict",
@@ -1399,7 +1412,11 @@ class LiteLLMAnthropicMessagesAdapter:
             # ``Delta`` deletes the ``thinking_blocks`` attribute when unset, so the
             # branch above is skipped entirely; open a ``thinking`` block here so the
             # matching ``thinking_delta`` stream is not emitted into a text block.
-            elif isinstance(choice, StreamingChoices) and getattr(choice.delta, "reasoning_content", None):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and getattr(choice.delta, "reasoning_content", None)
+            ):
                 return "thinking", ChatCompletionThinkingBlock(type="thinking", thinking="", signature="")
             elif choice.delta.content is not None and len(choice.delta.content) > 0:
                 return "text", TextBlock(type="text", text="")
@@ -1407,7 +1424,9 @@ class LiteLLMAnthropicMessagesAdapter:
         return "text", TextBlock(type="text", text="")
 
     def _translate_streaming_openai_chunk_to_anthropic(
-        self, choices: list[OpenAIStreamingChoice | StreamingChoices]
+        self,
+        choices: list[OpenAIStreamingChoice | StreamingChoices],
+        thinking_disabled: bool = False,
     ) -> tuple[
         StreamingContentBlockDeltaType,
         ContentTextBlockDelta | ContentJsonBlockDelta | ContentThinkingBlockDelta | ContentThinkingSignatureBlockDelta,
@@ -1439,7 +1458,11 @@ class LiteLLMAnthropicMessagesAdapter:
                             reasoning_signature += signature
             # Handle reasoning_content when thinking_blocks is not present
             # This handles providers like OpenRouter that return reasoning_content
-            elif isinstance(choice, StreamingChoices) and hasattr(choice.delta, "reasoning_content"):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and hasattr(choice.delta, "reasoning_content")
+            ):
                 if choice.delta.reasoning_content is not None:
                     reasoning_content += choice.delta.reasoning_content
 
@@ -1459,6 +1482,7 @@ class LiteLLMAnthropicMessagesAdapter:
         response: ModelResponse,
         current_content_block_index: int,
         applied_edits: list[AppliedEdit] | None = None,
+        thinking_disabled: bool = False,
     ) -> ContentBlockDelta | MessageBlockDelta:
         ## base case - final chunk w/ finish reason
         if response.choices[0].finish_reason is not None:
@@ -1486,7 +1510,10 @@ class LiteLLMAnthropicMessagesAdapter:
         (
             type_of_content,
             content_block_delta,
-        ) = self._translate_streaming_openai_chunk_to_anthropic(choices=response.choices)
+        ) = self._translate_streaming_openai_chunk_to_anthropic(
+            choices=response.choices,
+            thinking_disabled=thinking_disabled,
+        )
         return ContentBlockDelta(
             type="content_block_delta",
             index=current_content_block_index,
