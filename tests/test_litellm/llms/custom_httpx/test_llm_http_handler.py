@@ -1812,7 +1812,8 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
 
 
 @pytest.mark.asyncio
-async def test_anthropic_agentic_followup_preserves_trusted_deployment_protocol_context():
+@pytest.mark.parametrize("patch_model", ["anthropic/deepseek-v4-pro", "deepseek-v4-pro"])
+async def test_anthropic_agentic_followup_preserves_trusted_deployment_protocol_context(patch_model: str):
     handler = BaseLLMHTTPHandler()
     protocol_context = _build_deployment_protocol_context(
         {
@@ -1825,7 +1826,7 @@ async def test_anthropic_agentic_followup_preserves_trusted_deployment_protocol_
     plan = AgenticLoopPlan(
         run_agentic_loop=True,
         request_patch=AgenticLoopRequestPatch(
-            model="anthropic/deepseek-v4-pro",
+            model=patch_model,
             messages=[{"role": "user", "content": "tool result"}],
             kwargs={
                 "_litellm_deployment_protocol_context": {"protocol": "untrusted"},

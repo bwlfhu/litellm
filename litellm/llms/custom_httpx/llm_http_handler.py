@@ -5215,7 +5215,8 @@ class BaseLLMHTTPHandler:
         patch_provider_is_inherited: Final = (
             patch_custom_llm_provider is not None and patch_custom_llm_provider == dispatch_custom_llm_provider
         )
-        model_changed: Final = patch.model is not None and patch.model != full_model_name
+        current_model_names: Final = frozenset({model, full_model_name})
+        model_changed: Final = patch.model is not None and patch.model not in current_model_names
         provider_changed: Final = patch_custom_llm_provider is not None and not patch_provider_is_inherited
         api_base_changed: Final = "api_base" in patch.kwargs and patch.kwargs.get("api_base") != kwargs.get("api_base")
         api_key_changed: Final = "api_key" in patch.kwargs and patch.kwargs.get("api_key") != kwargs.get("api_key")
@@ -5268,11 +5269,12 @@ class BaseLLMHTTPHandler:
         elif not model_changed and (logical_custom_llm_provider or initial_custom_llm_provider) is not None:
             kwargs_for_followup["custom_llm_provider"] = logical_custom_llm_provider or initial_custom_llm_provider
 
+        followup_model: Final = patch.model if model_changed else full_model_name
         response: AnthropicMessagesResponse | AsyncIterator[object] = await anthropic_messages.acreate(
             **{
                 "max_tokens": max_tokens,
                 "messages": patch.messages,
-                "model": patch.model or full_model_name,
+                "model": followup_model,
                 "stream": stream,
                 **optional_params,
                 **kwargs_for_followup,
