@@ -1805,7 +1805,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             )
 
             optional_params = omit_false_stream_for_deepseek_anthropic(
-                default_deepseek_anthropic_thinking_to_disabled(optional_params)
+                default_deepseek_anthropic_thinking_to_disabled(optional_params, messages=messages)
             )
             thinking = optional_params["thinking"]
             thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"

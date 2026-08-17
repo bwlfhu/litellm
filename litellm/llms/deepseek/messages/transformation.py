@@ -2,7 +2,7 @@
 DeepSeek Anthropic-compatible messages transformation config.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any, Final, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -98,6 +98,33 @@ def _nonempty_reasoning_content(message: Mapping[str, object]) -> str | None:
         if isinstance(provider_reasoning_content, str) and provider_reasoning_content.strip():
             return provider_reasoning_content
     return None
+
+
+def _block_has_replayable_reasoning(block: object) -> bool:
+    if not isinstance(block, Mapping) or block.get("type") != "thinking":
+        return False
+    thinking: Final = block.get("thinking")
+    return isinstance(thinking, str) and bool(thinking.strip())
+
+
+def _content_has_replayable_reasoning(content: object) -> bool:
+    return isinstance(content, list) and any(_block_has_replayable_reasoning(block) for block in content)
+
+
+def _message_has_replayable_reasoning(message: Mapping[str, object]) -> bool:
+    return _nonempty_reasoning_content(message) is not None or any(
+        _content_has_replayable_reasoning(message.get(field)) for field in ("content", "thinking_blocks")
+    )
+
+
+def _messages_have_replayable_reasoning(messages: Sequence[object]) -> bool:
+    assistant_messages: Final = tuple(
+        message for message in messages if isinstance(message, Mapping) and message.get("role") == "assistant"
+    )
+    return any(_message_has_replayable_reasoning(message) for message in assistant_messages) and all(
+        not _chat_message_has_tool_history(message) or _message_has_replayable_reasoning(message)
+        for message in assistant_messages
+    )
 
 
 def _unsigned_content_blocks(content: list[object]) -> tuple[list[object], bool, bool, bool]:
@@ -517,9 +544,12 @@ def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> 
 
 def default_deepseek_anthropic_thinking_to_disabled(
     request_params: Mapping[str, object],
+    messages: Sequence[object] | None = None,
 ) -> dict[str, object]:
     if request_params.get("thinking") is not None:
         return dict(request_params)
+    if messages is not None and _messages_have_replayable_reasoning(messages):
+        return {**request_params, "thinking": {"type": "enabled"}}
     return {**request_params, "thinking": {"type": "disabled"}}
 
 
@@ -648,7 +678,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             **({"tool_choice": normalized_tool_choice} if normalized_tool_choice is not None else {}),
         }
         request_params_with_thinking_default: Final = omit_false_stream_for_deepseek_anthropic(
-            default_deepseek_anthropic_thinking_to_disabled(request_params_with_tool_choice)
+            default_deepseek_anthropic_thinking_to_disabled(request_params_with_tool_choice, messages=messages)
         )
         should_disable_thinking: Final = self._tool_thinking == "disabled" and bool(
             request_params_with_thinking_default.get("tools")
