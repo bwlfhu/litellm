@@ -1800,10 +1800,13 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         if preserve_unsigned_thinking_blocks:
             from litellm.llms.deepseek.messages.transformation import (
                 default_deepseek_anthropic_thinking_to_disabled,
+                omit_false_stream_for_deepseek_anthropic,
                 prepare_deepseek_chat_history,
             )
 
-            optional_params = default_deepseek_anthropic_thinking_to_disabled(optional_params)
+            optional_params = omit_false_stream_for_deepseek_anthropic(
+                default_deepseek_anthropic_thinking_to_disabled(optional_params)
+            )
             thinking = optional_params["thinking"]
             thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"
             messages = prepare_deepseek_chat_history(

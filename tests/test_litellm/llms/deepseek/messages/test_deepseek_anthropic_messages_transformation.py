@@ -188,6 +188,29 @@ def test_anthropic_chat_enabled_thinking_allows_reasoningless_non_tool_history()
     assert request["messages"][1]["content"] == [{"type": "text", "text": "An ordinary answer"}]
 
 
+def test_anthropic_chat_omits_false_stream_only_for_deepseek_context():
+    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    assert context is not None
+
+    deepseek_request = AnthropicConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Hello"}],
+        optional_params={"max_tokens": 100, "stream": False},
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+    anthropic_request = AnthropicConfig().transform_request(
+        model="claude-test",
+        messages=[{"role": "user", "content": "Hello"}],
+        optional_params={"max_tokens": 100, "stream": False},
+        litellm_params={},
+        headers={},
+    )
+
+    assert "stream" not in deepseek_request
+    assert anthropic_request["stream"] is False
+
+
 def test_anthropic_chat_uses_trusted_reasoning_placeholder():
     context = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "placeholder"})
     assert context is not None
@@ -978,6 +1001,22 @@ def test_deepseek_anthropic_messages_enabled_thinking_allows_reasoningless_non_t
 
     assert request["thinking"] == {"type": "enabled"}
     assert request["messages"][1]["content"] == [{"type": "text", "text": "An ordinary answer"}]
+
+
+@pytest.mark.parametrize(("stream", "expected_stream"), [(False, None), (True, True)])
+def test_deepseek_anthropic_messages_omits_only_false_stream(stream, expected_stream):
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Hello"}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "stream": stream,
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request.get("stream") is expected_stream
 
 
 def test_deepseek_anthropic_messages_placeholder_is_exactly_one_space():
@@ -1878,7 +1917,6 @@ async def test_router_selected_deepseek_messages_replays_unsigned_thinking_to_mo
                 ],
                 "max_tokens": 100,
                 "model": "claude-test",
-                "stream": False,
                 "thinking": {"type": "disabled"},
             },
         )

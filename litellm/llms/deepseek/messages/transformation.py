@@ -523,6 +523,12 @@ def default_deepseek_anthropic_thinking_to_disabled(
     return {**request_params, "thinking": {"type": "disabled"}}
 
 
+def omit_false_stream_for_deepseek_anthropic(
+    request_params: Mapping[str, object],
+) -> dict[str, object]:
+    return {key: value for key, value in request_params.items() if key != "stream" or value is not False}
+
+
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     """
     DeepSeek exposes an Anthropic-compatible Messages API at
@@ -641,8 +647,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             **{key: value for key, value in normalized_reasoning_params.items() if key != "tool_choice"},
             **({"tool_choice": normalized_tool_choice} if normalized_tool_choice is not None else {}),
         }
-        request_params_with_thinking_default: Final = default_deepseek_anthropic_thinking_to_disabled(
-            request_params_with_tool_choice
+        request_params_with_thinking_default: Final = omit_false_stream_for_deepseek_anthropic(
+            default_deepseek_anthropic_thinking_to_disabled(request_params_with_tool_choice)
         )
         should_disable_thinking: Final = self._tool_thinking == "disabled" and bool(
             request_params_with_thinking_default.get("tools")
@@ -666,9 +672,15 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             litellm_params=litellm_params,
             headers=headers,
         )
-        if "tools" in anthropic_messages_request:
-            anthropic_messages_request["tools"] = self._sanitize_tools_for_deepseek(anthropic_messages_request["tools"])
-        return anthropic_messages_request
+        normalized_anthropic_messages_request: Final = omit_false_stream_for_deepseek_anthropic(
+            anthropic_messages_request
+        )
+        if "tools" not in normalized_anthropic_messages_request:
+            return normalized_anthropic_messages_request
+        return {
+            **normalized_anthropic_messages_request,
+            "tools": self._sanitize_tools_for_deepseek(normalized_anthropic_messages_request["tools"]),
+        }
 
     def transform_anthropic_messages_response(
         self,
