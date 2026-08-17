@@ -1939,6 +1939,8 @@ class BaseLLMHTTPHandler:
                     )
                     logging_obj.model_call_details.update(request_body)
                     continue
+                if provider_config.should_disable_anthropic_messages_fallbacks_on_http_error(e):
+                    setattr(e, "_litellm_disable_fallbacks", True)
                 raise self._handle_error(e=e, provider_config=provider_config)
             except Exception as e:
                 raise self._handle_error(e=e, provider_config=provider_config)

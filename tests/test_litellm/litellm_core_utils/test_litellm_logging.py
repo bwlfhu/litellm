@@ -238,12 +238,41 @@ def test_get_custom_pricing_provider_uses_deployment_model_info(model_info_locat
     assert get_custom_pricing_provider(litellm_params, "anthropic") == "deepseek"
 
 
-def test_get_custom_pricing_provider_keeps_transport_provider_without_custom_pricing():
+def test_get_custom_pricing_provider_uses_deployment_provider_without_custom_pricing():
     from litellm.litellm_core_utils.litellm_logging import get_custom_pricing_provider
 
     litellm_params = {"model_info": {"litellm_provider": "deepseek"}}
 
-    assert get_custom_pricing_provider(litellm_params, "anthropic") == "anthropic"
+    assert get_custom_pricing_provider(litellm_params, "anthropic") == "deepseek"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_cost_calculator_uses_standard_deployment_provider(stream):
+    from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+    from litellm.types.utils import ModelResponse, Usage
+
+    logging_obj = LiteLLMLoggingObj(
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "Hi"}],
+        stream=stream,
+        call_type="anthropic_messages",
+        start_time=time.time(),
+        litellm_call_id="test-123",
+        function_id="test-fn",
+    )
+    logging_obj.update_environment_variables(
+        model="deepseek-v4-flash",
+        user="",
+        optional_params={},
+        litellm_params={"model_info": {"litellm_provider": "deepseek"}},
+        custom_llm_provider="anthropic",
+    )
+    response_obj = ModelResponse(
+        model="deepseek-v4-flash",
+        usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    assert logging_obj._response_cost_calculator(result=response_obj) == pytest.approx(2.8e-06)
 
 
 def test_response_cost_calculator_uses_router_model_id_from_litellm_metadata():

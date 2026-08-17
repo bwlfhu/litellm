@@ -536,9 +536,16 @@ class Logging(LiteLLMLoggingBaseClass):
         if model is not None:
             self.model = model
         self.user = user
+        logging_litellm_params = {
+            key: value for key, value in litellm_params.items() if key != "_litellm_deployment_protocol_context"
+        }
         self.litellm_params = {
-            **self.litellm_params,
-            **scrub_sensitive_keys_in_metadata(litellm_params),
+            **{
+                key: value
+                for key, value in self.litellm_params.items()
+                if key != "_litellm_deployment_protocol_context"
+            },
+            **scrub_sensitive_keys_in_metadata(logging_litellm_params),
         }
         self.litellm_request_debug = litellm_params.get("litellm_request_debug", False)
         self.logger_fn = litellm_params.get("logger_fn", None)
@@ -4516,10 +4523,10 @@ def use_custom_pricing_for_model(litellm_params: dict | None) -> bool:
 
 
 def get_custom_pricing_provider(
-    litellm_params: Optional[dict],
-    custom_llm_provider: Optional[str],
-) -> Optional[str]:
-    if not use_custom_pricing_for_model(litellm_params) or litellm_params is None:
+    litellm_params: dict | None,
+    custom_llm_provider: str | None,
+) -> str | None:
+    if litellm_params is None:
         return custom_llm_provider
 
     for model_info in (
