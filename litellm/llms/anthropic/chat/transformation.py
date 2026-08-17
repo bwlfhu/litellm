@@ -24,6 +24,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
 )
 from litellm.llms.base_llm.base_utils import type_to_response_format_param
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.types.llms.anthropic import (
     ANTHROPIC_ADVISOR_TOOL_TYPE,
     ANTHROPIC_BETA_HEADER_VALUES,
@@ -68,7 +69,6 @@ from litellm.types.utils import (
     ServerToolUse,
 )
 from litellm.types.utils import Message as LitellmMessage
-from litellm.router_protocol import get_deployment_protocol_context
 from litellm.utils import (
     ModelResponse,
     Usage,
@@ -1830,12 +1830,14 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     "has no thinking_blocks. The model won't use extended thinking for this turn."
                 )
         if (
-            protocol_context is not None
-            and protocol_context.tool_thinking == "disabled"
-            and bool(optional_params.get("tools"))
+            (
+                protocol_context is not None
+                and protocol_context.tool_thinking == "disabled"
+                and bool(optional_params.get("tools"))
+            )
+            or preserve_unsigned_thinking_blocks
+            and has_reasoningless_tool_history
         ):
-            optional_params["thinking"] = {"type": "disabled"}
-        elif preserve_unsigned_thinking_blocks and has_reasoningless_tool_history:
             optional_params["thinking"] = {"type": "disabled"}
 
         AnthropicConfig._maybe_drop_speed_param(

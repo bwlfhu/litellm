@@ -69,6 +69,7 @@ from litellm.litellm_core_utils.sensitive_data_masker import (
     mask_sensitive_structure,
 )
 from litellm.llms.openai_like.json_loader import JSONProviderRegistry
+from litellm.router_protocol import _build_deployment_protocol_context
 from litellm.router_strategy.budget_limiter import RouterBudgetLimiting
 from litellm.router_strategy.least_busy import LeastBusyLoggingHandler
 from litellm.router_strategy.lowest_cost import LowestCostLoggingHandler
@@ -81,7 +82,6 @@ from litellm.router_strategy.tag_based_routing import (
     get_deployments_for_tag,
     is_valid_deployment_tag,
 )
-from litellm.router_protocol import _build_deployment_protocol_context
 from litellm.router_utils.add_retry_fallback_headers import (
     _HiddenParamsHost,
     add_fallback_headers_to_response,

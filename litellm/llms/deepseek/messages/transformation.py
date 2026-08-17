@@ -428,9 +428,12 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         thinking = request_params.get("thinking")
         thinking_enabled = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
         transformed_messages = _deepseek_history(messages, promote_tool_reasoning_text=True)
-        if disable_tool_thinking and bool(request_params.get("tools")):
-            request_params["thinking"] = {"type": "disabled"}
-        elif thinking_enabled and deepseek_history_has_reasoningless_tool_use(transformed_messages):
+        if (
+            disable_tool_thinking
+            and bool(request_params.get("tools"))
+            or thinking_enabled
+            and deepseek_history_has_reasoningless_tool_use(transformed_messages)
+        ):
             request_params["thinking"] = {"type": "disabled"}
         anthropic_messages_request = super().transform_anthropic_messages_request(
             model=model,

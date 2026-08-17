@@ -2,7 +2,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-
 _DeepSeekAnthropicMessagesPath = Literal["anthropic/v1/messages", "v1/messages"]
 _DeepSeekAnthropicToolThinking = Literal["disabled"]
 _PROTOCOL_CONTEXT_OWNER = object()

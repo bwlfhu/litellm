@@ -23,13 +23,13 @@ from litellm.llms.base_llm.anthropic_messages.transformation import (
 )
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.types.llms.anthropic_messages.anthropic_request import AnthropicMetadata
 from litellm.types.llms.anthropic_messages.anthropic_response import (
     AnthropicMessagesResponse,
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
-from litellm.router_protocol import get_deployment_protocol_context
 from litellm.utils import ProviderConfigManager, client, log_tool_request_shape
 
 from ..adapters.handler import LiteLLMMessagesToCompletionTransformationHandler
