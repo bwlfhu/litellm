@@ -2343,6 +2343,7 @@ def anthropic_messages_pt(
     messages: list[AllMessageValues],
     model: str,
     llm_provider: str,
+    preserve_unsigned_thinking_blocks: bool = False,
 ) -> list[AnthropicMessagesUserMessageParam | AnthopicMessagesAssistantMessageParam]:
     """
     format messages for anthropic
@@ -2517,7 +2518,13 @@ def anthropic_messages_pt(
 
             _raw_thinking_blocks = assistant_content_block.get("thinking_blocks", None)
             thinking_blocks = (
-                _drop_unsignable_thinking_blocks(_raw_thinking_blocks) if _raw_thinking_blocks is not None else None
+                _raw_thinking_blocks
+                if preserve_unsigned_thinking_blocks
+                else (
+                    _drop_unsignable_thinking_blocks(_raw_thinking_blocks)
+                    if _raw_thinking_blocks is not None
+                    else None
+                )
             )
 
             # Check if tool_calls contain server tool calls (web search, etc.)
@@ -2684,7 +2691,7 @@ def anthropic_messages_pt(
                         if (
                             m.get("type", "") == "thinking"
                             and len(thinking_block) > 0
-                            and not _is_unsignable_thinking_block(m)
+                            and (preserve_unsigned_thinking_blocks or not _is_unsignable_thinking_block(m))
                         ):  # don't pass empty text blocks. anthropic api raises errors.
                             anthropic_message: ChatCompletionThinkingBlock | AnthropicMessagesTextParam = cast(
                                 ChatCompletionThinkingBlock, m
@@ -2704,7 +2711,27 @@ def anthropic_messages_pt(
                         # handle server_tool_use blocks (tool search, web search, etc.)
                         # Pass through as-is since these are Anthropic-native content types
                         elif m.get("type", "") == "server_tool_use" or m.get("type", "").endswith("_tool_result"):
+                            item_id = m.get("id")
+                            if isinstance(item_id, str) and item_id in unique_tool_ids:
+                                continue
+                            if isinstance(item_id, str):
+                                unique_tool_ids.add(item_id)
                             assistant_content.append(m)
+                        elif preserve_unsigned_thinking_blocks and m.get("type", "") == "tool_use":
+                            item_id = m.get("id")
+                            name = m.get("name")
+                            tool_input = m.get("input")
+                            if (
+                                not isinstance(item_id, str)
+                                or not isinstance(name, str)
+                                or not isinstance(tool_input, dict)
+                                or item_id in unique_tool_ids
+                            ):
+                                continue
+                            unique_tool_ids.add(item_id)
+                            assistant_content.append(
+                                {"type": "tool_use", "id": item_id, "name": name, "input": tool_input}
+                            )
                 elif (
                     "content" in assistant_content_block
                     and isinstance(assistant_content_block["content"], str)

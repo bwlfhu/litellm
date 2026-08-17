@@ -68,6 +68,7 @@ from litellm.types.utils import (
     ServerToolUse,
 )
 from litellm.types.utils import Message as LitellmMessage
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.utils import (
     ModelResponse,
     Usage,
@@ -1793,6 +1794,19 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             anthropic_messages_pt,
         )
 
+        protocol_context = get_deployment_protocol_context(litellm_params)
+        optional_params.pop("_litellm_deployment_protocol_context", None)
+        preserve_unsigned_thinking_blocks = protocol_context is not None
+        has_reasoningless_tool_history = False
+        if preserve_unsigned_thinking_blocks:
+            from litellm.llms.deepseek.messages.transformation import (
+                deepseek_history_has_reasoningless_tool_use,
+                prepare_deepseek_chat_history,
+            )
+
+            has_reasoningless_tool_history = deepseek_history_has_reasoningless_tool_use(messages)
+            messages = prepare_deepseek_chat_history(messages)
+
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
             optional_params["tools"], _ = self._map_tools(add_dummy_tool(custom_llm_provider="anthropic"))
 
@@ -1815,6 +1829,14 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     "Dropping 'thinking' param because the last assistant message with tool_calls "
                     "has no thinking_blocks. The model won't use extended thinking for this turn."
                 )
+        if (
+            protocol_context is not None
+            and protocol_context.tool_thinking == "disabled"
+            and bool(optional_params.get("tools"))
+        ):
+            optional_params["thinking"] = {"type": "disabled"}
+        elif preserve_unsigned_thinking_blocks and has_reasoningless_tool_history:
+            optional_params["thinking"] = {"type": "disabled"}
 
         AnthropicConfig._maybe_drop_speed_param(
             model=model,
@@ -1852,6 +1874,15 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             messages = self._rewrite_tool_names_in_messages(messages, _name_forward_map)
         if _name_reverse_map and isinstance(litellm_params, dict):
             litellm_params[ANTHROPIC_TOOL_NAME_REVERSE_MAP_KEY] = _name_reverse_map
+        if get_deployment_protocol_context(litellm_params) is not None and isinstance(
+            optional_params.get("tools"), list
+        ):
+            optional_params["tools"] = [
+                {key: value for key, value in tool.items() if key != "type"}
+                if isinstance(tool, dict) and tool.get("type") == "custom"
+                else tool
+                for tool in optional_params["tools"]
+            ]
 
         # Separate system prompt from rest of message
         anthropic_system_message_list: Final = self.translate_system_message(messages=messages)
@@ -1864,7 +1895,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 model=model,
                 messages=messages,
                 llm_provider=self._resolved_provider,
+                preserve_unsigned_thinking_blocks=preserve_unsigned_thinking_blocks,
             )
+        except AnthropicError:
+            raise
         except Exception as e:
             raise AnthropicError(
                 status_code=400,

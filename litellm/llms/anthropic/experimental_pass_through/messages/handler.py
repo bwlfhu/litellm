@@ -29,6 +29,7 @@ from litellm.types.llms.anthropic_messages.anthropic_response import (
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.utils import ProviderConfigManager, client
 
 from ..adapters.handler import LiteLLMMessagesToCompletionTransformationHandler
@@ -40,6 +41,10 @@ from .utils import AnthropicMessagesRequestUtils, mock_response
 # Providers that are routed directly to the OpenAI Responses API instead of
 # going through chat/completions.
 _RESPONSES_API_PROVIDERS: Final = frozenset({"openai"})
+
+
+def _has_deepseek_anthropic_protocol_context(kwargs: dict) -> bool:
+    return get_deployment_protocol_context(kwargs) is not None
 
 
 def _should_route_to_responses_api(custom_llm_provider: str | None) -> bool:
@@ -222,7 +227,8 @@ async def anthropic_messages(
     messages = strip_empty_text_blocks_from_anthropic_messages(messages)
     # Replay of cross-provider tool history (e.g. kimi -> Anthropic) may carry
     # ids like ``functions.Bash:0`` that violate Anthropic's id pattern.
-    messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
+    if not _has_deepseek_anthropic_protocol_context(kwargs):
+        messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
     messages = flatten_unencrypted_web_search_results_in_anthropic_messages(messages)
 
     from litellm.integrations.anthropic_cache_control_hook import (
@@ -414,7 +420,8 @@ def anthropic_messages_handler(
     # full-messages scan. Pop it so it never leaks into provider params.
     if not kwargs.pop("_litellm_messages_presanitized", False):
         messages = strip_empty_text_blocks_from_anthropic_messages(messages)
-        messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
+        if not _has_deepseek_anthropic_protocol_context(kwargs):
+            messages = sanitize_tool_use_ids_in_anthropic_messages(messages)
         messages = flatten_unencrypted_web_search_results_in_anthropic_messages(messages)
 
     from litellm.integrations.anthropic_cache_control_hook import (
@@ -436,11 +443,25 @@ def anthropic_messages_handler(
     # This is needed by agentic hooks (e.g., websearch_interception) to make follow-up requests
     original_model: Final = model
 
+    protocol_context = get_deployment_protocol_context(kwargs)
+    kwargs.pop("_litellm_deployment_protocol_context", None)
+    kwargs.pop("_deepseek_anthropic_messages_path", None)
+    kwargs.pop("_deepseek_anthropic_tool_thinking", None)
     litellm_params: Final = GenericLiteLLMParams(
         **kwargs,
         api_key=api_key,
         api_base=api_base,
         custom_llm_provider=custom_llm_provider,
+        **(
+            {"_deepseek_anthropic_messages_path": protocol_context.messages_path}
+            if protocol_context is not None and protocol_context.messages_path is not None
+            else {}
+        ),
+        **(
+            {"_deepseek_anthropic_tool_thinking": protocol_context.tool_thinking}
+            if protocol_context is not None and protocol_context.tool_thinking is not None
+            else {}
+        ),
     )
     (
         model,
@@ -515,7 +536,11 @@ def anthropic_messages_handler(
 
     anthropic_messages_provider_config: BaseAnthropicMessagesConfig | None = None
 
-    if custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
+    if protocol_context is not None:
+        from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
+
+        anthropic_messages_provider_config = DeepSeekAnthropicMessagesConfig()
+    elif custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
         anthropic_messages_provider_config = ProviderConfigManager.get_provider_anthropic_messages_config(
             model=model,
             provider=litellm.LlmProviders(custom_llm_provider),
