@@ -8416,6 +8416,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/observability/routing-stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Routing Stats
+         * @description Return current deployment routing aggregates from coordination Redis.
+         */
+        get: operations["get_routing_stats_observability_routing_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ocr": {
         parameters: {
             query?: never;
@@ -46392,6 +46412,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_routing_stats_observability_routing_stats_get: {
+        parameters: {
+            query?: {
+                window?: string;
+                channel?: string | null;
+                model_group?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
