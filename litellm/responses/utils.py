@@ -472,7 +472,8 @@ class ResponsesAPIRequestUtils:
         if not isinstance(request_input, list):
             return request_input
 
-        for item in request_input:
+        restored_input = [dict(item) if isinstance(item, dict) else item for item in request_input]
+        for item in restored_input:
             if isinstance(item, dict):
                 item_id = item.get("id")
                 if item_id and isinstance(item_id, str):
@@ -489,7 +490,161 @@ class ResponsesAPIRequestUtils:
                     if unwrapped != encrypted_content:
                         item["encrypted_content"] = unwrapped
 
-        return request_input
+        return restored_input
+
+    @staticmethod
+    def _normalize_call_id_for_provider(
+        call_id: str,
+        model: str | None,
+        custom_llm_provider: str | None,
+    ) -> str:
+        from litellm.litellm_core_utils.prompt_templates.factory import (
+            THOUGHT_SIGNATURE_SEPARATOR,
+        )
+        from litellm.utils import _is_gemini_model, _remove_thought_signature_from_id
+
+        if _is_gemini_model(model=model, custom_llm_provider=custom_llm_provider):
+            return call_id
+        return _remove_thought_signature_from_id(call_id, THOUGHT_SIGNATURE_SEPARATOR)
+
+    @staticmethod
+    def _provider_uses_openai_response_item_ids(
+        custom_llm_provider: str | None,
+        model: str | None = None,
+    ) -> bool:
+        if custom_llm_provider is None:
+            return False
+
+        from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
+        from litellm.utils import ProviderConfigManager
+
+        config = ProviderConfigManager.get_provider_responses_api_config(
+            provider=custom_llm_provider,
+            model=model,
+        )
+        return isinstance(config, OpenAIResponsesAPIConfig)
+
+    @staticmethod
+    def _normalize_function_call_item_id_for_provider(
+        item_id: str,
+        model: str | None,
+        custom_llm_provider: str | None,
+    ) -> str:
+        item_id = ResponsesAPIRequestUtils._normalize_call_id_for_provider(
+            call_id=item_id,
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+        )
+        if not ResponsesAPIRequestUtils._provider_uses_openai_response_item_ids(
+            custom_llm_provider=custom_llm_provider,
+            model=model,
+        ):
+            return item_id
+
+        for prefix in ("call_", "tooluse_", "toolu_vrtx_"):
+            if item_id.startswith(prefix):
+                return f"fc_{item_id[len(prefix) :]}"
+        return item_id
+
+    @staticmethod
+    def _should_drop_reasoning_item_id_for_provider(
+        item_id: str,
+        custom_llm_provider: str | None,
+    ) -> bool:
+        if custom_llm_provider not in {"openai", "azure"}:
+            return False
+        return not item_id.startswith("rs_")
+
+    @staticmethod
+    def _should_drop_function_call_item_id_for_provider(
+        item_id: str,
+        custom_llm_provider: str | None,
+    ) -> bool:
+        if custom_llm_provider not in {"openai", "azure"}:
+            return False
+        return not item_id.startswith("fc_")
+
+    @staticmethod
+    def _should_drop_message_item_id_for_provider(
+        item_id: str,
+        custom_llm_provider: str | None,
+    ) -> bool:
+        if custom_llm_provider not in {"openai", "azure"}:
+            return False
+        return not item_id.startswith("msg_")
+
+    @staticmethod
+    def _normalize_replayed_item_ids_in_input(
+        request_input: Any,
+        model: str | None,
+        custom_llm_provider: str | None,
+    ) -> Any:
+        if not isinstance(request_input, list):
+            return request_input
+
+        normalized_input = [dict(item) if isinstance(item, dict) else item for item in request_input]
+        for item in normalized_input:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get("type")
+            if item_type == "function_call":
+                call_id = item.get("call_id")
+                if isinstance(call_id, str) and call_id:
+                    item["call_id"] = ResponsesAPIRequestUtils._normalize_call_id_for_provider(
+                        call_id=call_id,
+                        model=model,
+                        custom_llm_provider=custom_llm_provider,
+                    )
+
+                item_id = item.get("id")
+                if isinstance(item_id, str) and item_id:
+                    normalized_item_id = ResponsesAPIRequestUtils._normalize_function_call_item_id_for_provider(
+                        item_id=item_id,
+                        model=model,
+                        custom_llm_provider=custom_llm_provider,
+                    )
+                    if ResponsesAPIRequestUtils._should_drop_function_call_item_id_for_provider(
+                        item_id=normalized_item_id,
+                        custom_llm_provider=custom_llm_provider,
+                    ):
+                        item.pop("id", None)
+                    else:
+                        item["id"] = normalized_item_id
+            elif item_type == "function_call_output":
+                call_id = item.get("call_id")
+                if isinstance(call_id, str) and call_id:
+                    item["call_id"] = ResponsesAPIRequestUtils._normalize_call_id_for_provider(
+                        call_id=call_id,
+                        model=model,
+                        custom_llm_provider=custom_llm_provider,
+                    )
+            elif item_type == "reasoning":
+                item_id = item.get("id")
+                if (
+                    isinstance(item_id, str)
+                    and item_id
+                    and ResponsesAPIRequestUtils._should_drop_reasoning_item_id_for_provider(
+                        item_id=item_id,
+                        custom_llm_provider=custom_llm_provider,
+                    )
+                ):
+                    item.pop("id", None)
+                    item.pop("status", None)
+            elif item_type == "message":
+                item_id = item.get("id")
+                if (
+                    isinstance(item_id, str)
+                    and item_id
+                    and ResponsesAPIRequestUtils._should_drop_message_item_id_for_provider(
+                        item_id=item_id,
+                        custom_llm_provider=custom_llm_provider,
+                    )
+                ):
+                    item.pop("id", None)
+                    item.pop("status", None)
+
+        return normalized_input
 
     @staticmethod
     def _build_responses_api_response_id(

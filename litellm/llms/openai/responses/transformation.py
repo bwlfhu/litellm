@@ -384,6 +384,8 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
             ResponsesAPIStreamEvents.REFUSAL_DONE: RefusalDoneEvent,
             ResponsesAPIStreamEvents.FUNCTION_CALL_ARGUMENTS_DELTA: FunctionCallArgumentsDeltaEvent,
             ResponsesAPIStreamEvents.FUNCTION_CALL_ARGUMENTS_DONE: FunctionCallArgumentsDoneEvent,
+            ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DELTA: CustomToolCallInputDeltaEvent,
+            ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DONE: CustomToolCallInputDoneEvent,
             ResponsesAPIStreamEvents.FILE_SEARCH_CALL_IN_PROGRESS: FileSearchCallInProgressEvent,
             ResponsesAPIStreamEvents.FILE_SEARCH_CALL_SEARCHING: FileSearchCallSearchingEvent,
             ResponsesAPIStreamEvents.FILE_SEARCH_CALL_COMPLETED: FileSearchCallCompletedEvent,

@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from os import PathLike
 from typing import IO, Any, Final, Literal, Optional, Union
@@ -889,6 +889,8 @@ class OpenAIChatCompletionToolParam(TypedDict):
 class ChatCompletionToolParam(OpenAIChatCompletionToolParam, total=False):
     cache_control: ChatCompletionCachedContent
     allowed_callers: list[str]
+    defer_loading: bool
+    input_examples: Sequence[Mapping[str, object]]
 
 
 class Function(TypedDict, total=False):
@@ -1474,6 +1476,7 @@ class OutputItemAddedEvent(BaseLiteLLMOpenAIResponseObject):
     type: Literal[ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED]
     output_index: int
     item: BaseLiteLLMOpenAIResponseObject | None
+    sequence_number: int | None = None
 
 
 class OutputItemDoneEvent(BaseLiteLLMOpenAIResponseObject):
@@ -1578,6 +1581,7 @@ class FunctionCallArgumentsDeltaEvent(BaseLiteLLMOpenAIResponseObject):
     item_id: str
     output_index: int
     delta: str
+    sequence_number: int | None = None
 
 
 class FunctionCallArgumentsDoneEvent(BaseLiteLLMOpenAIResponseObject):
@@ -1585,6 +1589,23 @@ class FunctionCallArgumentsDoneEvent(BaseLiteLLMOpenAIResponseObject):
     item_id: str
     output_index: int
     arguments: str
+    sequence_number: int | None = None
+
+
+class CustomToolCallInputDeltaEvent(BaseLiteLLMOpenAIResponseObject):
+    type: Literal[ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DELTA]
+    item_id: str
+    output_index: int
+    delta: str
+    sequence_number: int
+
+
+class CustomToolCallInputDoneEvent(BaseLiteLLMOpenAIResponseObject):
+    type: Literal[ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DONE]
+    item_id: str
+    output_index: int
+    input: str
+    sequence_number: int
 
 
 class FileSearchCallInProgressEvent(BaseLiteLLMOpenAIResponseObject):
@@ -1732,6 +1753,8 @@ ResponsesAPIStreamingResponse = Annotated[
     | RefusalDoneEvent
     | FunctionCallArgumentsDeltaEvent
     | FunctionCallArgumentsDoneEvent
+    | CustomToolCallInputDeltaEvent
+    | CustomToolCallInputDoneEvent
     | FileSearchCallInProgressEvent
     | FileSearchCallSearchingEvent
     | FileSearchCallCompletedEvent

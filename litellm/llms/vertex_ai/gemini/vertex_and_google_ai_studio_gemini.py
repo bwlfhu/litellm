@@ -584,6 +584,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         googleMaps: dict | None = None
         google_maps_retrieval_config: dict | None = None
         computerUse: dict | None = None
+        value = deepcopy(value)
         # remove 'additionalProperties' from tools
         value = _remove_additional_properties(value)
         # remove 'strict' from tools

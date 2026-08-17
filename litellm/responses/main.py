@@ -51,6 +51,7 @@ from litellm.utils import (
     ProviderConfigManager,
     log_tool_request_shape,
     client,
+    materialize_single_pass_iterable,
 )
 
 if TYPE_CHECKING:
@@ -974,6 +975,10 @@ def responses(
         #########################################################
         # Update input and tools with provider-specific file IDs if managed files are used
         #########################################################
+        tools = cast(Iterable[ToolParam] | None, local_vars.get("tools", tools))
+        tool_choice = cast(ToolChoice | None, local_vars.get("tool_choice", tool_choice))
+        tools = materialize_single_pass_iterable(tools)
+        local_vars["tools"] = tools
         input, tools = _apply_managed_file_id_mapping(input=input, tools=tools, kwargs=kwargs, local_vars=local_vars)
 
         log_tool_request_shape(
@@ -1123,6 +1128,11 @@ def responses(
 
         # Decode any litellm-encoded encrypted-content item IDs back to their original IDs
         input = ResponsesAPIRequestUtils._restore_encrypted_content_item_ids_in_input(input)
+        input = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+            request_input=input,
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+        )
 
         # Call the handler with _is_async flag instead of directly calling the async handler
         if custom_llm_provider is None:

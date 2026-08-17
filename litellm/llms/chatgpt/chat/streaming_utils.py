@@ -23,6 +23,7 @@ class ChatGPTToolCallNormalizer:
     def __init__(self, stream: Any):
         self._stream = stream
         self._seen_ids: dict[str, int] = {}  # tool_call_id -> assigned_index
+        self._source_indexes: dict[int, int | None] = {}
         self._next_index: int = 0
         self._last_id: str | None = None  # tracks which tool call the next delta belongs to
 
@@ -62,8 +63,14 @@ class ChatGPTToolCallNormalizer:
         for tc in delta.tool_calls:
             if tc.id and tc.id not in self._seen_ids:
                 # New tool call — assign correct index
-                self._seen_ids[tc.id] = self._next_index
-                tc.index = self._next_index
+                source_index = tc.index
+                normalized_index = self._next_index
+                self._seen_ids[tc.id] = normalized_index
+                if source_index in self._source_indexes:
+                    self._source_indexes[source_index] = None
+                else:
+                    self._source_indexes[source_index] = normalized_index
+                tc.index = normalized_index
                 self._last_id = tc.id
                 self._next_index += 1
                 normalized.append(tc)
@@ -72,7 +79,10 @@ class ChatGPTToolCallNormalizer:
                 continue
             else:
                 # Continuation delta (id=None) — fix index
-                if self._last_id:
+                source_index = self._source_indexes.get(tc.index)
+                if source_index is not None:
+                    tc.index = source_index
+                elif self._last_id:
                     tc.index = self._seen_ids[self._last_id]
                 normalized.append(tc)
 
