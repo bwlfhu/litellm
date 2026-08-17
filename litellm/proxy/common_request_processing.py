@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 import traceback
 from collections.abc import AsyncGenerator, Callable, Mapping
@@ -88,6 +89,35 @@ _DD_STREAMING_TRACE_ENABLED: Final = not isinstance(tracer, NullTracer)
 
 SSE_KEEPALIVE_COMMENT = ": keepalive\n\n"
 MIN_SSE_KEEPALIVE_INTERVAL_SECONDS = 1.0
+_STREAM_TIMING_LOG_ENABLED: Final = os.getenv("LITELLM_STREAM_TIMING_LOG", "").lower() in {"1", "true", "yes"}
+
+
+def _log_stream_timing(
+    event: str,
+    started_at: float,
+    request: Request | None = None,
+    headers: dict | None = None,
+    status_code: int | None = None,
+    error_type: str | None = None,
+) -> None:
+    if not _STREAM_TIMING_LOG_ENABLED:
+        return
+    request_id = "-"
+    path = "-"
+    if request is not None:
+        path = request.url.path
+        request_id = request.headers.get("x-request-id", "-")
+    elif headers is not None:
+        request_id = headers.get("x-request-id", "-")
+    verbose_proxy_logger.info(
+        "SSE stream timing event=%s elapsed_ms=%.1f path=%s request_id=%s status_code=%s error_type=%s",
+        event,
+        (time.monotonic() - started_at) * 1000,
+        path,
+        request_id,
+        status_code if status_code is not None else "-",
+        error_type or "-",
+    )
 
 
 _CLIENT_DISCONNECTED_ERROR_INFORMATION: Final[StandardLoggingPayloadErrorInformation] = {
@@ -591,7 +621,11 @@ def _resolve_sse_keepalive_interval() -> float | None:
 
 
 async def _stream_body_with_keepalive(
-    generator: AsyncGenerator[str, None], interval: float | None
+    generator: AsyncGenerator[str, None],
+    interval: float | None,
+    started_at: float | None = None,
+    request: Request | None = None,
+    headers: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Forward a stream, re-arming a keepalive comment on every idle gap.
 
@@ -610,6 +644,8 @@ async def _stream_body_with_keepalive(
         while True:
             done, _ = await asyncio.wait({pending}, timeout=interval)
             if not done:
+                if started_at is not None:
+                    _log_stream_timing("keepalive_sent", started_at, request, headers)
                 yield SSE_KEEPALIVE_COMMENT
                 continue
             try:
@@ -645,25 +681,34 @@ async def _aclose_quietly(target: AsyncGenerator[str, None] | None) -> None:
 
 
 async def _stream_with_pending_first_chunk(
-    generator: AsyncGenerator[str, None], chunk_task: asyncio.Task[str], interval: float
+    generator: AsyncGenerator[str, None],
+    chunk_task: asyncio.Task[str],
+    interval: float,
+    started_at: float,
+    request: Request | None,
+    headers: dict,
 ) -> AsyncGenerator[str, None]:
     body: AsyncGenerator[str, None] | None = None
     try:
         while not chunk_task.done():
+            _log_stream_timing("keepalive_sent", started_at, request, headers)
             yield SSE_KEEPALIVE_COMMENT
             await asyncio.wait({chunk_task}, timeout=interval)
         try:
             first_chunk = chunk_task.result()
         except StopAsyncIteration:
             return
-        body = _stream_body_with_keepalive(generator, interval)
+        _log_stream_timing("first_chunk_ready", started_at, request, headers)
+        body = _stream_body_with_keepalive(generator, interval, started_at, request, headers)
         if not _DD_STREAMING_TRACE_ENABLED:
             # Fast path: no per-chunk span object / context-manager overhead.
+            _log_stream_timing("downstream_first_chunk", started_at, request, headers)
             yield first_chunk
             async for chunk in body:
                 yield chunk
             return
         with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
+            _log_stream_timing("downstream_first_chunk", started_at, request, headers)
             yield first_chunk
         async for chunk in body:
             if chunk == SSE_KEEPALIVE_COMMENT:
@@ -680,6 +725,7 @@ async def _stream_with_pending_first_chunk(
                 await chunk_task
             except BaseException:  # noqa: BLE001  # teardown must swallow whatever the cancelled task raises
                 pass
+        _log_stream_timing("stream_closed", started_at, request, headers)
 
 
 async def _buffer_first_chunk_honoring_disconnect(
@@ -773,6 +819,7 @@ async def create_response(
     final_status_code = default_status_code
     keepalive_interval = _resolve_sse_keepalive_interval() if media_type == "text/event-stream" else None
     pending_first_chunk: asyncio.Task[str] | None = None
+    started_at: Final = time.monotonic()
 
     try:
         # Handle coroutine that returns a generator
@@ -785,7 +832,14 @@ async def create_response(
 
         if pending_first_chunk is not None and keepalive_interval is not None:
             return _UpstreamClosingStreamingResponse(
-                _stream_with_pending_first_chunk(generator, pending_first_chunk, keepalive_interval),
+                _stream_with_pending_first_chunk(
+                    generator,
+                    pending_first_chunk,
+                    keepalive_interval,
+                    started_at,
+                    request,
+                    streaming_headers,
+                ),
                 media_type=media_type,
                 headers=streaming_headers,
                 status_code=default_status_code,
@@ -794,6 +848,7 @@ async def create_response(
             )
 
         if first_chunk_value is not None:
+            _log_stream_timing("first_chunk_ready", started_at, request, streaming_headers)
             try:
                 error_code_from_chunk: Final = await _parse_event_data_for_error(first_chunk_value)
                 if error_code_from_chunk is not None:
@@ -824,6 +879,13 @@ async def create_response(
                 verbose_proxy_logger.debug("Error parsing first chunk value: %s", e)
 
     except _ClientDisconnectedBeforeFirstChunk:
+        _log_stream_timing(
+            "client_disconnected_before_first_chunk",
+            started_at,
+            request,
+            streaming_headers,
+            LITELLM_HTTP_STATUS_CLIENT_DISCONNECTED,
+        )
         # Client vanished during the time-to-first-token wait; the upstream
         # stream is already closed. Return a 499 the (now-gone) client never reads.
         return JSONResponse(
@@ -839,6 +901,7 @@ async def create_response(
             headers=headers,
         )
     except StopAsyncIteration:
+        _log_stream_timing("stream_empty", started_at, request, streaming_headers)
         # Generator was empty. Default status
         async def empty_gen() -> AsyncGenerator[str, None]:
             if False:
@@ -851,6 +914,13 @@ async def create_response(
             status_code=default_status_code,
         )
     except Exception as e:
+        _log_stream_timing(
+            "upstream_error_before_first_chunk",
+            started_at,
+            request,
+            streaming_headers,
+            error_type=type(e).__name__,
+        )
         # Unexpected error consuming first chunk.
         verbose_proxy_logger.exception("Error consuming first chunk from generator: %s", e)
 
@@ -888,17 +958,19 @@ async def create_response(
         )
 
     async def combined_generator() -> AsyncGenerator[str, None]:
-        body = _stream_body_with_keepalive(generator, keepalive_interval)
+        body = _stream_body_with_keepalive(generator, keepalive_interval, started_at, request, streaming_headers)
         try:
             if not _DD_STREAMING_TRACE_ENABLED:
                 # Fast path: no per-chunk span object / context-manager overhead.
                 if first_chunk_value is not None:
+                    _log_stream_timing("downstream_first_chunk", started_at, request, streaming_headers)
                     yield first_chunk_value
                 async for chunk in body:
                     yield chunk
                 return
             if first_chunk_value is not None:
                 with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
+                    _log_stream_timing("downstream_first_chunk", started_at, request, streaming_headers)
                     yield first_chunk_value
             async for chunk in body:
                 if chunk == SSE_KEEPALIVE_COMMENT:
@@ -908,6 +980,7 @@ async def create_response(
                     yield chunk
         finally:
             await _aclose_quietly(body)
+            _log_stream_timing("stream_closed", started_at, request, streaming_headers)
 
     return _UpstreamClosingStreamingResponse(
         combined_generator(),

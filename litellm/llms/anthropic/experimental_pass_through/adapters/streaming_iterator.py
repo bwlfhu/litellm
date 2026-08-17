@@ -200,7 +200,7 @@ class _CombinedChunkSplitter:
         return {"reasoning_content": thinking_text}
 
     @staticmethod
-    def _split(chunk: Any) -> List[Any]:
+    def _split(chunk: Any) -> list[Any]:
         """Split wire-incompatible combinations into ordered logical chunks."""
         finish_chunk: Any | None = None
         if _CombinedChunkSplitter._is_combined(chunk):
@@ -219,38 +219,10 @@ class _CombinedChunkSplitter:
                 finish_delta.reasoning_content = None
             if hasattr(finish_delta, "thinking_blocks"):
                 finish_delta.thinking_blocks = None
-            if hasattr(finish_delta, "thinking_blocks"):
-                finish_delta.thinking_blocks = None
         else:
             content_chunk = chunk
 
-        choices = getattr(content_chunk, "choices", None)
-        if not choices or getattr(choices[0], "delta", None) is None:
-            return [content_chunk, *([finish_chunk] if finish_chunk is not None else [])]
-
-        delta = choices[0].delta
-        has_text = bool(getattr(delta, "content", None))
-        has_reasoning = bool(getattr(delta, "reasoning_content", None)) or bool(getattr(delta, "thinking_blocks", None))
-        has_tool_calls = bool(getattr(delta, "tool_calls", None))
-
-        payload_chunks: List[Any]
-        if has_text and has_reasoning and not has_tool_calls:
-            reasoning_chunk = copy.deepcopy(content_chunk)
-            reasoning_chunk.choices[0].delta.content = None
-
-            text_chunk = copy.deepcopy(content_chunk)
-            text_delta = text_chunk.choices[0].delta
-            if hasattr(text_delta, "reasoning_content"):
-                text_delta.reasoning_content = None
-            if hasattr(text_delta, "thinking_blocks"):
-                text_delta.thinking_blocks = None
-            payload_chunks = [reasoning_chunk, text_chunk]
-        else:
-            payload_chunks = [content_chunk]
-
-        if finish_chunk is not None:
-            payload_chunks.append(finish_chunk)
-        return payload_chunks
+        return [content_chunk, *([finish_chunk] if finish_chunk is not None else [])]
 
     def __iter__(self) -> "Iterator[ModelResponseStream]":
         return self
@@ -600,16 +572,6 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                 if compaction_event is not None:
                     return compaction_event
 
-            if self.sent_content_block_start is False:
-                try:
-                    first_chunk = next(self.completion_stream)
-                except StopIteration:
-                    self.sent_content_block_start = True
-                    self.sent_last_message = True
-                    self.chunk_queue.append({"type": "message_stop"})
-                    return self.chunk_queue.popleft()
-                self._queue_initial_content_block(first_chunk)
-                return self.chunk_queue.popleft()
             for chunk in self.completion_stream:
                 if chunk == "None" or chunk is None:
                     raise Exception
@@ -838,16 +800,6 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                 if compaction_event is not None:
                     return compaction_event
 
-            if self.sent_content_block_start is False:
-                try:
-                    first_chunk = await self.completion_stream.__anext__()
-                except StopAsyncIteration:
-                    self.sent_content_block_start = True
-                    self.sent_last_message = True
-                    self.chunk_queue.append({"type": "message_stop"})
-                    return self.chunk_queue.popleft()
-                self._queue_initial_content_block(first_chunk)
-                return self.chunk_queue.popleft()
             async for chunk in self.completion_stream:
                 if chunk == "None" or chunk is None:
                     raise Exception

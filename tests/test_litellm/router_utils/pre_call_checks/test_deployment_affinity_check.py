@@ -14,6 +14,7 @@ from litellm.caching.dual_cache import DualCache
 from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
     DeploymentAffinityCheck,
 )
+from litellm.utils import _get_order_filtered_deployments
 
 
 class MockResponse:
@@ -25,6 +26,64 @@ class MockResponse:
 
     def json(self):
         return self._json_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("affinity_kind", "target_order", "expected_id"),
+    [
+        ("api_key", None, "order-zero"),
+        ("api_key", 2, "order-two"),
+        ("session", None, "order-zero"),
+    ],
+)
+async def test_affinity_ignores_pins_outside_selected_order(affinity_kind, target_order, expected_id):
+    cache = DualCache()
+    callback = DeploymentAffinityCheck(
+        cache=cache,
+        ttl_seconds=60,
+        enable_user_key_affinity=affinity_kind == "api_key",
+        enable_responses_api_affinity=False,
+        enable_session_id_affinity=affinity_kind == "session",
+    )
+    deployments = [
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 0},
+            "model_info": {"id": "order-zero"},
+        },
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 1},
+            "model_info": {"id": "stale-pin"},
+        },
+        {
+            "model_name": "ordered-model",
+            "litellm_params": {"model": "provider/ordered-model", "order": 2},
+            "model_info": {"id": "order-two"},
+        },
+    ]
+    metadata = {"user_api_key_hash": "user-key"} if affinity_kind == "api_key" else {"session_id": "session"}
+    cache_key = (
+        DeploymentAffinityCheck.get_affinity_cache_key("ordered-model", "user-key")
+        if affinity_kind == "api_key"
+        else DeploymentAffinityCheck.get_session_affinity_cache_key("ordered-model", "session", None)
+    )
+    await cache.async_set_cache(cache_key, {"model_id": "stale-pin"})
+    request_kwargs = {"metadata": metadata}
+    if target_order is not None:
+        request_kwargs["_target_order"] = target_order
+
+    filtered = await callback.async_filter_deployments(
+        model="ordered-model",
+        healthy_deployments=deployments,
+        messages=None,
+        request_kwargs=request_kwargs,
+    )
+    selected = _get_order_filtered_deployments(filtered, target_order=target_order)
+
+    assert [deployment["model_info"]["id"] for deployment in selected] == [expected_id]
+    assert await cache.async_get_cache(key=cache_key) is None
 
 
 @pytest.mark.asyncio

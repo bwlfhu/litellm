@@ -1051,7 +1051,7 @@ class RedisCache(BaseCache):
             "if tonumber(ARGV[2]) > 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end "
             "return tostring(next)"
         )
-        result = cast(
+        result = cast(  # cast-ok: redis-py eval has no precise result type
             "str | bytes | int | float",
             await _redis_client.eval(lua, 1, key, str(value), str(int(_used_ttl or 0))),
         )

@@ -333,6 +333,35 @@ class TestWriteHealthStateIntegration:
                     time_to_cooldown=router.cooldown_time,
                 )
 
+    @pytest.mark.parametrize(
+        ("configured_cooldown", "expected_cooldown"),
+        [(0, 0), (60, 60), (None, 30), (-1, 30)],
+    )
+    def test_health_check_uses_deployment_cooldown(self, configured_cooldown, expected_cooldown):
+        import litellm.proxy.proxy_server as proxy_module
+        from litellm.proxy.proxy_server import _write_health_state_to_router_cache
+
+        model = _make_model("deploy-1")
+        if configured_cooldown is not None:
+            model["litellm_params"]["cooldown_time"] = configured_cooldown
+        router = Router(
+            model_list=[model, _make_model("deploy-2", "gpt-5")],
+            cooldown_time=30,
+            allowed_fails_policy=AllowedFailsPolicy(TimeoutErrorAllowedFails=0),
+            enable_health_check_routing=True,
+        )
+        timeout_exc = litellm.Timeout(message="Health check timeout", model="", llm_provider="")
+
+        with patch.object(proxy_module, "llm_router", router):
+            with patch("litellm.router_utils.cooldown_handlers._set_cooldown_deployments") as mock_cooldown:
+                _write_health_state_to_router_cache(
+                    healthy_endpoints=[{"model_id": "deploy-2"}],
+                    unhealthy_endpoints=[{"model_id": "deploy-1"}],
+                    exceptions_by_model_id={"deploy-1": timeout_exc},
+                )
+
+        assert mock_cooldown.call_args.kwargs["time_to_cooldown"] == expected_cooldown
+
     def test_unhealthy_endpoint_without_exception_skips_cooldown(self):
         """Unhealthy endpoints without an exception key should not trigger cooldown."""
         import litellm.proxy.proxy_server as proxy_module

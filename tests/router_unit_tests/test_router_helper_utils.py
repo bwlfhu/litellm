@@ -693,6 +693,32 @@ def test_deployment_callback_respects_cooldown_time(model_list):
         assert mock_set.call_args.kwargs["time_to_cooldown"] == 0
 
 
+def test_deployment_callback_recovers_cooldown_from_deployment_config():
+    import time
+
+    router = Router(
+        model_list=[
+            {
+                "model_name": "gpt-5-mini",
+                "litellm_params": {"model": "gpt-5-mini", "cooldown_time": 60},
+                "model_info": {"id": 100},
+            }
+        ],
+        cooldown_time=30,
+    )
+    exception = litellm.RateLimitError(message="rate limited", llm_provider="openai", model="gpt-5-mini")
+
+    with patch("litellm.router._set_cooldown_deployments") as mock_set:
+        router.deployment_callback_on_failure(
+            kwargs={"exception": exception, "litellm_params": {"model_info": {"id": 100}}},
+            completion_response=None,
+            start_time=time.time(),
+            end_time=time.time(),
+        )
+
+    assert mock_set.call_args.kwargs["time_to_cooldown"] == 60
+
+
 def test_log_retry(model_list):
     """Test if the '_log_retry' function is working correctly"""
     import time
@@ -836,6 +862,43 @@ async def test_routing_strategy_pre_call_checks(model_list, sync_mode):
                 pytest.fail("Exception was not raised")
             except Exception as e:
                 assert isinstance(e, Exception)
+
+
+@pytest.mark.parametrize(
+    ("configured_cooldown", "expected_cooldown"),
+    [(0, 0), (60, 60), (None, 30), (-1, 30)],
+)
+@pytest.mark.asyncio
+async def test_async_pre_call_uses_deployment_cooldown(monkeypatch, configured_cooldown, expected_cooldown):
+    from litellm.integrations.custom_logger import CustomLogger
+
+    deployment_params = {"model": "gpt-5-mini"}
+    if configured_cooldown is not None:
+        deployment_params["cooldown_time"] = configured_cooldown
+    router = Router(
+        model_list=[
+            {
+                "model_name": "gpt-5-mini",
+                "litellm_params": deployment_params,
+                "model_info": {"id": "deployment-under-test"},
+            }
+        ],
+        cooldown_time=30,
+    )
+    deployment = router.get_deployment(model_id="deployment-under-test")
+    assert deployment is not None
+    callback = CustomLogger()
+    monkeypatch.setattr(litellm, "callbacks", [callback])
+    rate_limit_error = litellm.RateLimitError(message="rate limited", llm_provider="openai", model="gpt-5-mini")
+
+    with (
+        patch.object(callback, "async_pre_call_check", AsyncMock(side_effect=rate_limit_error)),
+        patch("litellm.router._set_cooldown_deployments") as mock_set,
+    ):
+        with pytest.raises(litellm.RateLimitError):
+            await router.async_routing_strategy_pre_call_checks(deployment=deployment, parent_otel_span=None)
+
+    assert mock_set.call_args.kwargs["time_to_cooldown"] == expected_cooldown
 
 
 @pytest.mark.parametrize(

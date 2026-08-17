@@ -26,6 +26,7 @@ from litellm.integrations.custom_logger import CustomLogger, Span
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.types.llms.openai import AllMessageValues
 from litellm.types.utils import CallTypes
+from litellm.utils import _get_order_filtered_deployments
 
 
 class DeploymentAffinityCacheValue(TypedDict):
@@ -412,6 +413,11 @@ class DeploymentAffinityCheck(CustomLogger):
                 return deployment
         return None
 
+    @staticmethod
+    def _get_order_eligible_deployments(healthy_deployments: list[dict], request_kwargs: dict) -> list[dict]:
+        target_order: Final = request_kwargs.get("_target_order")
+        return _get_order_filtered_deployments(healthy_deployments, target_order=target_order)
+
     async def async_filter_deployments(
         self,
         model: str,
@@ -451,11 +457,19 @@ class DeploymentAffinityCheck(CustomLogger):
                         )
                         return [deployment]
 
+        if request_kwargs.get("_encrypted_content_affinity_pinned"):
+            return typed_healthy_deployments
+
         stable_model_map_key: Final = self._get_stable_model_map_key_from_deployments(
             healthy_deployments=typed_healthy_deployments
         )
         if stable_model_map_key is None:
             return typed_healthy_deployments
+
+        order_eligible_deployments: Final = self._get_order_eligible_deployments(
+            healthy_deployments=typed_healthy_deployments,
+            request_kwargs=request_kwargs,
+        )
 
         session_affinity_active: Final = (
             enable_session_id or self._get_marker_session_affinity_ttl(request_kwargs=request_kwargs) is not None
@@ -483,7 +497,7 @@ class DeploymentAffinityCheck(CustomLogger):
 
                 if session_model_id:
                     session_deployment: Final = self._find_deployment_by_model_id(
-                        healthy_deployments=typed_healthy_deployments,
+                        healthy_deployments=order_eligible_deployments,
                         model_id=session_model_id,
                     )
                     if session_deployment is not None:
@@ -498,6 +512,7 @@ class DeploymentAffinityCheck(CustomLogger):
                             "DeploymentAffinityCheck: session-id pinned deployment=%s not found in healthy_deployments",
                             session_model_id,
                         )
+                        await self.cache.async_delete_cache(key=session_cache_key)
 
         # 3) User key -> deployment affinity
         if not enable_user_key:
@@ -520,7 +535,7 @@ class DeploymentAffinityCheck(CustomLogger):
             return typed_healthy_deployments
 
         deployment = self._find_deployment_by_model_id(
-            healthy_deployments=typed_healthy_deployments,
+            healthy_deployments=order_eligible_deployments,
             model_id=model_id,
         )
         if deployment is None:
@@ -528,6 +543,7 @@ class DeploymentAffinityCheck(CustomLogger):
                 "DeploymentAffinityCheck: pinned deployment=%s not found in healthy_deployments",
                 model_id,
             )
+            await self.cache.async_delete_cache(key=cache_key)
             return typed_healthy_deployments
 
         verbose_router_logger.debug(

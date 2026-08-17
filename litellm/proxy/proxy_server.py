@@ -3359,12 +3359,16 @@ def _write_health_state_to_router_cache(
                 deployment_id=model_id,
             )
 
+            deployment: Final = llm_router.get_deployment(model_id=model_id)
+            deployment_cooldown: Final = (
+                llm_router._get_valid_deployment_cooldown_time(deployment) if deployment is not None else None
+            )
             _set_cooldown_deployments(
                 litellm_router_instance=llm_router,
                 original_exception=original_exception,
                 exception_status=exception_status,
                 deployment=model_id,
-                time_to_cooldown=llm_router.cooldown_time,
+                time_to_cooldown=(deployment_cooldown if deployment_cooldown is not None else llm_router.cooldown_time),
             )
 
     except Exception as e:
@@ -13837,14 +13841,16 @@ async def async_queue_request(
         response: Final = await llm_router.schedule_acompletion(**data)
 
         if "stream" in data and data["stream"] is True:  # use generate_responses to stream responses
-            return StreamingResponse(
-                async_data_generator(
+            return await create_response(
+                generator=async_data_generator(
                     user_api_key_dict=user_api_key_dict,
                     response=response,
                     request_data=data,
                     request=request,
                 ),
                 media_type="text/event-stream",
+                headers={},
+                request=request,
             )
 
         fastapi_response.headers.update({"x-litellm-priority": str(data["priority"])})

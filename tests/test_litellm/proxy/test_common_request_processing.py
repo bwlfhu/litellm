@@ -32,6 +32,7 @@ from litellm.proxy.common_request_processing import (
     _get_cost_breakdown_from_logging_obj,
     _has_attribute_error_in_chain,
     _is_azure_model_router_request,
+    _log_stream_timing,
     _override_openai_response_model,
     _parse_event_data_for_error,
     _resolve_per_request_model_group_alias,
@@ -44,6 +45,16 @@ from litellm.proxy.dd_span_tagger import DDSpanTagger
 from litellm.proxy._types import ProxyException
 from litellm.proxy._types import UserAPIKeyAuth as ProxyUserAPIKeyAuth
 from litellm.proxy.utils import ProxyLogging
+
+
+def test_stream_timing_log_is_opt_in(monkeypatch, caplog):
+    import litellm.proxy.common_request_processing as processing_module
+
+    monkeypatch.setattr(processing_module, "_STREAM_TIMING_LOG_ENABLED", True)
+    with caplog.at_level("INFO", logger="LiteLLM Proxy"):
+        _log_stream_timing(event="first_chunk_ready", started_at=0.0, headers={"x-request-id": "request-1"})
+
+    assert "SSE stream timing event=first_chunk_ready" in caplog.text
 
 
 class TestProxyBaseLLMRequestProcessing:

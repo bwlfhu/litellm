@@ -21,6 +21,7 @@ from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import (
     BaseLLMHTTPHandler,
+    _log_anthropic_stream_timing,
     _google_genai_streaming_hidden_params,
 )
 from litellm.types.llms.openai import ResponsesAPIResponse
@@ -29,6 +30,22 @@ from litellm.types.utils import TranscriptionResponse
 
 _ACTIVE_KEY = "_code_interpreter_interception_active"
 _SANDBOX_KEY = "_code_interpreter_interception_sandbox_key"
+
+
+def test_anthropic_stream_timing_log_is_opt_in(monkeypatch, caplog):
+    import litellm.llms.custom_httpx.llm_http_handler as handler_module
+
+    monkeypatch.setattr(handler_module, "_STREAM_TIMING_LOG_ENABLED", True)
+    with caplog.at_level("INFO", logger="LiteLLM"):
+        _log_anthropic_stream_timing(
+            event="upstream_headers",
+            started_at=0.0,
+            model="gpt-4o",
+            logging_obj=Mock(litellm_call_id="call-1"),
+            status_code=200,
+        )
+
+    assert "Anthropic stream timing event=upstream_headers" in caplog.text
 
 
 def test_prepare_fake_stream_request():

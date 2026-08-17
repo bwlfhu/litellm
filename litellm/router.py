@@ -3202,26 +3202,6 @@ class Router:
             # provider parameter builder after a prebuilt logger was updated.
             kwargs.pop("_litellm_routing_stats_metadata", None)
 
-        routing_stats_metadata = kwargs.get("_litellm_routing_stats_metadata")
-        logging_obj = kwargs.get("litellm_logging_obj")
-        if isinstance(routing_stats_metadata, dict) and logging_obj is not None:
-            # The proxy creates its logging object before Router selects a
-            # deployment. Keep that callback payload in sync here, rather than
-            # waiting for function_setup(), which is skipped for prebuilt loggers.
-            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
-            if isinstance(logging_litellm_params, dict):
-                logging_litellm_params["routing_stats_metadata"] = routing_stats_metadata
-
-            model_call_details = getattr(logging_obj, "model_call_details", None)
-            if isinstance(model_call_details, dict):
-                model_call_litellm_params = model_call_details.get("litellm_params")
-                if isinstance(model_call_litellm_params, dict):
-                    model_call_litellm_params["routing_stats_metadata"] = routing_stats_metadata
-
-            # This is callback-only state. Do not let it flow through the Chat
-            # provider parameter builder after a prebuilt logger was updated.
-            kwargs.pop("_litellm_routing_stats_metadata", None)
-
         # A retry/fallback reuses this same kwargs dict for the next deployment.
         # Refund and clear any reservation the previous deployment attempt left
         # here before it's wiped below, instead of relying on that attempt's
@@ -7152,6 +7132,21 @@ class Router:
 
         return None
 
+    @staticmethod
+    def _normalize_cooldown_time(cooldown_time: object) -> float | None:
+        if isinstance(cooldown_time, bool) or not isinstance(cooldown_time, (int, float)) or cooldown_time < 0:
+            return None
+        return float(cooldown_time)
+
+    @classmethod
+    def _get_valid_deployment_cooldown_time(cls, deployment: Deployment | dict[str, Any]) -> float | None:
+        if isinstance(deployment, Deployment):
+            return cls._normalize_cooldown_time(getattr(deployment.litellm_params, "cooldown_time", None))
+        deployment_params: Final = deployment.get("litellm_params")
+        if not isinstance(deployment_params, dict):
+            return None
+        return cls._normalize_cooldown_time(deployment_params.get("cooldown_time"))
+
     def deployment_callback_on_failure(
         self,
         kwargs,  # kwargs to completion
@@ -7189,8 +7184,20 @@ class Router:
                 original_exception=exception
             )
 
-            # Determine cooldown time with priority: deployment config > response header > router default
-            deployment_cooldown: Final = litellm_params.get("cooldown_time", None)
+            raw_deployment_id: Final = _model_info.get("id") if isinstance(_model_info, dict) else None
+            deployment_id: Final = str(raw_deployment_id) if raw_deployment_id is not None else None
+            configured_deployment: Final = (
+                self.get_deployment(model_id=deployment_id) if deployment_id is not None else None
+            )
+            configured_cooldown: Final = (
+                self._get_valid_deployment_cooldown_time(configured_deployment)
+                if configured_deployment is not None
+                else None
+            )
+            request_cooldown: Final = litellm_params.get("cooldown_time", None)
+            deployment_cooldown: Final = (
+                configured_cooldown if configured_cooldown is not None else request_cooldown
+            )
 
             header_cooldown = None
             if exception_headers is not None:
@@ -7211,7 +7218,6 @@ class Router:
                 _time_to_cooldown = self.cooldown_time
 
             if isinstance(_model_info, dict):
-                deployment_id: Final[str | None] = _model_info.get("id")
                 if deployment_id is None:
                     return False
                 increment_deployment_failures_for_current_minute(
@@ -7475,12 +7481,15 @@ class Router:
                             target=logging_obj.failure_handler,
                             args=(e, traceback.format_exc()),
                         ).start()  # log response
+                    deployment_cooldown: Final = self._get_valid_deployment_cooldown_time(deployment)
                     _set_cooldown_deployments(
                         litellm_router_instance=self,
                         exception_status=e.status_code,
                         original_exception=e,
                         deployment=deployment["model_info"]["id"],
-                        time_to_cooldown=self.cooldown_time,
+                        time_to_cooldown=(
+                            deployment_cooldown if deployment_cooldown is not None else self.cooldown_time
+                        ),
                     )
                     raise e
                 except Exception as e:

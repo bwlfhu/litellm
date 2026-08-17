@@ -11278,3 +11278,40 @@ async def test_setup_prisma_client_returns_none_when_connect_itself_fails(monkey
     assert result is None
     assert mock_client.start_db_health_watchdog_task.await_count == 0
     assert mock_client.health_check.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_streaming_routes_through_create_response():
+    from fastapi import Request, Response
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"model":"gpt-4o","stream":true}', "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"",
+            "path": "/queue/chat/completions",
+        },
+        receive=receive,
+    )
+    router = MagicMock()
+    router.schedule_acompletion = AsyncMock(return_value=MagicMock())
+    response = object()
+
+    with (
+        patch.object(proxy_server_module, "llm_router", router),
+        patch.object(proxy_server_module, "async_data_generator", return_value=iter(())),
+        patch.object(proxy_server_module, "create_response", AsyncMock(return_value=response)) as create_response,
+    ):
+        result = await proxy_server_module.async_queue_request(
+            request=request,
+            fastapi_response=Response(),
+            user_api_key_dict=UserAPIKeyAuth(api_key="test-key"),
+        )
+
+    assert result is response
+    create_response.assert_awaited_once()
+    assert create_response.await_args.kwargs["media_type"] == "text/event-stream"
