@@ -515,6 +515,14 @@ def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> 
     return normalized_output_config
 
 
+def default_deepseek_anthropic_thinking_to_disabled(
+    request_params: Mapping[str, object],
+) -> dict[str, object]:
+    if request_params.get("thinking") is not None:
+        return dict(request_params)
+    return {**request_params, "thinking": {"type": "disabled"}}
+
+
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     """
     DeepSeek exposes an Anthropic-compatible Messages API at
@@ -633,13 +641,16 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             **{key: value for key, value in normalized_reasoning_params.items() if key != "tool_choice"},
             **({"tool_choice": normalized_tool_choice} if normalized_tool_choice is not None else {}),
         }
+        request_params_with_thinking_default: Final = default_deepseek_anthropic_thinking_to_disabled(
+            request_params_with_tool_choice
+        )
         should_disable_thinking: Final = self._tool_thinking == "disabled" and bool(
-            request_params_with_tool_choice.get("tools")
+            request_params_with_thinking_default.get("tools")
         )
         request_params: Final = (
-            {**request_params_with_tool_choice, "thinking": {"type": "disabled"}}
+            {**request_params_with_thinking_default, "thinking": {"type": "disabled"}}
             if should_disable_thinking
-            else request_params_with_tool_choice
+            else request_params_with_thinking_default
         )
         thinking: Final = request_params.get("thinking")
         require_reasoning: Final = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"

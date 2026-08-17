@@ -1799,10 +1799,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         preserve_unsigned_thinking_blocks = protocol_context is not None
         if preserve_unsigned_thinking_blocks:
             from litellm.llms.deepseek.messages.transformation import (
+                default_deepseek_anthropic_thinking_to_disabled,
                 prepare_deepseek_chat_history,
             )
 
-            thinking = optional_params.get("thinking")
+            optional_params = default_deepseek_anthropic_thinking_to_disabled(optional_params)
+            thinking = optional_params["thinking"]
             thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"
             messages = prepare_deepseek_chat_history(
                 messages,
