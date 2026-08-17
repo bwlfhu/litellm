@@ -12,6 +12,7 @@ from litellm.router_utils.add_retry_fallback_headers import (
     add_fallback_headers_to_response,
     get_fallback_error_info,
 )
+from litellm.router_utils.batch_utils import _get_router_metadata_variable_name
 from litellm.types.router import LiteLLMParamsTypedDict
 
 if TYPE_CHECKING:
@@ -176,6 +177,9 @@ async def run_async_fallback(
 
     error_from_fallbacks = original_exception
     fallback_errors = (get_fallback_error_info(original_exception),)
+    metadata_variable_name: Final = _get_router_metadata_variable_name(
+        function_name=getattr(kwargs.get("original_function"), "__name__", None)
+    )
     # Read out of kwargs and narrowed here rather than declared as a parameter: every caller
     # reaches this function by spreading a loosely-typed kwargs dict, so a declared parameter
     # would carry an annotation that no call site can actually be checked against.
@@ -205,9 +209,10 @@ async def run_async_fallback(
                 kwargs["model"] = mg
             elif isinstance(mg, dict):
                 kwargs.update(mg)
-            kwargs.setdefault("metadata", {}).update(
-                {"model_group": kwargs.get("model", None)}
-            )  # update model_group used, if fallbacks are done
+            kwargs[metadata_variable_name] = {
+                **(kwargs.get(metadata_variable_name) or {}),
+                "model_group": kwargs.get("model", None),
+            }
             fallback_depth = fallback_depth + 1
             kwargs["fallback_depth"] = fallback_depth
             kwargs["max_fallbacks"] = max_fallbacks
