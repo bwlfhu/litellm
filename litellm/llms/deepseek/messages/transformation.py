@@ -245,11 +245,13 @@ def deepseek_history_has_reasoningless_tool_use(messages: list[dict]) -> bool:
     )
 
 
-def deepseek_tool_choice_requires_disabled_thinking(tool_choice: object) -> bool:
+def normalize_deepseek_anthropic_tool_choice(tool_choice: object) -> object:
     if not isinstance(tool_choice, Mapping):
-        return False
+        return tool_choice
     choice_type = tool_choice.get("type")
-    return choice_type in {"tool", "function"}
+    if choice_type not in {"tool", "function"}:
+        return tool_choice
+    return {"type": "auto"}
 
 
 def _prepare_deepseek_chat_message(message: dict) -> dict:
@@ -474,6 +476,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     ) -> dict:
         request_params = dict(anthropic_messages_optional_request_params)
         request_params.pop("_deepseek_anthropic_messages_path", None)
+        if "tool_choice" in request_params:
+            request_params["tool_choice"] = normalize_deepseek_anthropic_tool_choice(request_params["tool_choice"])
         disable_tool_thinking = litellm_params.get("_deepseek_anthropic_tool_thinking") == "disabled"
         thinking = request_params.get("thinking")
         thinking_enabled = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"

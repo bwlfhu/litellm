@@ -75,7 +75,7 @@ def test_anthropic_chat_transform_does_not_serialize_router_protocol_context():
     json.dumps(request)
 
 
-def test_deepseek_chat_explicit_tool_choice_disables_thinking_generation():
+def test_deepseek_chat_explicit_tool_choice_falls_back_to_auto():
     context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     request = AnthropicConfig().transform_request(
         model="deepseek-v4-pro",
@@ -90,7 +90,8 @@ def test_deepseek_chat_explicit_tool_choice_disables_thinking_generation():
         headers={},
     )
 
-    assert request["thinking"] == {"type": "disabled"}
+    assert request["thinking"] == {"type": "enabled"}
+    assert request["tool_choice"] == {"type": "auto"}
 
 
 def test_deepseek_chat_auto_tool_choice_keeps_thinking_generation_enabled():
@@ -109,6 +110,25 @@ def test_deepseek_chat_auto_tool_choice_keeps_thinking_generation_enabled():
     )
 
     assert request["thinking"] == {"type": "enabled"}
+
+
+def test_deepseek_messages_explicit_tool_choice_falls_back_to_auto():
+    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the weather tool."}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "tool", "name": "get_weather"},
+        },
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "enabled"}
+    assert request["tool_choice"] == {"type": "auto"}
 
 
 @pytest.mark.asyncio
@@ -1414,6 +1434,7 @@ async def test_router_selected_deepseek_chat_normalizes_text_tool_reasoning_two_
             model="deepseek-group",
             messages=[{"role": "user", "content": "Use the weather tool."}],
             tools=tools,
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
             thinking={"type": "enabled"},
             allowed_openai_params=["thinking"],
             max_tokens=100,
@@ -1443,6 +1464,7 @@ async def test_router_selected_deepseek_chat_normalizes_text_tool_reasoning_two_
 
     assert len(captured_requests) == 2
     assert captured_requests[1]["thinking"] == {"type": "enabled"}
+    assert captured_requests[0]["tool_choice"] == {"type": "auto"}
     assert captured_requests[1]["messages"][1] == {
         "role": "assistant",
         "content": [
