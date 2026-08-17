@@ -10,8 +10,8 @@ import pytest
 sys.path.insert(0, os.path.abspath("../../../.."))  # Adds the parent directory to the system path
 import litellm
 from litellm.integrations.code_interpreter_interception.handler import (
-    CodeInterpreterInterceptionLogger,
     LITELLM_CODE_EXECUTION_TOOL_NAME,
+    CodeInterpreterInterceptionLogger,
 )
 from litellm.llms.base_llm.audio_transcription.transformation import (
     AudioTranscriptionRequestData,
@@ -21,9 +21,11 @@ from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import (
     BaseLLMHTTPHandler,
-    _log_anthropic_stream_timing,
     _google_genai_streaming_hidden_params,
+    _log_anthropic_stream_timing,
 )
+from litellm.router_protocol import _build_deployment_protocol_context
+from litellm.types.integrations.custom_logger import AgenticLoopPlan, AgenticLoopRequestPatch
 from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import TranscriptionResponse
@@ -1516,6 +1518,7 @@ def _make_responses_handler_call(signed_body):
     signing provider (e.g. Bedrock Mantle).
     """
     from unittest.mock import MagicMock
+
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
     from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
     from litellm.types.router import GenericLiteLLMParams
@@ -1571,6 +1574,7 @@ def test_responses_handler_signs_after_fake_stream_prep_strips_stream():
     We snapshot request_data at sign time and assert "stream" is already gone.
     """
     from unittest.mock import MagicMock
+
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
     from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
     from litellm.types.llms.openai import ResponsesAPIResponse
@@ -1634,6 +1638,7 @@ def _make_compact_handler_call(signed_body, is_async):
     signing provider (e.g. Bedrock Mantle SigV4 / bearer).
     """
     from unittest.mock import MagicMock
+
     from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
     from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
     from litellm.types.router import GenericLiteLLMParams
@@ -1728,7 +1733,7 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
 
     mock_config = Mock()
     mock_config.validate_anthropic_messages_environment = Mock(
-        return_value=({"x-api-key": "sk-test"}, "https://api.anthropic.com")
+        return_value=({"x-api-key": "sk-test"}, "https://resolved.example.test/base")
     )
     mock_config.transform_anthropic_messages_request = Mock(
         return_value={"model": "claude-haiku", "messages": [], "max_tokens": 16}
@@ -1752,6 +1757,13 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
 
     captured_kwargs: dict = {}
     sentinel_response = object()
+    protocol_context = _build_deployment_protocol_context(
+        {
+            "deepseek_anthropic_messages_path": "v1/messages",
+            "deepseek_anthropic_missing_reasoning": "placeholder",
+        }
+    )
+    assert protocol_context is not None
 
     async def fake_agentic_hooks(**call_kwargs):
         captured_kwargs.update(call_kwargs)
@@ -1782,7 +1794,9 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
             litellm_params=GenericLiteLLMParams(api_key="sk-real-anthropic-key"),
             logging_obj=mock_logging_obj,
             api_key="sk-real-anthropic-key",
+            api_base="https://tenant.example.test/base",
             stream=False,
+            deployment_protocol_context=protocol_context,
         )
 
     assert result is sentinel_response
@@ -1792,6 +1806,147 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
         "api_key must be injected into kwargs passed to _call_agentic_completion_hooks "
         "so follow-up calls in agentic hooks (e.g. websearch) can authenticate"
     )
+    assert forwarded["api_base"] == "https://resolved.example.test/base"
+    assert forwarded["_litellm_deployment_protocol_context"] is protocol_context
+    assert "_litellm_deployment_protocol_context" not in mock_logging_obj.update_from_kwargs.call_args.kwargs["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_agentic_followup_preserves_trusted_deployment_protocol_context():
+    handler = BaseLLMHTTPHandler()
+    protocol_context = _build_deployment_protocol_context(
+        {
+            "deepseek_anthropic_messages_path": "v1/messages",
+            "deepseek_anthropic_tool_thinking": "disabled",
+        }
+    )
+    assert protocol_context is not None
+    followup = AsyncMock(return_value={"content": []})
+    plan = AgenticLoopPlan(
+        run_agentic_loop=True,
+        request_patch=AgenticLoopRequestPatch(
+            model="anthropic/deepseek-v4-pro",
+            messages=[{"role": "user", "content": "tool result"}],
+            kwargs={
+                "_litellm_deployment_protocol_context": {"protocol": "untrusted"},
+                "custom_llm_provider": "deepseek",
+                "api_key": "sk-old-deployment",
+                "api_base": "https://tenant.example.test/base",
+            },
+        ),
+    )
+    logging_obj = Mock()
+    logging_obj.model_call_details = {
+        "agentic_loop_params": {
+            "model": "anthropic/deepseek-v4-pro",
+            "custom_llm_provider": "anthropic",
+        }
+    }
+
+    with patch("litellm.anthropic_interface.messages.acreate", new=followup):
+        await handler._execute_anthropic_agentic_plan(
+            plan=plan,
+            model="deepseek-v4-pro",
+            messages=[],
+            anthropic_messages_optional_request_params={"max_tokens": 100},
+            logging_obj=logging_obj,
+            kwargs={
+                "_litellm_deployment_protocol_context": protocol_context,
+                "custom_llm_provider": "deepseek",
+                "api_key": "sk-old-deployment",
+                "api_base": "https://tenant.example.test/base",
+            },
+            depth=0,
+            max_loops=3,
+            fingerprints=[],
+            fingerprint="tool-call",
+        )
+
+    assert followup.await_args.kwargs["model"] == "anthropic/deepseek-v4-pro"
+    assert followup.await_args.kwargs["custom_llm_provider"] == "anthropic"
+    assert followup.await_args.kwargs["api_base"] == "https://tenant.example.test/base"
+    assert followup.await_args.kwargs["api_key"] == "sk-old-deployment"
+    assert followup.await_args.kwargs["_litellm_deployment_protocol_context"] is protocol_context
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch_model", "patch_provider", "patch_api_base"),
+    [
+        ("anthropic/claude-sonnet-4-20250514", "deepseek", "https://old-deployment.example.test/base"),
+        ("openai/gpt-5.6-sol", "deepseek", "https://old-deployment.example.test/base"),
+        (None, "openai", "https://old-deployment.example.test/base"),
+        (None, "anthropic", "https://old-deployment.example.test/base"),
+        (None, "deepseek", "https://new-deployment.example.test/base"),
+    ],
+)
+async def test_anthropic_agentic_followup_clears_deployment_context_on_target_switch(
+    patch_model, patch_provider, patch_api_base
+):
+    handler = BaseLLMHTTPHandler()
+    protocol_context = _build_deployment_protocol_context(
+        {
+            "deepseek_anthropic_messages_path": "v1/messages",
+            "deepseek_anthropic_tool_thinking": "disabled",
+        }
+    )
+    assert protocol_context is not None
+    followup = AsyncMock(return_value={"content": []})
+    patch_kwargs = {
+        "custom_llm_provider": patch_provider,
+        "api_key": "sk-old-deployment",
+        "api_base": patch_api_base,
+    }
+    plan = AgenticLoopPlan(
+        run_agentic_loop=True,
+        request_patch=AgenticLoopRequestPatch(
+            model=patch_model,
+            messages=[{"role": "user", "content": "tool result"}],
+            kwargs=patch_kwargs,
+        ),
+    )
+    logging_obj = Mock()
+    logging_obj.model_call_details = {
+        "agentic_loop_params": {
+            "model": "anthropic/deepseek-v4-pro",
+            "custom_llm_provider": "anthropic",
+        }
+    }
+
+    with patch("litellm.anthropic_interface.messages.acreate", new=followup):
+        await handler._execute_anthropic_agentic_plan(
+            plan=plan,
+            model="deepseek-v4-pro",
+            messages=[],
+            anthropic_messages_optional_request_params={"max_tokens": 100},
+            logging_obj=logging_obj,
+            kwargs={
+                "_litellm_deployment_protocol_context": protocol_context,
+                "custom_llm_provider": "deepseek",
+                "api_key": "sk-old-deployment",
+                "api_base": "https://old-deployment.example.test/base",
+            },
+            depth=0,
+            max_loops=3,
+            fingerprints=[],
+            fingerprint="tool-call",
+        )
+
+    assert "_litellm_deployment_protocol_context" not in followup.await_args.kwargs
+    if patch_api_base == "https://new-deployment.example.test/base":
+        assert followup.await_args.kwargs["api_base"] == patch_api_base
+    else:
+        assert "api_base" not in followup.await_args.kwargs
+    assert "api_key" not in followup.await_args.kwargs
+    if patch_model is not None:
+        assert followup.await_args.kwargs["model"] == patch_model
+        assert "custom_llm_provider" not in followup.await_args.kwargs
+    elif patch_provider in {"openai", "anthropic"}:
+        assert followup.await_args.kwargs["model"] == "anthropic/deepseek-v4-pro"
+        assert followup.await_args.kwargs["custom_llm_provider"] == patch_provider
+    else:
+        assert followup.await_args.kwargs["model"] == "anthropic/deepseek-v4-pro"
+        assert followup.await_args.kwargs["custom_llm_provider"] == "anthropic"
 
 
 class _FakeWSExceptions:

@@ -44,8 +44,12 @@ from .utils import AnthropicMessagesRequestUtils, mock_response
 _RESPONSES_API_PROVIDERS: Final = frozenset({"openai"})
 
 
-def _has_deepseek_anthropic_protocol_context(kwargs: dict) -> bool:
-    return get_deployment_protocol_context(kwargs) is not None
+def _uses_deepseek_anthropic_messages(model: str, custom_llm_provider: str | None, kwargs: dict) -> bool:
+    return (
+        custom_llm_provider == "deepseek"
+        or (custom_llm_provider is None and model.startswith("deepseek/"))
+        or get_deployment_protocol_context(kwargs) is not None
+    )
 
 
 def _sanitize_anthropic_tool_history_with_diagnostics(
@@ -254,7 +258,7 @@ async def anthropic_messages(
     # ids like ``functions.Bash:0`` that violate Anthropic's id pattern.
     tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
     tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
-    if not _has_deepseek_anthropic_protocol_context(kwargs):
+    if not _uses_deepseek_anthropic_messages(model, custom_llm_provider, kwargs):
         messages = _sanitize_anthropic_tool_history_with_diagnostics(
             messages=messages,
             model=model,
@@ -465,7 +469,7 @@ def anthropic_messages_handler(
         messages = strip_empty_text_blocks_from_anthropic_messages(messages)
         tool_shape_logging_obj = kwargs.get("litellm_logging_obj")
         tool_shape_call_id = kwargs.get("litellm_call_id") or getattr(tool_shape_logging_obj, "litellm_call_id", None)
-        if not _has_deepseek_anthropic_protocol_context(kwargs):
+        if not _uses_deepseek_anthropic_messages(model, custom_llm_provider, kwargs):
             messages = _sanitize_anthropic_tool_history_with_diagnostics(
                 messages=messages,
                 model=model,
@@ -496,21 +500,12 @@ def anthropic_messages_handler(
     kwargs.pop("_litellm_deployment_protocol_context", None)
     kwargs.pop("_deepseek_anthropic_messages_path", None)
     kwargs.pop("_deepseek_anthropic_tool_thinking", None)
+    kwargs.pop("_deepseek_anthropic_missing_reasoning", None)
     litellm_params: Final = GenericLiteLLMParams(
         **kwargs,
         api_key=api_key,
         api_base=api_base,
         custom_llm_provider=custom_llm_provider,
-        **(
-            {"_deepseek_anthropic_messages_path": protocol_context.messages_path}
-            if protocol_context is not None and protocol_context.messages_path is not None
-            else {}
-        ),
-        **(
-            {"_deepseek_anthropic_tool_thinking": protocol_context.tool_thinking}
-            if protocol_context is not None and protocol_context.tool_thinking is not None
-            else {}
-        ),
     )
     (
         model,
@@ -580,6 +575,7 @@ def anthropic_messages_handler(
                 api_base=api_base,
                 client=client,
                 custom_llm_provider=custom_llm_provider,
+                **({"_litellm_deployment_protocol_context": protocol_context} if protocol_context is not None else {}),
                 **kwargs,
             )
 
@@ -588,7 +584,11 @@ def anthropic_messages_handler(
     if protocol_context is not None:
         from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
 
-        anthropic_messages_provider_config = DeepSeekAnthropicMessagesConfig()
+        anthropic_messages_provider_config = DeepSeekAnthropicMessagesConfig(
+            messages_path=protocol_context.messages_path,
+            tool_thinking=protocol_context.tool_thinking,
+            missing_reasoning=protocol_context.missing_reasoning,
+        )
     elif custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
         anthropic_messages_provider_config = ProviderConfigManager.get_provider_anthropic_messages_config(
             model=model,
@@ -640,14 +640,18 @@ def anthropic_messages_handler(
         raise ValueError(
             f"custom_llm_provider is required for Anthropic messages, passed in model={model}, custom_llm_provider={custom_llm_provider}"
         )
+    dispatch_custom_llm_provider: Final = "deepseek" if protocol_context is not None else custom_llm_provider
+    dispatch_litellm_params: Final = litellm_params.model_copy(
+        update={"custom_llm_provider": dispatch_custom_llm_provider}
+    )
 
     local_vars.update(kwargs)
     anthropic_messages_optional_request_params: Final = (
         AnthropicMessagesRequestUtils.get_requested_anthropic_messages_optional_param(
             params=local_vars,
             model=model,
-            drop_params=litellm_params.get("drop_params") is True,
-            custom_llm_provider=custom_llm_provider,
+            drop_params=dispatch_litellm_params.get("drop_params") is True,
+            custom_llm_provider=dispatch_custom_llm_provider,
         )
     )
     if is_reasoning_auto_summary_enabled():
@@ -665,11 +669,12 @@ def anthropic_messages_handler(
         anthropic_messages_optional_request_params=dict(anthropic_messages_optional_request_params),
         _is_async=is_async,
         client=client,
-        custom_llm_provider=custom_llm_provider,
-        litellm_params=litellm_params,
+        custom_llm_provider=dispatch_custom_llm_provider,
+        litellm_params=dispatch_litellm_params,
         logging_obj=litellm_logging_obj,
         api_key=api_key,
         api_base=api_base,
         stream=stream,
         kwargs=kwargs,
+        deployment_protocol_context=protocol_context,
     )

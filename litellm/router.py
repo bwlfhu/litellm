@@ -6288,14 +6288,6 @@ class Router:
         # groups resolved via pattern routing (e.g. `openai/*` -> `openai/gpt-4.1-mini`).
         all_deployments: Final = self.get_model_list(model_name=original_model_group, team_id=_request_team_id) or []
         order_fallback_deployments = self._filter_blocked_deployments(all_deployments)
-        if kwargs.get("_litellm_router_call_type") == "anthropic_messages":
-            protocol_deployments = [
-                deployment
-                for deployment in order_fallback_deployments
-                if (deployment.get("model_info") or {}).get("reasoning_protocol") == "deepseek_anthropic"
-            ]
-            if protocol_deployments:
-                order_fallback_deployments = protocol_deployments
         _order_set: Final[set] = {
             litellm.utils._get_deployment_order(d)
             for d in order_fallback_deployments
@@ -7201,9 +7193,7 @@ class Router:
                 else None
             )
             request_cooldown: Final = litellm_params.get("cooldown_time", None)
-            deployment_cooldown: Final = (
-                configured_cooldown if configured_cooldown is not None else request_cooldown
-            )
+            deployment_cooldown: Final = configured_cooldown if configured_cooldown is not None else request_cooldown
 
             header_cooldown = None
             if exception_headers is not None:
@@ -10702,14 +10692,6 @@ class Router:
             request_kwargs=request_kwargs,
             request_team_id=request_team_id,
         )
-        if request_kwargs is not None and request_kwargs.get("_litellm_router_call_type") == "anthropic_messages":
-            deepseek_anthropic_deployments = [
-                deployment
-                for deployment in healthy_deployments
-                if (deployment.get("model_info") or {}).get("reasoning_protocol") == "deepseek_anthropic"
-            ]
-            if deepseek_anthropic_deployments:
-                healthy_deployments = deepseek_anthropic_deployments
         _access_group_filter_emptied_candidates = (
             _pre_model_access_group_filter_len > 0 and len(healthy_deployments) == 0
         )

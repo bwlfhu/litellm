@@ -1802,7 +1802,13 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 prepare_deepseek_chat_history,
             )
 
-            messages = prepare_deepseek_chat_history(messages)
+            thinking = optional_params.get("thinking")
+            thinking_disabled = isinstance(thinking, dict) and thinking.get("type") == "disabled"
+            messages = prepare_deepseek_chat_history(
+                messages,
+                require_reasoning=protocol_context.tool_thinking != "disabled" and not thinking_disabled,
+                missing_reasoning=protocol_context.missing_reasoning,
+            )
 
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
             optional_params["tools"], _ = self._map_tools(add_dummy_tool(custom_llm_provider="anthropic"))
@@ -1815,7 +1821,8 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         # Anthropic errors with: "When thinking is disabled, an assistant message cannot contain thinking"
         # Related issue: https://github.com/BerriAI/litellm/issues/18926
         if (
-            optional_params.get("thinking") is not None
+            protocol_context is None
+            and optional_params.get("thinking") is not None
             and messages is not None
             and last_assistant_with_tool_calls_has_no_thinking_blocks(messages)
             and not any_assistant_message_has_thinking_blocks(messages)
@@ -1826,8 +1833,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     "Dropping 'thinking' param because the last assistant message with tool_calls "
                     "has no thinking_blocks. The model won't use extended thinking for this turn."
                 )
-        if protocol_context is not None and protocol_context.tool_thinking == "disabled" and bool(
-            optional_params.get("tools")
+        if (
+            protocol_context is not None
+            and protocol_context.tool_thinking == "disabled"
+            and bool(optional_params.get("tools"))
         ):
             optional_params["thinking"] = {"type": "disabled"}
 

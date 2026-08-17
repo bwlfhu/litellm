@@ -4,7 +4,7 @@ DeepSeek Anthropic-compatible messages transformation config.
 
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any
+from typing import Any, Final, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -18,11 +18,21 @@ from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
 from litellm.types.router import GenericLiteLLMParams
 
-_DEEPSEEK_MESSAGES_PATHS = frozenset({"anthropic/v1/messages", "v1/messages"})
+_DEEPSEEK_UNSUPPORTED_CONTENT_BLOCK_TYPES: Final = frozenset(
+    {
+        "image",
+        "document",
+        "search_result",
+        "code_execution_tool_result",
+        "mcp_tool_use",
+        "mcp_tool_result",
+        "container_upload",
+    }
+)
 
 
 class _DeepSeekHistoryValidationError(AnthropicError):
-    _litellm_disable_fallbacks = True
+    pass
 
 
 def _deduplicated_path_segments(path: str) -> tuple[str, ...]:
@@ -41,6 +51,20 @@ def _without_trailing_segments(segments: tuple[str, ...], values: frozenset[str]
     return segments[:index]
 
 
+def _without_known_messages_suffix(segments: tuple[str, ...]) -> tuple[str, ...]:
+    suffixes = (
+        ("anthropic", "v1", "messages"),
+        ("v1", "messages"),
+        ("anthropic", "v1"),
+        ("anthropic",),
+        ("v1",),
+    )
+    return next(
+        (segments[: -len(suffix)] for suffix in suffixes if segments[-len(suffix) :] == suffix),
+        segments,
+    )
+
+
 def _url_with_path(base_url: str, path_segments: tuple[str, ...]) -> str:
     parsed = urlsplit(base_url)
     path = "/" + "/".join(path_segments)
@@ -49,16 +73,15 @@ def _url_with_path(base_url: str, path_segments: tuple[str, ...]) -> str:
 
 def _complete_messages_url(base_url: str, messages_path: str | None) -> str:
     parsed = urlsplit(base_url)
-    if parsed.path.rstrip("/").endswith("/v1/messages"):
-        return base_url
-
     base_segments = _deduplicated_path_segments(parsed.path)
     if messages_path == "anthropic/v1/messages":
-        prefix = _without_trailing_segments(base_segments, frozenset({"anthropic", "v1"}))
+        prefix = _without_known_messages_suffix(base_segments)
         return _url_with_path(base_url, prefix + ("anthropic", "v1", "messages"))
     if messages_path == "v1/messages":
-        prefix = _without_trailing_segments(base_segments, frozenset({"v1"}))
+        prefix = _without_known_messages_suffix(base_segments)
         return _url_with_path(base_url, prefix + ("v1", "messages"))
+    if parsed.path.rstrip("/").endswith("/v1/messages"):
+        return base_url
 
     prefix = _without_trailing_segments(base_segments, frozenset({"v1", "beta"}))
     normalized = prefix if prefix[-1:] == ("anthropic",) else prefix + ("anthropic",)
@@ -91,11 +114,14 @@ def _unsigned_content_blocks(content: list[object]) -> tuple[list[object], bool,
         if block_type == "thinking":
             transformed_block.pop("signature", None)
             thinking = transformed_block.get("thinking")
-            has_reasoning = has_reasoning or (isinstance(thinking, str) and bool(thinking.strip()))
+            if not isinstance(thinking, str) or not thinking.strip():
+                continue
+            has_reasoning = True
         elif block_type in {"tool_use", "server_tool_use"}:
             has_tool_use = True
         elif block_type == "redacted_thinking":
             has_redacted_thinking = True
+            continue
         transformed_content.append(transformed_block)
     return transformed_content, has_tool_use, has_redacted_thinking, has_reasoning
 
@@ -104,36 +130,153 @@ def _deepseek_history_validation_error(message: str) -> AnthropicError:
     return _DeepSeekHistoryValidationError(message=message, status_code=400)
 
 
-def _deepseek_history_message(message: dict) -> dict:
+def _content_block_tree(block: object, depth: int = 0) -> tuple[tuple[object, int], ...]:
+    if not isinstance(block, Mapping) or depth >= 1:
+        return ((block, depth),)
+    nested_content: Final = block.get("content")
+    return (
+        (block, depth),
+        *(_content_blocks(nested_content, depth=depth + 1) if isinstance(nested_content, list) else ()),
+    )
+
+
+def _content_blocks(content: list[object], depth: int = 0) -> tuple[tuple[object, int], ...]:
+    return tuple(nested_block for block in content for nested_block in _content_block_tree(block, depth=depth))
+
+
+def _validate_deepseek_content_blocks(messages: list[dict], model: str | None = None) -> None:
+    unsupported_types: Final = sorted(
+        {
+            block_type
+            for message in messages
+            for field in ("content", "thinking_blocks")
+            for block, depth in _content_blocks(message.get(field) if isinstance(message.get(field), list) else [])
+            if isinstance(block, Mapping)
+            for block_type in (block.get("type"),)
+            if isinstance(block_type, str)
+            and (
+                block_type in _DEEPSEEK_UNSUPPORTED_CONTENT_BLOCK_TYPES
+                or (block_type == "redacted_thinking" and (message.get("role") != "assistant" or depth > 0))
+            )
+        }
+    )
+    if unsupported_types:
+        raise litellm.utils.UnsupportedParamsError(
+            message=(
+                "DeepSeek Anthropic compatibility does not support content block type(s): "
+                + ", ".join(unsupported_types)
+            ),
+            model=model,
+            llm_provider="deepseek",
+        )
+
+
+def _sidecar_reasoning_blocks(message: Mapping[str, object]) -> tuple[list[object], bool, bool]:
+    raw_thinking_blocks: Final = message.get("thinking_blocks")
+    if not isinstance(raw_thinking_blocks, list):
+        return [], False, False
+    transformed_blocks, _, has_redacted_thinking, has_reasoning = _unsigned_content_blocks(raw_thinking_blocks)
+    reasoning_blocks: Final = [
+        block
+        for block in transformed_blocks
+        if isinstance(block, Mapping) and block.get("type") in {"thinking", "redacted_thinking"}
+    ]
+    return reasoning_blocks, has_redacted_thinking, has_reasoning
+
+
+def _deepseek_history_message(
+    message: dict,
+    require_reasoning: bool,
+    missing_reasoning: Literal["placeholder"] | None,
+) -> dict:
     transformed_message = deepcopy(message)
     if transformed_message.get("role") != "assistant":
         return transformed_message
 
-    reasoning_content = _nonempty_reasoning_content(message)
+    reasoning_content: Final = _nonempty_reasoning_content(message)
     transformed_message.pop("reasoning_content", None)
     transformed_message.pop("provider_specific_fields", None)
-    content = transformed_message.get("content")
+    transformed_message.pop("thinking_blocks", None)
+    sidecar_blocks, sidecar_has_redacted_thinking, sidecar_has_reasoning = _sidecar_reasoning_blocks(message)
+    content: Final = transformed_message.get("content")
     if not isinstance(content, list):
-        if reasoning_content is None:
-            return transformed_message
-        text_block = [{"type": "text", "text": content}] if isinstance(content, str) and content else []
-        transformed_message["content"] = [{"type": "thinking", "thinking": reasoning_content}, *text_block]
+        scalar_has_tool_history: Final = _chat_message_has_tool_history(message)
+        reasoning_blocks: Final = (
+            [{"type": "thinking", "thinking": reasoning_content}]
+            if reasoning_content is not None
+            else sidecar_blocks
+            if sidecar_has_reasoning
+            else []
+        )
+        scalar_has_reasoning: Final = bool(reasoning_blocks)
+        if scalar_has_tool_history and sidecar_has_redacted_thinking and require_reasoning and not scalar_has_reasoning:
+            raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
+        scalar_uses_placeholder: Final = (
+            scalar_has_tool_history
+            and require_reasoning
+            and not scalar_has_reasoning
+            and missing_reasoning == "placeholder"
+        )
+        if scalar_has_tool_history and require_reasoning and not scalar_has_reasoning and not scalar_uses_placeholder:
+            raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
+        replayable_reasoning: Final = (
+            [{"type": "thinking", "thinking": " "}] if scalar_uses_placeholder else reasoning_blocks
+        )
+        text_blocks: Final = [{"type": "text", "text": content}] if isinstance(content, str) and content.strip() else []
+        scalar_content: Final = [*replayable_reasoning, *text_blocks]
+        if sidecar_has_redacted_thinking and not scalar_content:
+            raise _deepseek_history_validation_error("DeepSeek Anthropic history cannot replay redacted-only thinking")
+        if scalar_content:
+            transformed_message["content"] = scalar_content
         return transformed_message
 
-    transformed_content, has_tool_use, has_redacted_thinking, has_reasoning = _unsigned_content_blocks(content)
-    if has_tool_use and has_redacted_thinking:
+    transformed_content, has_tool_use, inline_has_redacted_thinking, inline_has_reasoning = _unsigned_content_blocks(
+        content
+    )
+    content_without_inline_reasoning: Final = [
+        block for block in transformed_content if not (isinstance(block, Mapping) and block.get("type") == "thinking")
+    ]
+    selected_content: Final = (
+        [{"type": "thinking", "thinking": reasoning_content}, *content_without_inline_reasoning]
+        if reasoning_content is not None
+        else transformed_content
+        if inline_has_reasoning
+        else [*sidecar_blocks, *transformed_content]
+        if sidecar_has_reasoning
+        else transformed_content
+    )
+    has_reasoning: Final = inline_has_reasoning or sidecar_has_reasoning or reasoning_content is not None
+    has_redacted_thinking: Final = inline_has_redacted_thinking or sidecar_has_redacted_thinking
+    has_tool_history: Final = has_tool_use or _chat_message_has_tool_history(message)
+    if has_tool_history and has_redacted_thinking and require_reasoning and not has_reasoning:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
-    if not has_reasoning and reasoning_content is not None:
-        transformed_content = [{"type": "thinking", "thinking": reasoning_content}, *transformed_content]
-        has_reasoning = True
-    if has_tool_use and not has_reasoning:
+    use_placeholder: Final = (
+        has_tool_history and require_reasoning and not has_reasoning and missing_reasoning == "placeholder"
+    )
+    if has_tool_history and require_reasoning and not has_reasoning and not use_placeholder:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
-    transformed_message["content"] = transformed_content
+    final_content: Final = (
+        [{"type": "thinking", "thinking": " "}, *selected_content] if use_placeholder else selected_content
+    )
+    if has_redacted_thinking and not final_content:
+        raise _deepseek_history_validation_error("DeepSeek Anthropic history cannot replay redacted-only thinking")
+    transformed_message["content"] = final_content
     return transformed_message
 
 
-def _deepseek_history(messages: list[dict]) -> list[dict]:
-    return [_deepseek_history_message(message) for message in messages]
+def _deepseek_history(
+    messages: list[dict],
+    require_reasoning: bool,
+    missing_reasoning: Literal["placeholder"] | None,
+) -> list[dict]:
+    return [
+        _deepseek_history_message(
+            message,
+            require_reasoning=require_reasoning,
+            missing_reasoning=missing_reasoning,
+        )
+        for message in messages
+    ]
 
 
 def _without_reasoning_content_fields(message: dict) -> dict:
@@ -166,7 +309,11 @@ def _chat_message_has_tool_history(message: Mapping[str, object]) -> bool:
     )
 
 
-def _prepare_deepseek_chat_message(message: dict) -> dict:
+def _prepare_deepseek_chat_message(
+    message: dict,
+    require_reasoning: bool,
+    missing_reasoning: Literal["placeholder"] | None,
+) -> dict:
     transformed_message = deepcopy(message)
     if transformed_message.get("role") != "assistant":
         return transformed_message
@@ -195,14 +342,25 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
     has_reasoning = content_has_reasoning or blocks_have_reasoning
     has_redacted_thinking = content_has_redacted_thinking or blocks_have_redacted_thinking
     reasoning_content = _nonempty_reasoning_content(message)
-    if not has_reasoning and reasoning_content is not None:
-        thinking_blocks.insert(0, {"type": "thinking", "thinking": reasoning_content})
+    if reasoning_content is not None:
+        transformed_message["content"] = (
+            [
+                block
+                for block in transformed_message.get("content", [])
+                if not (isinstance(block, Mapping) and block.get("type") == "thinking")
+            ]
+            if isinstance(transformed_message.get("content"), list)
+            else transformed_message.get("content")
+        )
+        thinking_blocks = [{"type": "thinking", "thinking": reasoning_content}]
         has_reasoning = True
 
     has_tool_history = content_has_tool_use or _chat_message_has_tool_history(transformed_message)
-    if has_tool_history and has_redacted_thinking:
+    if has_tool_history and has_redacted_thinking and require_reasoning and not has_reasoning:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
-    if has_tool_history and not has_reasoning:
+    if has_tool_history and require_reasoning and not has_reasoning and missing_reasoning == "placeholder":
+        thinking_blocks.insert(0, {"type": "thinking", "thinking": " "})
+    elif has_tool_history and require_reasoning and not has_reasoning:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
 
     transformed_message = _without_reasoning_content_fields(transformed_message)
@@ -210,6 +368,16 @@ def _prepare_deepseek_chat_message(message: dict) -> dict:
         transformed_message["thinking_blocks"] = thinking_blocks
     else:
         transformed_message.pop("thinking_blocks", None)
+    replayable_content: Final = transformed_message.get("content")
+    has_visible_content: Final = (
+        bool(replayable_content.strip())
+        if isinstance(replayable_content, str)
+        else bool(replayable_content)
+        if isinstance(replayable_content, list)
+        else replayable_content is not None
+    )
+    if has_redacted_thinking and not has_visible_content and not thinking_blocks and not has_tool_history:
+        raise _deepseek_history_validation_error("DeepSeek Anthropic history cannot replay redacted-only thinking")
     return transformed_message
 
 
@@ -255,8 +423,20 @@ def _upgrade_legacy_function_result(message: dict, tool_call_id: str | None) -> 
     return {**message, "role": "tool", "tool_call_id": tool_call_id}
 
 
-def prepare_deepseek_chat_history(messages: list[dict]) -> list[dict]:
-    prepared_messages = [_prepare_deepseek_chat_message(message) for message in messages]
+def prepare_deepseek_chat_history(
+    messages: list[dict],
+    require_reasoning: bool = True,
+    missing_reasoning: Literal["placeholder"] | None = None,
+) -> list[dict]:
+    _validate_deepseek_content_blocks(messages)
+    prepared_messages = [
+        _prepare_deepseek_chat_message(
+            message,
+            require_reasoning=require_reasoning,
+            missing_reasoning=missing_reasoning,
+        )
+        for message in messages
+    ]
     return [
         _upgrade_legacy_function_result(
             _upgrade_legacy_function_call(message, message_index),
@@ -264,6 +444,75 @@ def prepare_deepseek_chat_history(messages: list[dict]) -> list[dict]:
         )
         for message_index, message in enumerate(prepared_messages)
     ]
+
+
+def _normalized_tool_choice(tool_choice: object) -> object:
+    if isinstance(tool_choice, str):
+        return {
+            "auto": {"type": "auto"},
+            "none": {"type": "none"},
+            "required": {"type": "any"},
+            "any": {"type": "any"},
+        }.get(tool_choice, tool_choice)
+    if not isinstance(tool_choice, Mapping):
+        return deepcopy(tool_choice)
+    choice: Final = deepcopy(dict(tool_choice))
+    choice_type: Final = choice.get("type")
+    if choice_type == "required":
+        return {**choice, "type": "any"}
+    if choice_type == "function":
+        function: Final = choice.get("function")
+        if isinstance(function, Mapping) and isinstance(function.get("name"), str):
+            return {
+                **{key: value for key, value in choice.items() if key != "function"},
+                "type": "tool",
+                "name": function["name"],
+            }
+    if choice_type is None and isinstance(choice.get("name"), str):
+        return {**choice, "type": "tool"}
+    return choice
+
+
+def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> dict:
+    without_reasoning_effort: Final = {
+        key: deepcopy(value) for key, value in request_params.items() if key != "reasoning_effort"
+    }
+    raw_output_config: Final = without_reasoning_effort.get("output_config")
+    raw_effort: Final = raw_output_config.get("effort") if isinstance(raw_output_config, Mapping) else None
+    normalized_effort: Final = (
+        {
+            "minimal": "low",
+            "medium": "high",
+            "xhigh": "high",
+        }.get(raw_effort, raw_effort)
+        if isinstance(raw_effort, str)
+        else None
+    )
+    output_config: Final = (
+        {"effort": normalized_effort}
+        if isinstance(normalized_effort, str) and normalized_effort in {"low", "high", "max"}
+        else None
+    )
+    without_output_config: Final = {
+        key: value for key, value in without_reasoning_effort.items() if key != "output_config"
+    }
+    normalized_output_config: Final = (
+        {
+            **without_output_config,
+            "output_config": output_config,
+        }
+        if output_config is not None
+        else without_output_config
+    )
+    raw_thinking: Final = normalized_output_config.get("thinking")
+    if not isinstance(raw_thinking, Mapping):
+        return normalized_output_config
+    thinking_type: Final = raw_thinking.get("type")
+    if thinking_type == "disabled":
+        return {**normalized_output_config, "thinking": {"type": "disabled"}}
+    if thinking_type in {"enabled", "adaptive"}:
+        return {**normalized_output_config, "thinking": {"type": "enabled"}}
+    return normalized_output_config
 
 
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
@@ -275,6 +524,16 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     thinking blocks in assistant history, but rejects Anthropic's explicit
     custom-tool discriminator (`{"type": "custom"}`).
     """
+
+    def __init__(
+        self,
+        messages_path: Literal["anthropic/v1/messages", "v1/messages"] | None = None,
+        tool_thinking: Literal["disabled"] | None = None,
+        missing_reasoning: Literal["placeholder"] | None = None,
+    ) -> None:
+        self._messages_path = messages_path
+        self._tool_thinking = tool_thinking
+        self._missing_reasoning = missing_reasoning
 
     @property
     def custom_llm_provider(self) -> str | None:
@@ -340,13 +599,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         stream: bool | None = None,
     ) -> str:
         base_url = self.get_api_base(api_base=api_base).rstrip("/")
-        configured_path = optional_params.get("_deepseek_anthropic_messages_path")
-        messages_path = (
-            configured_path
-            if isinstance(configured_path, str) and configured_path in _DEEPSEEK_MESSAGES_PATHS
-            else None
-        )
-        return _complete_messages_url(base_url, messages_path)
+        return _complete_messages_url(base_url, self._messages_path)
 
     @staticmethod
     def _sanitize_tools_for_deepseek(tools: Any) -> Any:
@@ -371,12 +624,30 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> dict:
-        request_params = dict(anthropic_messages_optional_request_params)
-        request_params.pop("_deepseek_anthropic_messages_path", None)
-        disable_tool_thinking = litellm_params.get("_deepseek_anthropic_tool_thinking") == "disabled"
-        transformed_messages = _deepseek_history(messages)
-        if disable_tool_thinking and bool(request_params.get("tools")):
-            request_params["thinking"] = {"type": "disabled"}
+        _validate_deepseek_content_blocks(messages, model=model)
+        normalized_reasoning_params: Final = _without_adaptive_reasoning_params(
+            anthropic_messages_optional_request_params
+        )
+        normalized_tool_choice: Final = _normalized_tool_choice(normalized_reasoning_params.get("tool_choice"))
+        request_params_with_tool_choice: Final = {
+            **{key: value for key, value in normalized_reasoning_params.items() if key != "tool_choice"},
+            **({"tool_choice": normalized_tool_choice} if normalized_tool_choice is not None else {}),
+        }
+        should_disable_thinking: Final = self._tool_thinking == "disabled" and bool(
+            request_params_with_tool_choice.get("tools")
+        )
+        request_params: Final = (
+            {**request_params_with_tool_choice, "thinking": {"type": "disabled"}}
+            if should_disable_thinking
+            else request_params_with_tool_choice
+        )
+        thinking: Final = request_params.get("thinking")
+        require_reasoning: Final = not (isinstance(thinking, Mapping) and thinking.get("type") == "disabled")
+        transformed_messages: Final = _deepseek_history(
+            messages,
+            require_reasoning=require_reasoning,
+            missing_reasoning=self._missing_reasoning,
+        )
         anthropic_messages_request = super().transform_anthropic_messages_request(
             model=model,
             messages=transformed_messages,
@@ -413,7 +684,19 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             else:
                 response.pop("provider_specific_fields", None)
         content = response.get("content")
-        content_blocks = content if isinstance(content, list) else []
+        content_blocks = (
+            [
+                block
+                for block in content
+                if not (
+                    isinstance(block, Mapping)
+                    and block.get("type") == "thinking"
+                    and (not isinstance(block.get("thinking"), str) or not block["thinking"].strip())
+                )
+            ]
+            if isinstance(content, list)
+            else []
+        )
         has_thinking = any(
             isinstance(block, Mapping)
             and block.get("type") == "thinking"
@@ -423,6 +706,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         )
         if isinstance(reasoning_content, str) and reasoning_content.strip() and not has_thinking:
             response["content"] = [{"type": "thinking", "thinking": reasoning_content}, *content_blocks]
+        elif isinstance(content, list) and content_blocks != content:
+            response["content"] = content_blocks
         return response
 
     @property

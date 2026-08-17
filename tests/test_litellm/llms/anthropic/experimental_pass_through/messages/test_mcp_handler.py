@@ -1,11 +1,15 @@
+import json
 import os
 import sys
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.abspath("../../../../../.."))
 
+from litellm.litellm_core_utils.litellm_logging import Logging
+from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 from litellm.llms.anthropic.experimental_pass_through.messages.handler import (
     anthropic_messages_handler,
 )
@@ -13,6 +17,8 @@ from litellm.llms.anthropic.experimental_pass_through.messages.mcp_handler impor
     _build_tool_result_message,
     _extract_tool_use_blocks,
 )
+from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
+from litellm.router_protocol import _build_deployment_protocol_context
 
 MCP_REFERENCE = {
     "type": "mcp",
@@ -22,7 +28,8 @@ MCP_REFERENCE = {
 }
 
 
-def test_anthropic_messages_handler_routes_litellm_proxy_mcp_to_the_gateway():
+@pytest.mark.asyncio
+async def test_anthropic_messages_handler_routes_litellm_proxy_mcp_to_the_gateway():
     """
     Regression test (LIT-4517): /v1/messages must expand a litellm_proxy MCP
     reference through the MCP gateway.
@@ -41,7 +48,7 @@ def test_anthropic_messages_handler_routes_litellm_proxy_mcp_to_the_gateway():
         "litellm.llms.anthropic.experimental_pass_through.messages.mcp_handler.anthropic_messages_with_mcp",
         new=AsyncMock(return_value={"routed": True}),
     ) as routed:
-        result = anthropic_messages_handler(
+        result = await anthropic_messages_handler(
             max_tokens=100,
             messages=[{"role": "user", "content": "hi"}],
             model="claude-sonnet-4-5",
@@ -53,6 +60,116 @@ def test_anthropic_messages_handler_routes_litellm_proxy_mcp_to_the_gateway():
     assert routed.call_args.kwargs["tools"] == [MCP_REFERENCE]
     assert routed.call_args.kwargs["model"] == "claude-sonnet-4-5"
     assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_handler_preserves_trusted_protocol_context_for_mcp_recursion():
+    protocol_context = _build_deployment_protocol_context(
+        {
+            "deepseek_anthropic_messages_path": "v1/messages",
+            "deepseek_anthropic_tool_thinking": "disabled",
+        }
+    )
+    assert protocol_context is not None
+
+    with patch(
+        "litellm.llms.anthropic.experimental_pass_through.messages.mcp_handler.anthropic_messages_with_mcp",
+        new=AsyncMock(return_value={"routed": True}),
+    ) as routed:
+        result = await anthropic_messages_handler(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "hi"}],
+            model="anthropic/claude-test",
+            tools=[MCP_REFERENCE],
+            custom_llm_provider="anthropic",
+            _litellm_deployment_protocol_context=protocol_context,
+        )
+
+    assert result is not None
+    assert routed.call_args.kwargs["_litellm_deployment_protocol_context"] is protocol_context
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_with_mcp_preserves_protocol_context_on_recursive_call():
+    from litellm.llms.anthropic.experimental_pass_through.messages import mcp_handler
+
+    protocol_context = _build_deployment_protocol_context({"deepseek_anthropic_messages_path": "v1/messages"})
+    assert protocol_context is not None
+    recursive_call = AsyncMock(return_value={"stop_reason": "end_turn", "content": []})
+
+    with patch("litellm.anthropic_messages", new=recursive_call):
+        await mcp_handler.anthropic_messages_with_mcp(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-test",
+            tools=[{"name": "get_weather", "input_schema": {"type": "object"}}],
+            _litellm_deployment_protocol_context=protocol_context,
+        )
+
+    assert recursive_call.await_args.kwargs["_litellm_deployment_protocol_context"] is protocol_context
+
+
+@pytest.mark.asyncio
+async def test_mcp_recursive_protocol_context_stops_at_provider_boundary():
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler, mcp_handler
+
+    protocol_context = _build_deployment_protocol_context({"deepseek_anthropic_messages_path": "v1/messages"})
+    assert protocol_context is not None
+    logging_obj = Logging(
+        model="claude-test",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        call_type="anthropic_messages",
+        start_time=time.time(),
+        litellm_call_id="mcp-protocol-call",
+        function_id="mcp-protocol-function",
+    )
+
+    try:
+        with patch.object(
+            handler.base_llm_http_handler, "anthropic_messages_handler", return_value={"content": []}
+        ) as dispatch:
+            await mcp_handler.anthropic_messages_with_mcp(
+                max_tokens=100,
+                messages=[{"role": "user", "content": "hi"}],
+                model="anthropic/claude-test",
+                tools=[{"name": "get_weather", "input_schema": {"type": "object"}}],
+                custom_llm_provider="anthropic",
+                api_base="https://provider.example.test/anthropic/v1/messages",
+                litellm_logging_obj=logging_obj,
+                _litellm_deployment_protocol_context=protocol_context,
+            )
+    finally:
+        await GLOBAL_LOGGING_WORKER.stop()
+
+    dispatched = dispatch.call_args.kwargs
+    config = dispatched["anthropic_messages_provider_config"]
+    request_body = config.transform_anthropic_messages_request(
+        model=dispatched["model"],
+        messages=dispatched["messages"],
+        anthropic_messages_optional_request_params=dispatched["anthropic_messages_optional_request_params"],
+        litellm_params=dispatched["litellm_params"],
+        headers={},
+    )
+
+    assert isinstance(config, DeepSeekAnthropicMessagesConfig)
+    assert (
+        config.get_complete_url(
+            api_base=dispatched["api_base"],
+            api_key=None,
+            model=dispatched["model"],
+            optional_params={},
+            litellm_params={},
+        )
+        == "https://provider.example.test/v1/messages"
+    )
+    assert "_litellm_deployment_protocol_context" not in dispatched["kwargs"]
+    assert "_litellm_deployment_protocol_context" not in dispatched["anthropic_messages_optional_request_params"]
+    assert "_litellm_deployment_protocol_context" not in dispatched["litellm_params"].model_dump()
+    assert "_litellm_deployment_protocol_context" not in logging_obj.litellm_params
+    assert "_litellm_deployment_protocol_context" not in logging_obj.model_call_details.get("litellm_params", {})
+    assert "_litellm_deployment_protocol_context" not in json.dumps(logging_obj.litellm_params)
+    assert "_litellm_deployment_protocol_context" not in json.dumps(request_body)
 
 
 def test_anthropic_messages_handler_skips_the_gateway_on_recursion():
@@ -117,9 +234,7 @@ def test_build_tool_result_message_uses_anthropic_tool_result_blocks():
     message = _build_tool_result_message([{"tool_call_id": "toolu_1", "result": "9 sections", "name": "read_wiki"}])
 
     assert message["role"] == "user"
-    assert list(message["content"]) == [
-        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "9 sections"}
-    ]
+    assert list(message["content"]) == [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "9 sections"}]
 
 
 @pytest.mark.asyncio
@@ -158,19 +273,22 @@ async def test_anthropic_messages_with_mcp_forwards_the_callers_mcp_credentials(
         {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]},
     ]
 
-    with patch.object(MCPRequestContext, "resolve", return_value=context), patch.object(
-        mcp_handler.LiteLLM_Proxy_MCP_Handler
-        if hasattr(mcp_handler, "LiteLLM_Proxy_MCP_Handler")
-        else __import__(
-            "litellm.responses.mcp.litellm_proxy_mcp_handler", fromlist=["LiteLLM_Proxy_MCP_Handler"]
-        ).LiteLLM_Proxy_MCP_Handler,
-        "_process_mcp_tools_without_openai_transform",
-        new=process,
-    ), patch(
-        "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._execute_tool_calls",
-        new=execute,
-    ), patch(
-        "litellm.anthropic_messages", new=AsyncMock(side_effect=responses)
+    with (
+        patch.object(MCPRequestContext, "resolve", return_value=context),
+        patch.object(
+            mcp_handler.LiteLLM_Proxy_MCP_Handler
+            if hasattr(mcp_handler, "LiteLLM_Proxy_MCP_Handler")
+            else __import__(
+                "litellm.responses.mcp.litellm_proxy_mcp_handler", fromlist=["LiteLLM_Proxy_MCP_Handler"]
+            ).LiteLLM_Proxy_MCP_Handler,
+            "_process_mcp_tools_without_openai_transform",
+            new=process,
+        ),
+        patch(
+            "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._execute_tool_calls",
+            new=execute,
+        ),
+        patch("litellm.anthropic_messages", new=AsyncMock(side_effect=responses)),
     ):
         await mcp_handler.anthropic_messages_with_mcp(
             max_tokens=100,
@@ -219,16 +337,17 @@ async def test_anthropic_messages_with_mcp_stops_when_every_tool_call_is_skipped
     }
     anthropic_messages_mock = AsyncMock(return_value=tool_use_response)
 
-    with patch.object(
-        MCPRequestContext, "resolve", return_value=MCPRequestContext(user_api_key_auth="auth")
-    ), patch(
-        "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._process_mcp_tools_without_openai_transform",
-        new=AsyncMock(return_value=([], {})),
-    ), patch(
-        "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._execute_tool_calls",
-        new=AsyncMock(return_value=[]),
-    ), patch(
-        "litellm.anthropic_messages", new=anthropic_messages_mock
+    with (
+        patch.object(MCPRequestContext, "resolve", return_value=MCPRequestContext(user_api_key_auth="auth")),
+        patch(
+            "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._process_mcp_tools_without_openai_transform",
+            new=AsyncMock(return_value=([], {})),
+        ),
+        patch(
+            "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._execute_tool_calls",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch("litellm.anthropic_messages", new=anthropic_messages_mock),
     ):
         result = await mcp_handler.anthropic_messages_with_mcp(
             max_tokens=100,

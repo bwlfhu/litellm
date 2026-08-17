@@ -2521,9 +2521,7 @@ def anthropic_messages_pt(
                 _raw_thinking_blocks
                 if preserve_unsigned_thinking_blocks
                 else (
-                    _drop_unsignable_thinking_blocks(_raw_thinking_blocks)
-                    if _raw_thinking_blocks is not None
-                    else None
+                    _drop_unsignable_thinking_blocks(_raw_thinking_blocks) if _raw_thinking_blocks is not None else None
                 )
             )
 
@@ -2667,15 +2665,23 @@ def anthropic_messages_pt(
                     assistant_content_block["content"], list
                 )
                 _content_list = assistant_content_block.get("content") if _content_is_list else None
-                _list_has_thinking = False
-                if _content_is_list and _content_list is not None:
-                    for _item in _content_list:
-                        if isinstance(_item, dict) and _item.get("type") in (
-                            "thinking",
-                            "redacted_thinking",
-                        ):
-                            _list_has_thinking = True
-                            break
+                _list_has_thinking = bool(
+                    _content_is_list
+                    and _content_list is not None
+                    and any(
+                        isinstance(_item, dict)
+                        and (
+                            (
+                                _item.get("type") == "thinking"
+                                and isinstance(_item.get("thinking"), str)
+                                and bool(_item["thinking"].strip())
+                                and (preserve_unsigned_thinking_blocks or not _is_unsignable_thinking_block(_item))
+                            )
+                            or (not preserve_unsigned_thinking_blocks and _item.get("type") == "redacted_thinking")
+                        )
+                        for _item in _content_list
+                    )
+                )
 
                 if (
                     thinking_blocks is not None and not _list_has_thinking
@@ -2686,11 +2692,12 @@ def anthropic_messages_pt(
                         if not isinstance(m, dict):
                             continue
                         # handle thinking blocks
-                        thinking_block = cast(str, m.get("thinking", ""))
+                        thinking_block = m.get("thinking", "")
                         text_block = cast(str, m.get("text", ""))
                         if (
                             m.get("type", "") == "thinking"
-                            and len(thinking_block) > 0
+                            and isinstance(thinking_block, str)
+                            and bool(thinking_block.strip())
                             and (preserve_unsigned_thinking_blocks or not _is_unsignable_thinking_block(m))
                         ):  # don't pass empty text blocks. anthropic api raises errors.
                             anthropic_message: ChatCompletionThinkingBlock | AnthropicMessagesTextParam = cast(
@@ -2708,6 +2715,8 @@ def anthropic_messages_pt(
                             )
 
                             assistant_content.append(cast(AnthropicMessagesTextParam, _cached_message))
+                        elif not preserve_unsigned_thinking_blocks and m.get("type", "") == "redacted_thinking":
+                            assistant_content.append(cast(ChatCompletionRedactedThinkingBlock, m))
                         # handle server_tool_use blocks (tool search, web search, etc.)
                         # Pass through as-is since these are Anthropic-native content types
                         elif m.get("type", "") == "server_tool_use" or m.get("type", "").endswith("_tool_result"):
