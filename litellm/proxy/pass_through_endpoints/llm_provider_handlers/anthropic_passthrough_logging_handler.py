@@ -417,7 +417,7 @@ class AnthropicPassthroughLoggingHandler:
 
     @staticmethod
     def _extract_response_shape_from_sse(
-        all_chunks: Sequence[Union[str, bytes]],
+        all_chunks: Sequence[str | bytes],
     ) -> tuple[tuple[dict[str, str], ...], str | None]:
         relevant_events = tuple(
             data
