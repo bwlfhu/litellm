@@ -35,17 +35,17 @@ import pytest
 # Anchor sys.path to this file's location — not the working-directory-relative
 # pattern Greptile flagged on PR #23706. Resolves correctly regardless of
 # where pytest is invoked from.
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../.."))
-)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../..")))
 
 from litellm.llms.anthropic.experimental_pass_through.adapters.handler import (
     ANTHROPIC_ONLY_REQUEST_KEYS,
     LiteLLMMessagesToCompletionTransformationHandler,
 )
+from litellm.types.llms.openai import ChatCompletionAssistantToolCall
 from litellm.types.utils import (
     Choices,
     Delta,
+    Function,
     Message,
     ModelResponse,
     ModelResponseStream,
@@ -57,16 +57,23 @@ MESSAGES = [{"role": "user", "content": "hello"}]
 
 
 @pytest.mark.parametrize(
-    ("thinking", "expected"),
+    ("thinking", "completion_kwargs", "expected"),
     [
-        (None, True),
-        ({"type": "disabled"}, True),
-        ({"type": "enabled", "budget_tokens": 1024}, False),
-        ({"type": "adaptive"}, False),
+        (None, None, True),
+        (None, {}, True),
+        (None, {"reasoning_effort": "high"}, False),
+        (None, {"reasoning_effort": {"effort": "high"}}, False),
+        (None, {"reasoning_effort": "none"}, True),
+        (None, {"model": "custom_openai/deepseek-v4-pro"}, False),
+        ({"type": "disabled"}, {"reasoning_effort": "high"}, True),
+        ({"type": "enabled", "budget_tokens": 1024}, {}, False),
+        ({"type": "adaptive"}, {}, False),
     ],
 )
-def test_is_thinking_disabled(thinking, expected):
-    assert LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(thinking) is expected
+def test_is_thinking_disabled(thinking, completion_kwargs, expected):
+    assert (
+        LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(thinking, completion_kwargs) is expected
+    )
 
 
 def test_sync_handler_suppresses_unrequested_reasoning_content():
@@ -79,6 +86,7 @@ def test_sync_handler_suppresses_unrequested_reasoning_content():
                     role="assistant",
                     content="visible answer",
                     reasoning_content="internal reasoning",
+                    thinking_blocks=[{"type": "thinking", "thinking": "internal reasoning"}],
                 ),
             )
         ],
@@ -94,6 +102,79 @@ def test_sync_handler_suppresses_unrequested_reasoning_content():
         )
 
     assert response["content"] == [{"type": "text", "text": "visible answer"}]
+
+
+def test_sync_handler_preserves_explicit_reasoning_effort_output():
+    completion_response = ModelResponse(
+        model="deepseek-reasoner",
+        choices=[
+            Choices(
+                finish_reason="stop",
+                message=Message(
+                    role="assistant",
+                    content="visible answer",
+                    reasoning_content="requested reasoning",
+                ),
+            )
+        ],
+        usage=Usage(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+    )
+
+    with patch("litellm.completion", return_value=completion_response):
+        response = LiteLLMMessagesToCompletionTransformationHandler.anthropic_messages_handler(
+            max_tokens=100,
+            messages=MESSAGES,
+            model="custom_openai/deepseek-reasoner",
+            custom_llm_provider="custom_openai",
+            reasoning_effort="high",
+        )
+
+    assert response["content"] == [
+        {"type": "thinking", "thinking": "requested reasoning", "signature": None},
+        {"type": "text", "text": "visible answer"},
+    ]
+
+
+def test_sync_handler_preserves_default_v4_reasoning_for_tool_replay():
+    completion_response = ModelResponse(
+        model="deepseek-v4-pro",
+        choices=[
+            Choices(
+                finish_reason="tool_calls",
+                message=Message(
+                    role="assistant",
+                    content=None,
+                    reasoning_content="Call the weather tool.",
+                    tool_calls=[
+                        ChatCompletionAssistantToolCall(
+                            id="call_123",
+                            type="function",
+                            function=Function(name="get_weather", arguments='{"city":"Paris"}'),
+                        )
+                    ],
+                ),
+            )
+        ],
+        usage=Usage(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+    )
+
+    with patch("litellm.completion", return_value=completion_response):
+        response = LiteLLMMessagesToCompletionTransformationHandler.anthropic_messages_handler(
+            max_tokens=100,
+            messages=MESSAGES,
+            model="custom_openai/deepseek-v4-pro",
+            custom_llm_provider="custom_openai",
+        )
+
+    assert response["content"] == [
+        {"type": "thinking", "thinking": "Call the weather tool.", "signature": None},
+        {
+            "type": "tool_use",
+            "id": "call_123",
+            "name": "get_weather",
+            "input": {"city": "Paris"},
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -270,9 +351,7 @@ class TestOutputConfigStrippedFromCompletionKwargs:
         result = _call_prepare(
             extra_kwargs={
                 "custom_llm_provider": "azure",
-                "output_config": {
-                    "format": {"type": "json_schema", "schema": losing_schema}
-                },
+                "output_config": {"format": {"type": "json_schema", "schema": losing_schema}},
             },
             output_format={"type": "json_schema", "schema": winning_schema},
         )

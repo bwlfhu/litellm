@@ -35,9 +35,7 @@ from litellm.types.utils import (
 )
 
 
-def _build_fake_stream(
-    content: str, finish_reason: str = "stop"
-) -> MockResponseIterator:
+def _build_fake_stream(content: str, finish_reason: str = "stop") -> MockResponseIterator:
     """Mimic a Vertex Gemma `:predict` fake stream: one collapsed chunk."""
     model_response = ModelResponse()
     model_response.choices = [
@@ -155,9 +153,7 @@ def test_delayed_usage_chunk_preserves_cache_tokens():
     wrapper = AnthropicStreamWrapper(completion_stream=iter(chunks), model="gpt-4o")
     events = list(wrapper)
 
-    message_delta = next(
-        event for event in events if event.get("type") == "message_delta"
-    )
+    message_delta = next(event for event in events if event.get("type") == "message_delta")
 
     assert message_delta["usage"]["input_tokens"] == 70
     assert message_delta["usage"]["output_tokens"] == 5
@@ -167,13 +163,7 @@ def test_delayed_usage_chunk_preserves_cache_tokens():
 
 def test_splitter_passes_through_non_combined_chunks():
     """A chunk with content but no finish_reason is not split."""
-    chunk = ModelResponseStream(
-        choices=[
-            StreamingChoices(
-                index=0, delta=Delta(content="partial"), finish_reason=None
-            )
-        ]
-    )
+    chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content="partial"), finish_reason=None)])
     chunks = list(_CombinedChunkSplitter(iter([chunk])))
     assert len(chunks) == 1
     assert chunks[0].choices[0].delta.content == "partial"
@@ -181,11 +171,7 @@ def test_splitter_passes_through_non_combined_chunks():
 
 def test_splitter_splits_combined_chunk_into_content_then_finish():
     """A chunk with both content and finish_reason becomes two chunks."""
-    chunk = ModelResponseStream(
-        choices=[
-            StreamingChoices(index=0, delta=Delta(content="done"), finish_reason="stop")
-        ]
-    )
+    chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content="done"), finish_reason="stop")])
     content_chunk, finish_chunk = list(_CombinedChunkSplitter(iter([chunk])))
 
     assert content_chunk.choices[0].delta.content == "done"
@@ -215,9 +201,7 @@ def test_split_clears_reasoning_and_thinking_on_finish_chunk():
         reasoning_content="some reasoning",
         thinking_blocks=[{"type": "thinking"}],
     )
-    chunk = SimpleNamespace(
-        choices=[SimpleNamespace(finish_reason="stop", delta=delta)]
-    )
+    chunk = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", delta=delta)])
 
     content_chunk, finish_chunk = _CombinedChunkSplitter._split(chunk)
 
@@ -314,13 +298,19 @@ def test_thinking_then_signature_chunk_does_not_crash_stream():
 
 
 @pytest.mark.parametrize("is_async", [False, True])
-def test_reasoning_only_chunk_is_suppressed_without_losing_following_text(is_async: bool):
+@pytest.mark.parametrize("reasoning_carrier", ["reasoning_content", "thinking_blocks"])
+def test_reasoning_only_chunk_is_suppressed_without_losing_following_text(is_async: bool, reasoning_carrier: str):
+    reasoning_delta = (
+        Delta(reasoning_content="internal reasoning")
+        if reasoning_carrier == "reasoning_content"
+        else Delta(thinking_blocks=[{"type": "thinking", "thinking": "internal reasoning"}])
+    )
     chunks = [
         ModelResponseStream(
             choices=[
                 StreamingChoices(
                     index=0,
-                    delta=Delta(reasoning_content="internal reasoning"),
+                    delta=reasoning_delta,
                     finish_reason=None,
                 )
             ],

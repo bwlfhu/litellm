@@ -1082,7 +1082,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
             return False
         if not self.thinking_disabled and getattr(delta, "reasoning_content", None):
             return False
-        if getattr(delta, "thinking_blocks", None):
+        if not self.thinking_disabled and getattr(delta, "thinking_blocks", None):
             return False
         return True
 

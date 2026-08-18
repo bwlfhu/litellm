@@ -311,8 +311,28 @@ ANTHROPIC_ADAPTER: Final = AnthropicAdapter()
 
 class LiteLLMMessagesToCompletionTransformationHandler:
     @staticmethod
-    def _is_thinking_disabled(thinking: Mapping[str, object] | None) -> bool:
-        return thinking is None or thinking.get("type") == "disabled"
+    def _is_thinking_disabled(
+        thinking: Mapping[str, object] | None,
+        completion_kwargs: Mapping[str, object] | None = None,
+    ) -> bool:
+        if thinking is not None:
+            return thinking.get("type") == "disabled"
+        if completion_kwargs is None:
+            return True
+        effective_thinking: Final = completion_kwargs.get("thinking")
+        if isinstance(effective_thinking, Mapping):
+            return effective_thinking.get("type") == "disabled"
+        reasoning_effort: Final = completion_kwargs.get("reasoning_effort")
+        if isinstance(reasoning_effort, str):
+            return reasoning_effort in ("", "none")
+        if isinstance(reasoning_effort, Mapping):
+            effort: Final = reasoning_effort.get("effort")
+            return not isinstance(effort, str) or effort in ("", "none")
+        model: Final = completion_kwargs.get("model")
+        normalized_model: Final = model.rsplit("/", maxsplit=1)[-1].lower() if isinstance(model, str) else ""
+        if normalized_model.startswith(("deepseek-v4", "claude-")):
+            return False
+        return True
 
     @staticmethod
     def _route_openai_thinking_to_responses_api_if_needed(
@@ -602,7 +622,10 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         )
 
         completion_response: Final = await litellm.acompletion(**completion_kwargs)
-        thinking_disabled: Final = LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(thinking)
+        thinking_disabled: Final = LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(
+            thinking,
+            completion_kwargs,
+        )
 
         if stream:
             transformed_stream: Final = ANTHROPIC_ADAPTER.translate_completion_output_params_streaming(
@@ -739,7 +762,10 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         )
 
         completion_response: Final = litellm.completion(**completion_kwargs)
-        thinking_disabled: Final = LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(thinking)
+        thinking_disabled: Final = LiteLLMMessagesToCompletionTransformationHandler._is_thinking_disabled(
+            thinking,
+            completion_kwargs,
+        )
 
         if stream:
             transformed_stream: Final = ANTHROPIC_ADAPTER.translate_completion_output_params_streaming(

@@ -1144,7 +1144,7 @@ class LiteLLMAnthropicMessagesAdapter:
         new_content: Final[list[dict[str, Any]]] = []
         for choice in choices:
             # Handle thinking blocks first
-            if hasattr(choice.message, "thinking_blocks") and choice.message.thinking_blocks:
+            if not thinking_disabled and hasattr(choice.message, "thinking_blocks") and choice.message.thinking_blocks:
                 for thinking_block in choice.message.thinking_blocks:
                     if thinking_block.get("type") == "thinking":
                         thinking_value = thinking_block.get("thinking", "")
@@ -1215,7 +1215,7 @@ class LiteLLMAnthropicMessagesAdapter:
                     # Add provider_specific_fields if signature is present
                     if provider_specific_fields:
                         tool_use_block.provider_specific_fields = provider_specific_fields
-                    new_content.append(tool_use_block.model_dump())
+                    new_content.append(tool_use_block.model_dump(exclude_none=True))
 
         return new_content
 
@@ -1397,7 +1397,11 @@ class LiteLLMAnthropicMessagesAdapter:
                         "signature": thought_sig,
                     }
                 return "tool_use", cast("ContentBlockContentBlockDict", tool_block)
-            elif isinstance(choice, StreamingChoices) and hasattr(choice.delta, "thinking_blocks"):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and hasattr(choice.delta, "thinking_blocks")
+            ):
                 thinking_blocks = choice.delta.thinking_blocks or []
                 if len(thinking_blocks) > 0:
                     thinking_block = thinking_blocks[0]
@@ -1443,7 +1447,11 @@ class LiteLLMAnthropicMessagesAdapter:
                 for tool in choice.delta.tool_calls:
                     if tool.function is not None and tool.function.arguments is not None:
                         partial_json = (partial_json or "") + tool.function.arguments
-            elif isinstance(choice, StreamingChoices) and hasattr(choice.delta, "thinking_blocks"):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and hasattr(choice.delta, "thinking_blocks")
+            ):
                 thinking_blocks = choice.delta.thinking_blocks or []
                 if len(thinking_blocks) > 0:
                     for thinking_block in thinking_blocks:
