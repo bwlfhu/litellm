@@ -3107,6 +3107,9 @@ async def test_redacted_deepseek_chat_tool_history_falls_back_before_deepseek_ht
             },
         )
 
+    def close_logging_coroutine(async_coroutine):
+        async_coroutine.close()
+
     router = litellm.Router(
         model_list=[
             {
@@ -3137,19 +3140,23 @@ async def test_redacted_deepseek_chat_tool_history_falls_back_before_deepseek_ht
     http_client.client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport))
 
     try:
-        response = await router.acompletion(
-            model="primary",
-            messages=[
-                {"role": "user", "content": "Use the tool."},
-                assistant_message,
-            ],
-            max_tokens=100,
-            thinking={"type": "enabled"},
-            allowed_openai_params=["thinking"],
-            client=http_client,
-        )
+        with patch.object(
+            GLOBAL_LOGGING_WORKER,
+            "ensure_initialized_and_enqueue",
+            side_effect=close_logging_coroutine,
+        ):
+            response = await router.acompletion(
+                model="primary",
+                messages=[
+                    {"role": "user", "content": "Use the tool."},
+                    assistant_message,
+                ],
+                max_tokens=100,
+                thinking={"type": "enabled"},
+                allowed_openai_params=["thinking"],
+                client=http_client,
+            )
     finally:
-        await GLOBAL_LOGGING_WORKER.flush()
         await GLOBAL_LOGGING_WORKER.stop()
         await http_client.client.aclose()
         router.discard()

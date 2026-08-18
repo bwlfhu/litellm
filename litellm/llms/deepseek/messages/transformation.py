@@ -54,6 +54,8 @@ _DEEPSEEK_TOOL_USE_BLOCK_FIELDS: Final = ("type", "id", "name", "input")
 _DEEPSEEK_RESPONSE_TOOL_USE_BLOCK_FIELDS: Final = (*_DEEPSEEK_TOOL_USE_BLOCK_FIELDS, "caller")
 _DEEPSEEK_TOOL_USE_BLOCK_TYPES: Final = frozenset({"server_tool_use", "tool_use"})
 _DEEPSEEK_LEGACY_REASONING_MODEL_PREFIXES: Final = ("deepseek-v3", "deepseek-reasoner")
+_DEEPSEEK_OUTPUT_EFFORTS: Final = frozenset(("low", "high", "max"))
+_DEEPSEEK_ENABLED_THINKING_TYPES: Final = frozenset(("enabled", "adaptive"))
 
 
 class _DeepSeekHistoryValidationError(AnthropicError):
@@ -936,37 +938,33 @@ def _normalized_tool_choice(tool_choice: object) -> object:
     return choice
 
 
+def _normalize_deepseek_reasoning_effort(effort: object) -> str | None:
+    if not isinstance(effort, str):
+        return None
+    match effort:
+        case "minimal":
+            return "low"
+        case "medium" | "xhigh":
+            return "high"
+        case _:
+            return effort
+
+
 def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> dict:
     raw_reasoning_effort: Final = request_params.get("reasoning_effort")
-    normalized_reasoning_effort: Final = (
-        {"minimal": "low", "medium": "high", "xhigh": "high"}.get(raw_reasoning_effort, raw_reasoning_effort)
-        if isinstance(raw_reasoning_effort, str)
-        else None
-    )
+    normalized_reasoning_effort: Final = _normalize_deepseek_reasoning_effort(raw_reasoning_effort)
     without_reasoning_effort: Final = {
         key: deepcopy(value) for key, value in request_params.items() if key != "reasoning_effort"
     }
     raw_output_config: Final = without_reasoning_effort.get("output_config")
     raw_effort: Final = raw_output_config.get("effort") if isinstance(raw_output_config, Mapping) else None
-    normalized_effort: Final = (
-        {
-            "minimal": "low",
-            "medium": "high",
-            "xhigh": "high",
-        }.get(raw_effort, raw_effort)
-        if isinstance(raw_effort, str)
-        else None
-    )
+    normalized_effort: Final = _normalize_deepseek_reasoning_effort(raw_effort)
     output_config_from_request: Final = (
-        {"effort": normalized_effort}
-        if isinstance(normalized_effort, str) and normalized_effort in {"low", "high", "max"}
-        else None
+        {"effort": normalized_effort} if normalized_effort in _DEEPSEEK_OUTPUT_EFFORTS else None
     )
     output_config_from_reasoning_effort: Final = (
         {"effort": normalized_reasoning_effort}
-        if isinstance(normalized_reasoning_effort, str)
-        and normalized_reasoning_effort in {"low", "high", "max"}
-        and output_config_from_request is None
+        if normalized_reasoning_effort in _DEEPSEEK_OUTPUT_EFFORTS and output_config_from_request is None
         else None
     )
     output_config: Final = output_config_from_request or output_config_from_reasoning_effort
@@ -985,10 +983,10 @@ def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> 
     if not isinstance(raw_thinking, Mapping):
         if normalized_reasoning_effort == "none":
             return {
-                **{key: value for key, value in normalized_output_config.items() if key != "output_config"},
+                **without_output_config,
                 "thinking": {"type": "disabled"},
             }
-        if isinstance(normalized_reasoning_effort, str) and normalized_reasoning_effort in {"low", "high", "max"}:
+        if normalized_reasoning_effort in _DEEPSEEK_OUTPUT_EFFORTS:
             return {  # mutable-ok: provider request parameters require concrete JSON objects
                 **normalized_output_config,
                 "thinking": {"type": "enabled"},
@@ -997,10 +995,10 @@ def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> 
     thinking_type: Final = raw_thinking.get("type")
     if thinking_type == "disabled":
         return {
-            **{key: value for key, value in normalized_output_config.items() if key != "output_config"},
+            **without_output_config,
             "thinking": {"type": "disabled"},
         }
-    if thinking_type in {"enabled", "adaptive"}:
+    if thinking_type in _DEEPSEEK_ENABLED_THINKING_TYPES:
         return {  # mutable-ok: provider request parameters require concrete JSON objects
             **normalized_output_config,
             "thinking": {"type": "enabled"},
@@ -1171,7 +1169,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             require_reasoning=require_reasoning,
             missing_reasoning=self._missing_reasoning,
         )
-        anthropic_messages_request = super().transform_anthropic_messages_request(
+        anthropic_messages_request: Final = super().transform_anthropic_messages_request(
             model=model,
             messages=transformed_messages,
             anthropic_messages_optional_request_params=request_params,
@@ -1195,14 +1193,11 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         request_body: dict,
         litellm_logging_obj: LiteLLMLoggingObj,
     ) -> AsyncIterator[bytes]:
-        completion_stream: Final = cast(
-            AsyncIterator[bytes],
-            super().get_async_streaming_response_iterator(
-                model=model,
-                httpx_response=httpx_response,
-                request_body=request_body,
-                litellm_logging_obj=litellm_logging_obj,
-            ),
+        completion_stream: Final[AsyncIterator[bytes]] = super().get_async_streaming_response_iterator(
+            model=model,
+            httpx_response=httpx_response,
+            request_body=request_body,
+            litellm_logging_obj=litellm_logging_obj,
         )
         thinking: Final[object] = request_body.get("thinking")
         thinking_disabled: Final = isinstance(thinking, Mapping) and thinking.get("type") == "disabled"
@@ -1214,13 +1209,10 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         raw_response: httpx.Response,
         logging_obj: LiteLLMLoggingObj,
     ) -> AnthropicMessagesResponse:
-        raw_response_data: Final = cast(
-            Mapping[str, object],
-            super().transform_anthropic_messages_response(
-                model=model,
-                raw_response=raw_response,
-                logging_obj=logging_obj,
-            ),
+        raw_response_data: Final[Mapping[str, object]] = super().transform_anthropic_messages_response(
+            model=model,
+            raw_response=raw_response,
+            logging_obj=logging_obj,
         )
         model_call_details: Final = getattr(logging_obj, "model_call_details", None)
         request_thinking: Final = (
@@ -1238,18 +1230,18 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             if isinstance(reasoning_content, str) and reasoning_content.strip()
             else provider_reasoning_content
         )
-        response: Final[dict[str, object]] = {
+        response: Final = {
             key: value
             for key, value in raw_response_data.items()
             if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS and key != "provider_specific_fields"
         }
-        content = response.get("content")
-        content_blocks = (
+        content: Final = response.get("content")
+        content_blocks: Final = (
             _sanitize_deepseek_response_content_blocks(content, thinking_disabled=thinking_disabled)
             if isinstance(content, list)
-            else []
+            else ()
         )
-        has_thinking = any(
+        has_thinking: Final = any(
             isinstance(block, Mapping)
             and block.get("type") == "thinking"
             and isinstance(block.get("thinking"), str)
@@ -1268,7 +1260,10 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             ]
         elif isinstance(content, list) and content_blocks != content:
             response["content"] = content_blocks
-        return cast(AnthropicMessagesResponse, response)
+        return cast(  # cast-ok: sanitized provider JSON preserves the Anthropic response schema
+            AnthropicMessagesResponse,
+            response,
+        )
 
     @property
     def max_retry_on_anthropic_messages_http_error(self) -> int:
