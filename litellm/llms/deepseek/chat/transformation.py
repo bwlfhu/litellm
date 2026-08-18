@@ -272,7 +272,9 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         require_reasoning: bool,
     ) -> list[AllMessageValues]:
         protocol_context: Final = get_deployment_protocol_context(litellm_params)
-        missing_reasoning: Final = protocol_context.missing_reasoning if protocol_context is not None else None
+        missing_reasoning: Final = (
+            protocol_context.missing_reasoning if protocol_context is not None else None
+        ) or "placeholder"
         return [  # mutable-ok: chat transformation contract returns a concrete message list
             self._fill_reasoning_content_message(
                 message,

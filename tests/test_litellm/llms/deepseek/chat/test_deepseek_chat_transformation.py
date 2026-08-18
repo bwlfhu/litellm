@@ -172,42 +172,42 @@ def test_thinking_mode_does_not_fill_ordinary_assistant_reasoning():
     assert "reasoning_content" not in body["messages"][1]
 
 
-def test_thinking_mode_strictly_rejects_missing_reasoning_for_tool_history():
-    with pytest.raises(litellm.BadRequestError, match="requires non-empty reasoning_content") as error:
-        DeepSeekChatConfig().transform_request(
-            model="deepseek-reasoner",
-            messages=[
-                {"role": "user", "content": "Use the tool"},
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [_function_tool("shell")],
-                },
-            ],
-            optional_params={"thinking": {"type": "enabled"}},
-            litellm_params={},
-            headers={},
-        )
+def test_thinking_mode_backfills_missing_reasoning_for_tool_history():
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-reasoner",
+        messages=[
+            {"role": "user", "content": "Use the tool"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_function_tool("shell")],
+            },
+        ],
+        optional_params={"thinking": {"type": "enabled"}},
+        litellm_params={},
+        headers={},
+    )
 
-    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
+    assert body["messages"][1]["reasoning_content"] == " "
 
 
 @pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek/deepseek-v4-pro"])
 def test_v4_thinking_mode_is_active_by_default(model):
-    with pytest.raises(litellm.BadRequestError, match="requires non-empty reasoning_content"):
-        DeepSeekChatConfig().transform_request(
-            model=model,
-            messages=[
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [_function_tool("shell")],
-                }
-            ],
-            optional_params={},
-            litellm_params={},
-            headers={},
-        )
+    body = DeepSeekChatConfig().transform_request(
+        model=model,
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_function_tool("shell")],
+            }
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][0]["reasoning_content"] == " "
 
 
 def test_reasoning_capable_v3_thinking_mode_requires_explicit_enablement():
@@ -445,23 +445,44 @@ def test_chat_rejects_scalar_redacted_only_history_before_http(content):
     assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
 
 
-def test_thinking_mode_treats_whitespace_reasoning_as_missing():
-    with pytest.raises(litellm.BadRequestError, match="requires non-empty reasoning_content"):
-        DeepSeekChatConfig().transform_request(
-            model="deepseek-reasoner",
-            messages=[
-                {"role": "user", "content": "Use the tool"},
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "reasoning_content": " \t ",
-                    "tool_calls": [_function_tool("shell")],
-                },
-            ],
-            optional_params={"thinking": {"type": "enabled"}},
-            litellm_params={},
-            headers={},
-        )
+def test_thinking_mode_replaces_whitespace_reasoning_with_placeholder():
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-reasoner",
+        messages=[
+            {"role": "user", "content": "Use the tool"},
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": " \t ",
+                "tool_calls": [_function_tool("shell")],
+            },
+        ],
+        optional_params={"thinking": {"type": "enabled"}},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][1]["reasoning_content"] == " "
+
+
+@pytest.mark.asyncio
+async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history():
+    body = await DeepSeekChatConfig().async_transform_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {"role": "user", "content": "Use the tool"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_function_tool("shell")],
+            },
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][1]["reasoning_content"] == " "
 
 
 def test_deployment_tool_thinking_disabled_skips_history_validation():
