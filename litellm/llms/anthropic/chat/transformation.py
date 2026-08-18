@@ -1799,19 +1799,33 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         preserve_unsigned_thinking_blocks = protocol_context is not None
         if preserve_unsigned_thinking_blocks:
             from litellm.llms.deepseek.messages.transformation import (
-                default_deepseek_anthropic_thinking_to_disabled,
+                deepseek_messages_have_tool_history,
+                default_deepseek_anthropic_thinking_to_enabled,
                 omit_false_stream_for_deepseek_anthropic,
                 prepare_deepseek_chat_history,
             )
 
             optional_params = omit_false_stream_for_deepseek_anthropic(
-                default_deepseek_anthropic_thinking_to_disabled(optional_params, messages=messages)
+                default_deepseek_anthropic_thinking_to_enabled(optional_params, model=model)
             )
-            thinking = optional_params["thinking"]
+            should_disable_tool_thinking: Final = protocol_context.tool_thinking == "disabled" and (
+                bool(optional_params.get("tools")) or deepseek_messages_have_tool_history(messages)
+            )
+            optional_params = (  # rebind-ok: the shared transformer continues with DeepSeek-normalized params
+                {  # mutable-ok: provider request requires a concrete JSON container
+                    **optional_params,
+                    "thinking": {  # mutable-ok: provider schema requires a concrete JSON object
+                        "type": "disabled"
+                    },
+                }
+                if should_disable_tool_thinking
+                else optional_params
+            )
+            thinking: Final = optional_params.get("thinking")
             thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"
             messages = prepare_deepseek_chat_history(
                 messages,
-                require_reasoning=protocol_context.tool_thinking != "disabled" and thinking_enabled,
+                require_reasoning=thinking_enabled,
                 missing_reasoning=protocol_context.missing_reasoning,
             )
 
@@ -1838,13 +1852,6 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     "Dropping 'thinking' param because the last assistant message with tool_calls "
                     "has no thinking_blocks. The model won't use extended thinking for this turn."
                 )
-        if (
-            protocol_context is not None
-            and protocol_context.tool_thinking == "disabled"
-            and bool(optional_params.get("tools"))
-        ):
-            optional_params["thinking"] = {"type": "disabled"}
-
         AnthropicConfig._maybe_drop_speed_param(
             model=model,
             optional_params=optional_params,

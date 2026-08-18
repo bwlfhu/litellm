@@ -21,6 +21,7 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
 from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
+    _sanitize_deepseek_messages_stream,
     _validate_deepseek_content_blocks,
     prepare_deepseek_chat_history,
 )
@@ -80,7 +81,7 @@ def test_anthropic_chat_transform_does_not_serialize_router_protocol_context():
     json.dumps(request)
 
 
-def test_anthropic_chat_disabled_tool_thinking_allows_reasoningless_history():
+def test_anthropic_chat_disabled_tool_thinking_strips_reasoning_history():
     context = _build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
     assert context is not None
 
@@ -97,6 +98,7 @@ def test_anthropic_chat_disabled_tool_thinking_allows_reasoningless_history():
                         "function": {"name": "get_weather", "arguments": "{}"},
                     }
                 ],
+                "reasoning_content": "I should call the weather tool.",
             },
             {"role": "tool", "tool_call_id": "call_123", "content": "Sunny"},
         ],
@@ -111,12 +113,125 @@ def test_anthropic_chat_disabled_tool_thinking_allows_reasoningless_history():
     ]
 
 
-def test_anthropic_chat_preserves_explicit_disabled_thinking_for_deepseek_context():
+def test_anthropic_chat_disabled_tool_thinking_leaves_non_tool_reasoning_enabled():
+    context = _build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
+    assert context is not None
+
+    request = AnthropicConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Done",
+                "reasoning_content": "Solve the task.",
+                "tool_calls": [],
+            }
+        ],
+        optional_params={"max_tokens": 100},
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "enabled"}
+    assert request["messages"][0]["content"] == [
+        {"type": "thinking", "thinking": "Solve the task."},
+        {"type": "text", "text": "Done"},
+    ]
+
+
+def test_anthropic_chat_disabled_tool_thinking_detects_inline_tool_history():
+    context = _build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
+    assert context is not None
+
+    request = AnthropicConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Use the weather tool."},
+                    {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
+                ],
+            }
+        ],
+        optional_params={"max_tokens": 100},
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "disabled"}
+    assert request["messages"][0]["content"] == [
+        {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}
+    ]
+
+
+def test_anthropic_chat_explicit_disabled_strips_all_reasoning_without_mutating_history():
     context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "inline reasoning", "signature": "old"},
+                {"type": "redacted_thinking", "data": "encrypted"},
+                {"type": "text", "text": "I will use the tool."},
+            ],
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }
+            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "sidecar reasoning", "signature": "old"}],
+            "reasoning_content": "canonical reasoning",
+            "reasoning": "foreign reasoning",
+            "reasoning_items": [{"type": "reasoning", "id": "reasoning_123"}],
+            "thinking": "foreign thinking",
+            "provider_specific_fields": {"reasoning_content": "provider reasoning", "source": "provider"},
+        }
+    ]
+    original_messages = deepcopy(messages)
 
     with patch.object(litellm, "modify_params", True):
         request = AnthropicConfig().transform_request(
+            model="deepseek-v4-pro",
+            messages=messages,
+            optional_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
+            litellm_params={"_litellm_deployment_protocol_context": context},
+            headers={},
+        )
+
+    assert request["thinking"] == {"type": "disabled"}
+    assert request["messages"][0]["content"] == [
+        {"type": "text", "text": "I will use the tool."},
+        {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}},
+    ]
+    assert messages == original_messages
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "anthropic/claude-sonnet-4-5"])
+def test_anthropic_chat_omitted_thinking_defaults_to_enabled_on_first_turn(model):
+    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    assert context is not None
+
+    request = AnthropicConfig().transform_request(
+        model=model,
+        messages=[{"role": "user", "content": "Hello"}],
+        optional_params={"max_tokens": 100},
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "enabled"}
+
+
+def test_anthropic_chat_omitted_thinking_rejects_reasoningless_tool_history():
+    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    assert context is not None
+
+    with pytest.raises(AnthropicError, match="requires non-empty reasoning") as error:
+        AnthropicConfig().transform_request(
             model="deepseek-v4-pro",
             messages=[
                 {
@@ -129,49 +244,14 @@ def test_anthropic_chat_preserves_explicit_disabled_thinking_for_deepseek_contex
                             "function": {"name": "get_weather", "arguments": "{}"},
                         }
                     ],
-                    "reasoning_content": "I should call the weather tool.",
                 }
             ],
-            optional_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
+            optional_params={"max_tokens": 100},
             litellm_params={"_litellm_deployment_protocol_context": context},
             headers={},
         )
 
-    assert request["thinking"] == {"type": "disabled"}
-    assert request["messages"][0]["content"][:2] == [
-        {"type": "thinking", "thinking": "I should call the weather tool."},
-        {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}},
-    ]
-
-
-def test_anthropic_chat_omitted_thinking_disables_reasoning_for_tool_history():
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
-    assert context is not None
-
-    request = AnthropicConfig().transform_request(
-        model="deepseek-v4-pro",
-        messages=[
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call_123",
-                        "type": "function",
-                        "function": {"name": "get_weather", "arguments": "{}"},
-                    }
-                ],
-            }
-        ],
-        optional_params={"max_tokens": 100},
-        litellm_params={"_litellm_deployment_protocol_context": context},
-        headers={},
-    )
-
-    assert request["thinking"] == {"type": "disabled"}
-    assert request["messages"][0]["content"] == [
-        {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}}
-    ]
+    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
 
 
 def test_anthropic_chat_omitted_thinking_enables_replayable_reasoning_history():
@@ -207,7 +287,7 @@ def test_anthropic_chat_omitted_thinking_enables_replayable_reasoning_history():
     ]
 
 
-def test_anthropic_chat_omitted_thinking_disables_mixed_reasoning_history():
+def test_anthropic_chat_explicit_disabled_strips_reasoning_from_mixed_history():
     context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
@@ -228,12 +308,13 @@ def test_anthropic_chat_omitted_thinking_disables_mixed_reasoning_history():
                 ],
             },
         ],
-        optional_params={"max_tokens": 100},
+        optional_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
         litellm_params={"_litellm_deployment_protocol_context": context},
         headers={},
     )
 
     assert request["thinking"] == {"type": "disabled"}
+    assert request["messages"][0]["content"] == [{"type": "text", "text": "Earlier answer"}]
     assert request["messages"][2]["content"] == [
         {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}},
     ]
@@ -278,7 +359,9 @@ def test_anthropic_chat_omits_false_stream_only_for_deepseek_context():
     )
 
     assert "stream" not in deepseek_request
+    assert deepseek_request["thinking"] == {"type": "enabled"}
     assert anthropic_request["stream"] is False
+    assert "thinking" not in anthropic_request
 
 
 def test_anthropic_chat_uses_trusted_reasoning_placeholder():
@@ -301,7 +384,7 @@ def test_anthropic_chat_uses_trusted_reasoning_placeholder():
             },
             {"role": "tool", "tool_call_id": "call_123", "content": "Sunny"},
         ],
-        optional_params={"max_tokens": 100, "thinking": {"type": "enabled"}},
+        optional_params={"max_tokens": 100},
         litellm_params={"_litellm_deployment_protocol_context": context},
         headers={},
     )
@@ -310,6 +393,7 @@ def test_anthropic_chat_uses_trusted_reasoning_placeholder():
         {"type": "thinking", "thinking": " "},
         {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}},
     ]
+    assert request["thinking"] == {"type": "enabled"}
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -909,7 +993,7 @@ def test_deepseek_anthropic_tool_thinking_policy_leaves_non_tool_request_enabled
 
     request = config.transform_anthropic_messages_request(
         model="deepseek-v4-flash",
-        messages=[{"role": "user", "content": "Hello"}],
+        messages=[{"role": "assistant", "content": "Done", "reasoning_content": "Solve the task."}],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
             "thinking": {"type": "enabled"},
@@ -919,17 +1003,32 @@ def test_deepseek_anthropic_tool_thinking_policy_leaves_non_tool_request_enabled
     )
 
     assert request["thinking"] == {"type": "enabled"}
+    assert request["messages"][0]["content"] == [
+        {"type": "thinking", "thinking": "Solve the task."},
+        {"type": "text", "text": "Done"},
+    ]
 
 
-def test_deepseek_anthropic_messages_restores_reasoning_content_without_mutating_history():
+def test_deepseek_anthropic_messages_explicit_disabled_strips_all_reasoning_without_mutating_history():
     config = DeepSeekAnthropicMessagesConfig()
     messages = [
         {
             "role": "assistant",
-            "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-            "provider_specific_fields": {"reasoning_content": "Use the weather tool.", "source": "upstream"},
+            "content": [
+                {"type": "thinking", "thinking": "inline reasoning", "signature": "old"},
+                {"type": "redacted_thinking", "data": "encrypted"},
+                {"type": "text", "text": "I will use the tool."},
+                {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
+            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "sidecar reasoning", "signature": "old"}],
+            "reasoning_content": "canonical reasoning",
+            "reasoning": "foreign reasoning",
+            "reasoning_items": [{"type": "reasoning", "id": "reasoning_123"}],
+            "thinking": "foreign thinking",
+            "provider_specific_fields": {"reasoning_content": "provider reasoning", "source": "upstream"},
         }
     ]
+    original_messages = deepcopy(messages)
 
     request = config.transform_anthropic_messages_request(
         model="deepseek-v4-pro",
@@ -944,16 +1043,65 @@ def test_deepseek_anthropic_messages_restores_reasoning_content_without_mutating
         {
             "role": "assistant",
             "content": [
-                {"type": "thinking", "thinking": "Use the weather tool."},
+                {"type": "text", "text": "I will use the tool."},
                 {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
             ],
         }
     ]
-    assert messages[0]["provider_specific_fields"]["reasoning_content"] == "Use the weather tool."
+    assert messages == original_messages
 
 
-def test_deepseek_anthropic_messages_promotes_nonempty_provider_reasoning_content():
-    response = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_response(
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "Reasoning only", "signature": "foreign"}],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "thinking_blocks": [{"type": "thinking", "thinking": "Reasoning only", "signature": "foreign"}],
+        },
+    ],
+)
+def test_deepseek_anthropic_messages_rejects_empty_assistant_after_disabled_reasoning_removal(message):
+    with pytest.raises(AnthropicError, match="no replayable assistant content") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[message],
+            anthropic_messages_optional_request_params={
+                "max_tokens": 100,
+                "thinking": {"type": "disabled"},
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
+
+
+@pytest.mark.parametrize(
+    ("request_params", "expects_thinking"),
+    [
+        ({"max_tokens": 100}, True),
+        ({"max_tokens": 100, "thinking": {"type": "enabled"}}, True),
+        ({"max_tokens": 100, "thinking": {"type": "disabled"}}, False),
+    ],
+)
+def test_deepseek_anthropic_messages_promotes_reasoning_unless_thinking_is_disabled(request_params, expects_thinking):
+    config = DeepSeekAnthropicMessagesConfig()
+    request = config.transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Hello"}],
+        anthropic_messages_optional_request_params=request_params,
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+    logging_obj = MagicMock()
+    logging_obj.model_call_details = request
+
+    response = config.transform_anthropic_messages_response(
         model="deepseek-v4-pro",
         raw_response=httpx.Response(
             200,
@@ -969,14 +1117,424 @@ def test_deepseek_anthropic_messages_promotes_nonempty_provider_reasoning_conten
                 "provider_specific_fields": {"reasoning_content": "Use the tool.", "source": "deepseek"},
             },
         ),
-        logging_obj=MagicMock(),
+        logging_obj=logging_obj,
+    )
+
+    assert response["content"] == (
+        [
+            {"type": "thinking", "thinking": "Use the tool."},
+            {"type": "text", "text": "Done"},
+        ]
+        if expects_thinking
+        else [{"type": "text", "text": "Done"}]
+    )
+    assert "provider_specific_fields" not in response
+
+
+def test_deepseek_anthropic_messages_disabled_response_strips_nonempty_thinking_blocks():
+    logging_obj = MagicMock()
+    logging_obj.model_call_details = {"thinking": {"type": "disabled"}}
+
+    response = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_response(
+        model="deepseek-v4-pro",
+        raw_response=httpx.Response(
+            200,
+            json={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Upstream reasoning"},
+                    {"type": "redacted_thinking", "data": "encrypted"},
+                    {"type": "text", "text": "Done"},
+                ],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "reasoning_content": "More upstream reasoning",
+            },
+        ),
+        logging_obj=logging_obj,
+    )
+
+    assert response["content"] == [{"type": "text", "text": "Done"}]
+
+
+def test_deepseek_anthropic_messages_response_drops_internal_fields_recursively():
+    logging_obj = MagicMock()
+    logging_obj.model_call_details = {"thinking": {"type": "enabled"}}
+
+    response = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_response(
+        model="deepseek-v4-pro",
+        raw_response=httpx.Response(
+            200,
+            json={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Use the tool.",
+                        "signature": "foreign",
+                        "provider_specific_fields": {"source": "foreign"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_123",
+                        "name": "get_weather",
+                        "input": {"city": "Paris"},
+                        "caller": {"type": "direct"},
+                        "thought_signature": "foreign",
+                    },
+                ],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "reasoning": "foreign",
+                "reasoning_items": [{"id": "foreign"}],
+                "thinking": "foreign",
+                "signature": "foreign",
+                "thought_signature": "foreign",
+                "provider_specific_fields": {"source": "foreign"},
+            },
+        ),
+        logging_obj=logging_obj,
     )
 
     assert response["content"] == [
-        {"type": "thinking", "thinking": "Use the tool."},
-        {"type": "text", "text": "Done"},
+        {"type": "thinking", "thinking": "Use the tool.", "signature": "foreign"},
+        {
+            "type": "tool_use",
+            "id": "toolu_123",
+            "name": "get_weather",
+            "input": {"city": "Paris"},
+            "caller": {"type": "direct"},
+        },
     ]
-    assert response["provider_specific_fields"] == {"source": "deepseek"}
+    assert all(
+        field not in response
+        for field in ("reasoning", "reasoning_items", "thinking", "signature", "thought_signature")
+    )
+    assert "provider_specific_fields" not in response
+
+
+def test_deepseek_anthropic_messages_does_not_promote_reasoning_without_request_state():
+    logging_obj = MagicMock()
+    logging_obj.model_call_details = {}
+
+    response = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_response(
+        model="deepseek-v4-pro",
+        raw_response=httpx.Response(
+            200,
+            json={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done"}],
+                "model": "deepseek-v4-pro",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "reasoning_content": "Untrusted upstream reasoning",
+            },
+        ),
+        logging_obj=logging_obj,
+    )
+
+    assert response["content"] == [{"type": "text", "text": "Done"}]
+
+
+def test_deepseek_anthropic_messages_normalizes_openai_tool_history_without_mutation():
+    messages = [
+        {"role": "user", "content": "Use the tool"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "Call get_weather.",
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": json.dumps(
+                            {
+                                "city": "Paris",
+                                "reasoning_content": "tool input data",
+                                "provider_specific_fields": {"thought_signature": "tool input data"},
+                            }
+                        ),
+                    },
+                    "provider_specific_fields": {"thought_signature": "foreign"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_123",
+            "content": "Sunny",
+            "reasoning_content": "foreign",
+            "provider_specific_fields": {"thought_signature": "foreign"},
+        },
+    ]
+    original_messages = deepcopy(messages)
+
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"] == [
+        {"role": "user", "content": "Use the tool"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Call get_weather."},
+                {
+                    "type": "tool_use",
+                    "id": "call_123",
+                    "name": "get_weather",
+                    "input": {
+                        "city": "Paris",
+                        "reasoning_content": "tool input data",
+                        "provider_specific_fields": {"thought_signature": "tool input data"},
+                    },
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "call_123", "content": "Sunny"}],
+        },
+    ]
+    assert messages == original_messages
+
+
+def test_deepseek_anthropic_messages_normalizes_legacy_function_history():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Calling now.",
+                "reasoning_content": "Call the function.",
+                "function_call": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+            },
+            {"role": "function", "name": "get_weather", "content": "Sunny"},
+        ],
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Call the function."},
+                {"type": "text", "text": "Calling now."},
+                {
+                    "type": "tool_use",
+                    "id": "legacy_function_call_0",
+                    "name": "get_weather",
+                    "input": {"city": "Paris"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "legacy_function_call_0", "content": "Sunny"}],
+        },
+    ]
+
+
+def test_deepseek_anthropic_messages_matches_mixed_function_result_by_name():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "Choose the modern tool.",
+                "function_call": {"name": "legacy_a", "arguments": "{}"},
+                "tool_calls": [
+                    {
+                        "id": "call_b",
+                        "type": "function",
+                        "function": {"name": "modern_b", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "function", "name": "modern_b", "content": "modern result"},
+        ],
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"][1] == {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "call_b", "content": "modern result"}],
+    }
+
+
+def test_deepseek_anthropic_messages_preserves_tool_ids_during_native_normalization():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "Use the tool.",
+                "tool_calls": [
+                    {
+                        "id": "functions.Bash:0",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "functions.Bash:0", "content": "Done"},
+        ],
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"][0]["content"][1]["id"] == "functions.Bash:0"
+    assert request["messages"][1]["content"][0]["tool_use_id"] == "functions.Bash:0"
+
+
+def test_deepseek_anthropic_messages_rejects_tool_result_without_explicit_id():
+    with pytest.raises(AnthropicError, match="tool result is missing tool_call_id"):
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "first", "arguments": "{}"},
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "second", "arguments": "{}"},
+                        },
+                    ],
+                },
+                {"role": "tool", "content": "ambiguous"},
+            ],
+            anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        {"id": "call_1", "type": "function"},
+        {"id": "call_1", "type": "function", "function": {"arguments": "{}"}},
+        {"id": 1, "type": "function", "function": {"name": "first", "arguments": "{}"}},
+        {"id": "call_1", "type": "function", "function": {"name": "first", "arguments": {}}},
+    ],
+)
+def test_deepseek_anthropic_messages_rejects_invalid_tool_calls_locally(tool_call):
+    with pytest.raises(AnthropicError, match="tool_calls contain invalid entries"):
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "Use the tool.",
+                    "tool_calls": [tool_call],
+                }
+            ],
+            anthropic_messages_optional_request_params={"max_tokens": 100},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+
+def test_deepseek_anthropic_messages_sanitizes_foreign_history_fields_without_mutation():
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Use the tool.", "signature": "foreign"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_123",
+                    "name": "get_weather",
+                    "input": {},
+                    "index": 0,
+                    "reasoning_content": "Foreign tool reasoning",
+                    "provider_specific_fields": {"thought_signature": "foreign"},
+                },
+            ],
+            "provider_specific_fields": {"thought_signature": "foreign"},
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_123",
+                    "content": [
+                        {"type": "thinking", "thinking": "Foreign nested reasoning"},
+                        {
+                            "type": "text",
+                            "text": "Sunny",
+                            "provider_specific_fields": {"thought_signature": "foreign"},
+                        },
+                    ],
+                    "reasoning": "Foreign result reasoning",
+                    "provider_specific_fields": {"thought_signature": "foreign"},
+                }
+            ],
+            "reasoning_items": [{"type": "reasoning", "id": "reasoning_123"}],
+            "thinking_blocks": [{"type": "thinking", "thinking": "Foreign reasoning"}],
+            "provider_specific_fields": {"thought_signature": "foreign"},
+        },
+    ]
+    original_messages = deepcopy(messages)
+
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Use the tool."},
+                {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_123",
+                    "content": [{"type": "text", "text": "Sunny"}],
+                }
+            ],
+        },
+    ]
+    assert messages == original_messages
 
 
 @pytest.mark.parametrize("thinking_type", ["enabled", "disabled"])
@@ -1031,27 +1589,64 @@ def test_deepseek_anthropic_messages_rejects_reasoningless_tool_history():
     assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
 
 
-def test_deepseek_anthropic_messages_omitted_thinking_disables_reasoning_for_tool_history():
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "claude-sonnet-4-5", "router-alias"])
+def test_deepseek_anthropic_messages_omitted_thinking_defaults_to_enabled_on_first_turn(model):
     request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
-        model="deepseek-v4-pro",
-        messages=[
-            {
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-            }
-        ],
+        model=model,
+        messages=[{"role": "user", "content": "Hello"}],
         anthropic_messages_optional_request_params={"max_tokens": 100},
         litellm_params=GenericLiteLLMParams(),
         headers={},
     )
 
-    assert request["thinking"] == {"type": "disabled"}
-    assert request["messages"] == [
-        {
-            "role": "assistant",
-            "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-        }
-    ]
+    assert request["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.parametrize("model", ["deepseek-v3.2", "deepseek/deepseek-reasoner"])
+def test_deepseek_anthropic_messages_non_v4_omitted_thinking_remains_opt_in(model):
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model=model,
+        messages=[{"role": "user", "content": "Hello"}],
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert "thinking" not in request
+
+
+@pytest.mark.parametrize("model", ["deepseek-v3.2", "deepseek/deepseek-reasoner"])
+def test_deepseek_anthropic_messages_non_v4_explicit_thinking_is_preserved(model):
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model=model,
+        messages=[{"role": "user", "content": "Hello"}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "enabled"}
+
+
+def test_deepseek_anthropic_messages_omitted_thinking_rejects_reasoningless_tool_history():
+    with pytest.raises(AnthropicError, match="requires non-empty reasoning") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
+                }
+            ],
+            anthropic_messages_optional_request_params={"max_tokens": 100},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
 
 
 def test_deepseek_anthropic_messages_omitted_thinking_enables_thinking_block_history():
@@ -1100,7 +1695,7 @@ def test_deepseek_anthropic_messages_omitted_thinking_enables_reasoning_content_
     ]
 
 
-def test_deepseek_anthropic_messages_omitted_thinking_disables_mixed_reasoning_history():
+def test_deepseek_anthropic_messages_explicit_disabled_strips_reasoning_from_mixed_history():
     request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
         model="deepseek-v4-pro",
         messages=[
@@ -1117,12 +1712,13 @@ def test_deepseek_anthropic_messages_omitted_thinking_disables_mixed_reasoning_h
                 "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
             },
         ],
-        anthropic_messages_optional_request_params={"max_tokens": 100},
+        anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
         litellm_params=GenericLiteLLMParams(),
         headers={},
     )
 
     assert request["thinking"] == {"type": "disabled"}
+    assert request["messages"][0]["content"] == [{"type": "text", "text": "Done"}]
     assert request["messages"][2]["content"] == [
         {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}
     ]
@@ -1178,7 +1774,6 @@ def test_deepseek_anthropic_messages_placeholder_is_exactly_one_space():
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
-            "thinking": {"type": "enabled"},
         },
         litellm_params=GenericLiteLLMParams(),
         headers={},
@@ -1189,6 +1784,7 @@ def test_deepseek_anthropic_messages_placeholder_is_exactly_one_space():
         {"type": "text", "text": "I will use the tool."},
         {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
     ]
+    assert request["thinking"] == {"type": "enabled"}
 
 
 def test_deepseek_anthropic_messages_prefers_real_sidecar_reasoning_to_placeholder():
@@ -1427,6 +2023,56 @@ def test_deepseek_anthropic_messages_strips_adaptive_reasoning_controls():
     assert request["output_config"] == {"effort": "high"}
     assert "reasoning_effort" not in request
     assert optional_params["thinking"] == {"type": "adaptive", "budget_tokens": 4096}
+
+
+@pytest.mark.parametrize(
+    ("reasoning_effort", "expected_thinking", "expected_output_config"),
+    [
+        ("none", {"type": "disabled"}, None),
+        ("low", {"type": "enabled"}, {"effort": "low"}),
+        ("high", {"type": "enabled"}, {"effort": "high"}),
+        ("max", {"type": "enabled"}, {"effort": "max"}),
+    ],
+)
+def test_deepseek_anthropic_messages_maps_reasoning_effort_to_native_thinking(
+    reasoning_effort, expected_thinking, expected_output_config
+):
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Hello"}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "reasoning_effort": reasoning_effort,
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["thinking"] == expected_thinking
+    if expected_output_config is None:
+        assert "output_config" not in request
+    else:
+        assert request["output_config"] == expected_output_config
+    assert "reasoning_effort" not in request
+
+
+def test_deepseek_anthropic_messages_disabled_thinking_drops_conflicting_effort():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Hello"}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "disabled"},
+            "reasoning_effort": "max",
+            "output_config": {"effort": "high"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in request
+    assert "output_config" not in request
 
 
 def test_deepseek_anthropic_messages_drops_unsupported_output_config():
@@ -1725,6 +2371,30 @@ def test_deepseek_chat_bridge_rejects_scalar_redacted_only_history(content):
     assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
 
 
+def test_deepseek_chat_bridge_allows_redacted_sidecar_with_tool_history_when_disabled():
+    prepared = prepare_deepseek_chat_history(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "thinking_blocks": [{"type": "redacted_thinking", "data": "encrypted"}],
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+            }
+        ],
+        require_reasoning=False,
+    )
+
+    assert prepared[0]["content"] is None
+    assert prepared[0]["tool_calls"]
+    assert "thinking_blocks" not in prepared[0]
+
+
 def test_deepseek_anthropic_messages_drops_redacted_when_canonical_reasoning_exists():
     request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
         model="deepseek-v4-pro",
@@ -1775,15 +2445,16 @@ def test_deepseek_anthropic_messages_disables_thinking_without_promoting_tool_te
             {
                 "role": "assistant",
                 "content": [
+                    {"type": "thinking", "thinking": "Use the weather tool.", "signature": "old"},
                     {"type": "text", "text": "I will use the tool."},
                     {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
                 ],
+                "reasoning_content": "Canonical reasoning.",
             }
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
             "thinking": {"type": "enabled"},
-            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
         },
         litellm_params=GenericLiteLLMParams(),
         headers={},
@@ -1989,7 +2660,7 @@ async def test_router_selected_deepseek_messages_replays_unsigned_thinking_to_mo
             {
                 "model_name": "deepseek-group",
                 "litellm_params": {
-                    "model": "anthropic/claude-test",
+                    "model": "anthropic/deepseek-v4-pro",
                     "api_base": "https://deepseek.example.test",
                     "api_key": "test",
                 },
@@ -2061,7 +2732,7 @@ async def test_router_selected_deepseek_messages_replays_unsigned_thinking_to_mo
                     },
                 ],
                 "max_tokens": 100,
-                "model": "claude-test",
+                "model": "deepseek-v4-pro",
                 "thinking": {"type": "enabled"},
             },
         )
@@ -2272,7 +2943,7 @@ async def test_router_selected_deepseek_chat_strips_custom_tool_type(reasoning_p
     ("stream", "reasoning_message_field"),
     [(False, "reasoning_content"), (True, "provider_specific_fields")],
 )
-async def test_router_selected_deepseek_chat_replays_reasoning_content(stream, reasoning_message_field):
+async def test_router_selected_deepseek_chat_strips_reasoning_content_when_disabled(stream, reasoning_message_field):
     captured_requests = []
 
     def mock_transport(request):
@@ -2371,7 +3042,6 @@ async def test_router_selected_deepseek_chat_replays_reasoning_content(stream, r
     assert assistant_wire_message == {
         "role": "assistant",
         "content": [
-            {"type": "thinking", "thinking": "I should call the weather tool."},
             {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {"city": "Paris"}},
         ],
     }
@@ -2479,6 +3149,7 @@ async def test_redacted_deepseek_chat_tool_history_falls_back_before_deepseek_ht
             client=http_client,
         )
     finally:
+        await GLOBAL_LOGGING_WORKER.flush()
         await GLOBAL_LOGGING_WORKER.stop()
         await http_client.client.aclose()
         router.discard()
@@ -2749,7 +3420,7 @@ async def test_deepseek_chat_deduplicates_native_and_openai_tool_history():
             {
                 "model_name": "deepseek-group",
                 "litellm_params": {
-                    "model": "anthropic/claude-test",
+                    "model": "anthropic/deepseek-v4-pro",
                     "api_base": "https://deepseek.example.test/v1/messages",
                     "api_key": "test",
                 },
@@ -2829,7 +3500,8 @@ async def test_deepseek_anthropic_messages_streams_through_mock_transport():
             200,
             request=request,
             content=(
-                b'event: message_start\ndata: {"type":"message_start"}\n\n'
+                b'event: message_start\ndata: {"type":"message_start","reasoning_content":"foreign",'
+                b'"provider_specific_fields":{"source":"foreign"}}\n\n'
                 b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
             ),
         )
@@ -2842,7 +3514,7 @@ async def test_deepseek_anthropic_messages_streams_through_mock_transport():
             {
                 "model_name": "deepseek-group",
                 "litellm_params": {
-                    "model": "anthropic/claude-test",
+                    "model": "anthropic/deepseek-v4-pro",
                     "api_base": "https://deepseek.example.test",
                     "api_key": "test",
                 },
@@ -2893,6 +3565,128 @@ async def test_deepseek_anthropic_messages_streams_through_mock_transport():
         {"type": "tool_use", "id": "functions.Bash:0", "name": "get_weather", "input": {}},
     ]
     assert captured_requests[0]["stream"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thinking_disabled", [False, True])
+async def test_deepseek_anthropic_messages_native_stream_sanitizes_reasoning_fields(thinking_disabled):
+    async def source():
+        event = (
+            b"event: content_block_start\ndata: "
+            b'{"type":"content_block_start","index":0,"content_block":'
+            b'{"type":"thinking","thinking":"","signature":"foreign"},'
+            b'"reasoning_content":"foreign","provider_specific_fields":{"source":"foreign"}}\n\n'
+            b"event: content_block_delta\ndata: "
+            b'{"type":"content_block_delta","index":0,"delta":'
+            b'{"type":"thinking_delta","thinking":"Think","signature":"foreign"}}\n\n'
+            b"event: content_block_delta\ndata: "
+            b'{"type":"content_block_delta","index":0,"delta":'
+            b'{"type":"signature_delta","signature":"signed","reasoning_content":"foreign"}}\n\n'
+            b"event: content_block_stop\ndata: "
+            b'{"type":"content_block_stop","index":0}\n\n'
+            b"event: content_block_start\ndata: "
+            b'{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n'
+            b"event: content_block_delta\ndata: "
+            b'{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Done"}}\n\n'
+            b"event: content_block_stop\ndata: "
+            b'{"type":"content_block_stop","index":1}\n\n'
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        )
+        yield event[:37]
+        yield event[37:]
+
+    chunks = [
+        chunk
+        async for chunk in _sanitize_deepseek_messages_stream(
+            source(),
+            thinking_disabled=thinking_disabled,
+        )
+    ]
+    output = b"".join(chunks)
+    payloads = [json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: ")]
+
+    assert b"reasoning_content" not in output
+    assert b"provider_specific_fields" not in output
+    if thinking_disabled:
+        assert [(payload["type"], payload.get("index")) for payload in payloads] == [
+            ("content_block_start", 0),
+            ("content_block_stop", 0),
+            ("content_block_start", 1),
+            ("content_block_delta", 1),
+            ("content_block_stop", 1),
+            ("message_stop", None),
+        ]
+        assert b"signature" not in output
+        assert b'"type":"text"' in output
+        assert b'"thinking"' not in output
+    else:
+        assert [(payload["type"], payload.get("index")) for payload in payloads] == [
+            ("content_block_start", 0),
+            ("content_block_delta", 0),
+            ("content_block_delta", 0),
+            ("content_block_stop", 0),
+            ("content_block_start", 1),
+            ("content_block_delta", 1),
+            ("content_block_stop", 1),
+            ("message_stop", None),
+        ]
+        assert b'"signature":"foreign"' in output
+        assert b'"signature":"signed"' in output
+        assert b'"type":"thinking"' in output
+        assert b'"thinking":""' in output
+        assert b'"thinking":"Think"' in output
+
+
+@pytest.mark.asyncio
+async def test_deepseek_anthropic_messages_native_stream_preserves_tool_input_fields():
+    async def source():
+        yield (
+            b"id: event-123\nretry: 1000\n: upstream trace\n"
+            b"event: content_block_start\ndata: "
+            b'{"type":"content_block_start","index":0,"content_block":'
+            b'{"type":"tool_use","id":"call_123","name":"inspect","input":'
+            b'{"reasoning_content":"user data","thinking":{"value":"user data"}},'
+            b'"caller":{"type":"direct"},'
+            b'"reasoning_content":"foreign","provider_specific_fields":{"source":"foreign"}}}\n\n'
+        )
+
+    output = b"".join(
+        [
+            chunk
+            async for chunk in _sanitize_deepseek_messages_stream(
+                source(),
+                thinking_disabled=False,
+            )
+        ]
+    )
+    payload = json.loads(next(line[6:] for line in output.splitlines() if line.startswith(b"data: ")))
+
+    assert b"id: event-123\nretry: 1000\n: upstream trace\n" in output
+    assert payload["content_block"] == {
+        "type": "tool_use",
+        "id": "call_123",
+        "name": "inspect",
+        "input": {"reasoning_content": "user data", "thinking": {"value": "user data"}},
+        "caller": {"type": "direct"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_deepseek_anthropic_messages_native_stream_closes_source_on_early_exit():
+    closed = MagicMock()
+
+    async def source():
+        try:
+            yield b'event: message_start\ndata: {"type":"message_start"}\n\n'
+            yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        finally:
+            closed()
+
+    stream = _sanitize_deepseek_messages_stream(source(), thinking_disabled=False)
+    assert await anext(stream) == b'event: message_start\ndata: {"type":"message_start"}\n\n'
+    await stream.aclose()
+
+    closed.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope="module")

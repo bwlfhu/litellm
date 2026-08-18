@@ -210,7 +210,7 @@ def test_v4_thinking_mode_is_active_by_default(model):
         )
 
 
-def test_v3_thinking_mode_remains_opt_in():
+def test_reasoning_capable_v3_thinking_mode_requires_explicit_enablement():
     config = DeepSeekChatConfig()
 
     assert config._thinking_mode_active(model="deepseek-v3.2", optional_params={}) is False
@@ -221,6 +221,44 @@ def test_v3_thinking_mode_remains_opt_in():
         )
         is True
     )
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "deepseek/deepseek-v4-future"])
+def test_v4_chat_models_default_to_thinking(model):
+    config = DeepSeekChatConfig()
+
+    assert config._thinking_mode_active(model=model, optional_params={}) is True
+
+
+@pytest.mark.parametrize("model", ["deepseek-v3.2", "router-alias", "deepseek-v4-future"])
+def test_explicit_enabled_chat_thinking_overrides_model_detection(model):
+    assert (
+        DeepSeekChatConfig()._thinking_mode_active(
+            model=model,
+            optional_params={"thinking": {"type": "enabled"}},
+        )
+        is True
+    )
+
+
+def test_chat_history_strips_signature_fields_from_messages():
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Done",
+                "signature": "foreign",
+                "thought_signature": "foreign",
+                "reasoning_content": "Solve the task.",
+            }
+        ],
+        optional_params={"thinking": {"type": "disabled"}},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"] == [{"role": "assistant", "content": "Done"}]
 
 
 def test_v4_thinking_mode_can_be_disabled_explicitly():
@@ -443,7 +481,7 @@ def test_deployment_tool_thinking_disabled_skips_history_validation():
                 "tool_calls": [_function_tool("shell")],
             },
         ],
-        optional_params={"thinking": {"type": "enabled"}, "tools": [_function_tool("shell")]},
+        optional_params={"thinking": {"type": "enabled"}},
         litellm_params={"_litellm_deployment_protocol_context": context},
         headers={},
     )
@@ -451,27 +489,92 @@ def test_deployment_tool_thinking_disabled_skips_history_validation():
     assert body["thinking"] == {"type": "disabled"}
 
 
-def test_disabled_thinking_consumes_reasoning_sidecar_without_requiring_history():
-    body = DeepSeekChatConfig().transform_request(
-        model="deepseek-reasoner",
-        messages=[
-            {
-                "role": "assistant",
-                "content": None,
-                "thinking_blocks": [{"type": "thinking", "thinking": "Prior reasoning"}],
-                "tool_calls": [_function_tool("shell")],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [_function_tool("apply_patch")],
-            },
-        ],
-        optional_params={"thinking": {"type": "disabled"}},
-        litellm_params={},
-        headers={},
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+async def test_disabled_thinking_strips_all_reasoning_carriers(is_async):
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Inline reasoning"},
+                {"type": "redacted_thinking", "data": "encrypted"},
+                {"type": "text", "text": "I will use the tool."},
+            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "Sidecar reasoning"}],
+            "reasoning_content": "Canonical reasoning",
+            "reasoning": "Foreign reasoning",
+            "reasoning_items": [{"type": "reasoning", "id": "reasoning_123"}],
+            "thinking": "Foreign thinking",
+            "provider_specific_fields": {"reasoning_content": "Provider reasoning"},
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "index": 0,
+                    "reasoning_content": "Foreign tool reasoning",
+                    "provider_specific_fields": {"thought_signature": "foreign"},
+                    "function": {
+                        "name": "shell",
+                        "arguments": "{}",
+                        "thinking": "Foreign function reasoning",
+                        "provider_specific_fields": {"thought_signature": "foreign"},
+                    },
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_function_tool("apply_patch")],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_123",
+            "content": "Done",
+            "reasoning_content": "Foreign tool result reasoning",
+            "thinking_blocks": [{"type": "thinking", "thinking": "Foreign reasoning"}],
+            "provider_specific_fields": {"thought_signature": "foreign"},
+        },
+    ]
+    config = DeepSeekChatConfig()
+
+    body = (
+        await config.async_transform_request(
+            model="deepseek-reasoner",
+            messages=messages,
+            optional_params={"thinking": {"type": "disabled"}},
+            litellm_params={},
+            headers={},
+        )
+        if is_async
+        else config.transform_request(
+            model="deepseek-reasoner",
+            messages=messages,
+            optional_params={"thinking": {"type": "disabled"}},
+            litellm_params={},
+            headers={},
+        )
     )
 
-    assert body["messages"][0]["reasoning_content"] == "Prior reasoning"
-    assert "thinking_blocks" not in body["messages"][0]
-    assert "reasoning_content" not in body["messages"][1]
+    assert body["messages"][0]["content"] == "I will use the tool."
+    assert all("reasoning_content" not in message for message in body["messages"])
+    assert all("reasoning" not in message for message in body["messages"])
+    assert all("reasoning_items" not in message for message in body["messages"])
+    assert all("thinking" not in message for message in body["messages"])
+    assert all("thinking_blocks" not in message for message in body["messages"])
+    assert all("provider_specific_fields" not in message for message in body["messages"])
+    assert body["messages"][0]["tool_calls"] == [
+        {
+            "id": "call_123",
+            "type": "function",
+            "function": {"name": "shell", "arguments": "{}"},
+        }
+    ]
+    assert body["messages"][2] == {
+        "role": "tool",
+        "tool_call_id": "call_123",
+        "content": "Done",
+    }
+    assert messages[0]["reasoning_content"] == "Canonical reasoning"
+    assert messages[0]["content"][0]["type"] == "thinking"
+    assert messages[0]["tool_calls"][0]["provider_specific_fields"] == {"thought_signature": "foreign"}

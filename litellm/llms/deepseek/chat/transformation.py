@@ -2,7 +2,8 @@
 Translates from OpenAI's `/v1/chat/completions` to DeepSeek's `/v1/chat/completions`
 """
 
-from collections.abc import Coroutine, Mapping
+from collections.abc import Coroutine, Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Final, Literal, cast, overload
 
 import litellm
@@ -12,9 +13,86 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
 from litellm.router_protocol import get_deployment_protocol_context
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues
-from litellm.utils import supports_reasoning
 
 from ...openai.chat.gpt_transformation import OpenAIGPTConfig
+
+_DEEPSEEK_INTERNAL_REASONING_FIELDS: Final = frozenset(
+    {
+        "provider_specific_fields",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_items",
+        "signature",
+        "thought_signature",
+        "thinking",
+        "thinking_blocks",
+    }
+)
+_DEEPSEEK_TOOL_CALL_FIELDS: Final = ("id", "type")
+_DEEPSEEK_TOOL_FUNCTION_FIELDS: Final = ("name", "arguments")
+_DEEPSEEK_TOOL_MESSAGE_FIELDS: Final = frozenset(("tool_calls", "function_call"))
+_DEEPSEEK_REASONING_BLOCK_TYPES: Final = frozenset(("thinking", "redacted_thinking"))
+
+
+def _message_blocks(message: Mapping[str, object], field: str) -> Sequence[object]:
+    value: Final = message.get(field)
+    return value if isinstance(value, list) else ()
+
+
+def _sanitize_deepseek_tool_call(tool_call: object) -> object:
+    if not isinstance(tool_call, Mapping):
+        return deepcopy(tool_call)
+    function: Final = tool_call.get("function")
+    sanitized_function: Final = (
+        {  # mutable-ok: provider JSON function object
+            key: deepcopy(function[key]) for key in _DEEPSEEK_TOOL_FUNCTION_FIELDS if key in function
+        }
+        if isinstance(function, Mapping)
+        else None
+    )
+    tool_call_items: Final = tuple(
+        (key, deepcopy(tool_call[key])) for key in _DEEPSEEK_TOOL_CALL_FIELDS if key in tool_call
+    )
+    function_items: Final = (("function", sanitized_function),) if sanitized_function is not None else ()
+    return {key: value for key, value in (*tool_call_items, *function_items)}  # mutable-ok: provider JSON tool call
+
+
+def _sanitize_deepseek_chat_message(message: Mapping[str, object]) -> Mapping[str, object]:
+    tool_calls: Final = message.get("tool_calls")
+    function_call: Final = message.get("function_call")
+    message_items: Final = tuple(
+        (key, deepcopy(value))
+        for key, value in message.items()
+        if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS and key not in _DEEPSEEK_TOOL_MESSAGE_FIELDS
+    )
+    sanitized_tool_calls: Final = (
+        [  # mutable-ok: provider JSON tool_calls array
+            _sanitize_deepseek_tool_call(tool_call) for tool_call in tool_calls
+        ]
+        if isinstance(tool_calls, list)
+        else None
+    )
+    tool_call_items: Final = (("tool_calls", sanitized_tool_calls),) if sanitized_tool_calls is not None else ()
+    sanitized_function_call: Final = (
+        {  # mutable-ok: provider JSON function_call object
+            key: deepcopy(function_call[key]) for key in _DEEPSEEK_TOOL_FUNCTION_FIELDS if key in function_call
+        }
+        if isinstance(function_call, Mapping)
+        else None
+    )
+    function_call_items: Final = (
+        (("function_call", sanitized_function_call),) if sanitized_function_call is not None else ()
+    )
+    return {  # mutable-ok: provider JSON chat message
+        key: value for key, value in (*message_items, *tool_call_items, *function_call_items)
+    }
+
+
+def _as_all_message_values(message: Mapping[str, object]) -> AllMessageValues:
+    return cast(  # cast-ok: sanitation starts from a typed message and preserves its schema
+        AllMessageValues,
+        message,
+    )
 
 
 class _DeepSeekChatHistoryValidationError(litellm.BadRequestError):
@@ -89,9 +167,7 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
     @staticmethod
     def _message_reasoning(message: Mapping[str, object]) -> tuple[str | None, bool]:
         block_lists: Final = tuple(
-            block
-            for field in ("thinking_blocks", "content")
-            for block in (message.get(field) if isinstance(message.get(field), list) else [])
+            block for field in ("thinking_blocks", "content") for block in _message_blocks(message, field)
         )
         has_redacted_thinking: Final = any(
             isinstance(block, Mapping) and block.get("type") == "redacted_thinking" for block in block_lists
@@ -117,6 +193,77 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         )
         return (reasoning_block if isinstance(reasoning_block, str) else None), has_redacted_thinking
 
+    def _fill_reasoning_content_message(
+        self,
+        message: AllMessageValues,
+        model: str,
+        missing_reasoning: Literal["placeholder"] | None,
+        require_reasoning: bool,
+    ) -> AllMessageValues:
+        source_message: Final = _sanitize_deepseek_chat_message(message)
+        if source_message.get("role") != "assistant":
+            return _as_all_message_values(source_message)
+        reasoning, has_redacted_thinking = self._message_reasoning(message)
+        raw_content: Final = source_message.get("content")
+        content_without_thinking: Final = (
+            [  # mutable-ok: chat transformation requires concrete message content arrays
+                block
+                for block in raw_content
+                if not (isinstance(block, Mapping) and block.get("type") in _DEEPSEEK_REASONING_BLOCK_TYPES)
+            ]
+            if isinstance(raw_content, list)
+            else raw_content
+        )
+        sanitized_content: Final = (
+            content_without_thinking
+            if not isinstance(content_without_thinking, list) or content_without_thinking
+            else None
+        )
+        patched_items: Final = tuple(
+            (key, sanitized_content if key == "content" else value)
+            for key, value in source_message.items()
+            if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS
+        )
+        reasoning_items: Final = (
+            (("reasoning_content", reasoning),) if require_reasoning and reasoning is not None else ()
+        )
+        patched: Final = {  # mutable-ok: chat transformation requires concrete message objects
+            key: value for key, value in (*patched_items, *reasoning_items)
+        }
+        if not self._message_has_tool_history(patched):
+            has_visible_content: Final = (
+                bool(sanitized_content.strip())
+                if isinstance(sanitized_content, str)
+                else bool(sanitized_content)
+                if isinstance(sanitized_content, list)
+                else sanitized_content is not None
+            )
+            if has_redacted_thinking and reasoning is None and not has_visible_content:
+                raise _DeepSeekChatHistoryValidationError(
+                    message="DeepSeek chat history cannot replay redacted-only thinking",
+                    model=model,
+                    llm_provider="deepseek",
+                )
+            return _as_all_message_values(patched)
+        if has_redacted_thinking and require_reasoning and reasoning is None:
+            raise _DeepSeekChatHistoryValidationError(
+                message="DeepSeek chat tool history cannot replay redacted thinking",
+                model=model,
+                llm_provider="deepseek",
+            )
+        if reasoning is None and require_reasoning and missing_reasoning != "placeholder":
+            raise _DeepSeekChatHistoryValidationError(
+                message="DeepSeek chat tool history requires non-empty reasoning_content",
+                model=model,
+                llm_provider="deepseek",
+            )
+        final_message: Final = (
+            {**patched, "reasoning_content": " "}  # mutable-ok: provider message needs a placeholder field
+            if reasoning is None and require_reasoning
+            else patched
+        )
+        return _as_all_message_values(final_message)
+
     def _fill_reasoning_content(
         self,
         messages: list[AllMessageValues],
@@ -126,68 +273,15 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
     ) -> list[AllMessageValues]:
         protocol_context: Final = get_deployment_protocol_context(litellm_params)
         missing_reasoning: Final = protocol_context.missing_reasoning if protocol_context is not None else None
-        result: Final[list[AllMessageValues]] = []
-        for message in messages:
-            if message.get("role") != "assistant":
-                result.append(message)
-                continue
-            source_message: Final = dict(cast(dict, message))
-            reasoning, has_redacted_thinking = self._message_reasoning(source_message)
-            raw_content: Final = source_message.get("content")
-            content_without_thinking: Final = (
-                [
-                    block
-                    for block in raw_content
-                    if not (isinstance(block, Mapping) and block.get("type") in {"thinking", "redacted_thinking"})
-                ]
-                if isinstance(raw_content, list)
-                else raw_content
+        return [  # mutable-ok: chat transformation contract returns a concrete message list
+            self._fill_reasoning_content_message(
+                message,
+                model=model,
+                missing_reasoning=missing_reasoning,
+                require_reasoning=require_reasoning,
             )
-            sanitized_content: Final = (
-                content_without_thinking
-                if not isinstance(content_without_thinking, list) or content_without_thinking
-                else None
-            )
-            patched: Final = {
-                **{
-                    key: sanitized_content if key == "content" else value
-                    for key, value in source_message.items()
-                    if key not in {"thinking_blocks", "provider_specific_fields", "reasoning_content"}
-                },
-                **({"reasoning_content": reasoning} if reasoning is not None else {}),
-            }
-            if not self._message_has_tool_history(patched):
-                has_visible_content: Final = (
-                    bool(sanitized_content.strip())
-                    if isinstance(sanitized_content, str)
-                    else bool(sanitized_content)
-                    if isinstance(sanitized_content, list)
-                    else sanitized_content is not None
-                )
-                if has_redacted_thinking and reasoning is None and not has_visible_content:
-                    raise _DeepSeekChatHistoryValidationError(
-                        message="DeepSeek chat history cannot replay redacted-only thinking",
-                        model=model,
-                        llm_provider="deepseek",
-                    )
-                result.append(cast(AllMessageValues, patched))
-                continue
-            if has_redacted_thinking and require_reasoning and reasoning is None:
-                raise _DeepSeekChatHistoryValidationError(
-                    message="DeepSeek chat tool history cannot replay redacted thinking",
-                    model=model,
-                    llm_provider="deepseek",
-                )
-            if reasoning is None and require_reasoning and missing_reasoning != "placeholder":
-                raise _DeepSeekChatHistoryValidationError(
-                    message="DeepSeek chat tool history requires non-empty reasoning_content",
-                    model=model,
-                    llm_provider="deepseek",
-                )
-            if reasoning is None and require_reasoning:
-                patched["reasoning_content"] = " "
-            result.append(cast(AllMessageValues, patched))
-        return result
+            for message in messages
+        ]
 
     @overload
     def _transform_messages(
@@ -223,9 +317,9 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         if thinking_type == "disabled":
             return False
         if thinking_type == "enabled":
-            return supports_reasoning(model=model, custom_llm_provider="deepseek")
-        model_name: Final = model.rsplit("/", maxsplit=1)[-1].lower()
-        return model_name.startswith("deepseek-v4")
+            return True
+        normalized_model: Final = model.rsplit("/", maxsplit=1)[-1].lower()
+        return normalized_model.startswith("deepseek-v4")
 
     @staticmethod
     def _drop_unsupported_tools(optional_params: dict) -> dict:
@@ -316,7 +410,10 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         if (
             protocol_context is not None
             and protocol_context.tool_thinking == "disabled"
-            and optional_params.get("tools")
+            and (
+                bool(optional_params.get("tools"))
+                or any(self._message_has_tool_history(message) for message in messages)
+            )
         ):
             optional_params = {**optional_params, "thinking": {"type": "disabled"}}
         thinking_mode_active: Final = self._thinking_mode_active(model=model, optional_params=optional_params)
@@ -351,7 +448,10 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         if (
             protocol_context is not None
             and protocol_context.tool_thinking == "disabled"
-            and optional_params.get("tools")
+            and (
+                bool(optional_params.get("tools"))
+                or any(self._message_has_tool_history(message) for message in messages)
+            )
         ):
             optional_params = {**optional_params, "thinking": {"type": "disabled"}}
         thinking_mode_active: Final = self._thinking_mode_active(model=model, optional_params=optional_params)
