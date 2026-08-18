@@ -12,6 +12,14 @@ def _function_tool(name: str) -> dict:
     }
 
 
+def _function_tool_call(name: str) -> dict:
+    return {
+        "id": f"call_{name}",
+        "type": "function",
+        "function": {"name": name, "arguments": '{"path":"/tmp/result"}'},
+    }
+
+
 @pytest.mark.parametrize(
     ("reasoning_effort", "expected_effort"),
     [
@@ -173,6 +181,7 @@ def test_thinking_mode_does_not_fill_ordinary_assistant_reasoning():
 
 
 def test_thinking_mode_backfills_missing_reasoning_for_tool_history():
+    tool_call = _function_tool_call("shell")
     body = DeepSeekChatConfig().transform_request(
         model="deepseek-reasoner",
         messages=[
@@ -180,7 +189,7 @@ def test_thinking_mode_backfills_missing_reasoning_for_tool_history():
             {
                 "role": "assistant",
                 "content": None,
-                "tool_calls": [_function_tool("shell")],
+                "tool_calls": [tool_call],
             },
         ],
         optional_params={"thinking": {"type": "enabled"}},
@@ -189,6 +198,7 @@ def test_thinking_mode_backfills_missing_reasoning_for_tool_history():
     )
 
     assert body["messages"][1]["reasoning_content"] == " "
+    assert body["messages"][1]["tool_calls"] == [tool_call]
 
 
 @pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek/deepseek-v4-pro"])
@@ -467,6 +477,7 @@ def test_thinking_mode_replaces_whitespace_reasoning_with_placeholder():
 
 @pytest.mark.asyncio
 async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history():
+    tool_call = _function_tool_call("shell")
     body = await DeepSeekChatConfig().async_transform_request(
         model="deepseek-v4-pro",
         messages=[
@@ -474,7 +485,7 @@ async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history(
             {
                 "role": "assistant",
                 "content": None,
-                "tool_calls": [_function_tool("shell")],
+                "tool_calls": [tool_call],
             },
         ],
         optional_params={},
@@ -483,6 +494,7 @@ async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history(
     )
 
     assert body["messages"][1]["reasoning_content"] == " "
+    assert body["messages"][1]["tool_calls"] == [tool_call]
 
 
 def test_deployment_tool_thinking_disabled_skips_history_validation():
