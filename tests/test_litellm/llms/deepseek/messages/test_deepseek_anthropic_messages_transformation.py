@@ -2,6 +2,7 @@ import json
 import time
 from copy import deepcopy
 from functools import reduce
+from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -30,6 +31,16 @@ from litellm.router import Router
 from litellm.router_protocol import _build_deployment_protocol_context, _RouterDeploymentProtocolContext
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
+
+
+def _assert_single_space_thinking_prefix(content: object) -> None:
+    assert isinstance(content, list)
+    assert len(content) >= 2
+    thinking_block: Final = content[0]
+    assert isinstance(thinking_block, dict)
+    assert len(thinking_block) == 2
+    assert thinking_block.get("type") == "thinking"
+    assert thinking_block.get("thinking") == " "
 
 
 def test_deepseek_provider_uses_anthropic_messages_config():
@@ -226,32 +237,40 @@ def test_anthropic_chat_omitted_thinking_defaults_to_enabled_on_first_turn(model
     assert request["thinking"] == {"type": "enabled"}
 
 
-def test_anthropic_chat_omitted_thinking_rejects_reasoningless_tool_history():
+def test_anthropic_chat_omitted_thinking_backfills_reasoningless_tool_history():
     context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
-    with pytest.raises(AnthropicError, match="requires non-empty reasoning") as error:
-        AnthropicConfig().transform_request(
-            model="deepseek-v4-pro",
-            messages=[
+    messages: Final = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
                 {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_123",
-                            "type": "function",
-                            "function": {"name": "get_weather", "arguments": "{}"},
-                        }
-                    ],
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
                 }
             ],
-            optional_params={"max_tokens": 100},
-            litellm_params={"_litellm_deployment_protocol_context": context},
-            headers={},
-        )
+        }
+    ]
+    original_messages: Final = deepcopy(messages)
 
-    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
+    request: Final = AnthropicConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        optional_params={"max_tokens": 100},
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert request["thinking"]["type"] == "enabled"
+    content: Final = request["messages"][0]["content"]
+    _assert_single_space_thinking_prefix(content)
+    assert len(content) == 2
+    assert content[1]["type"] == "tool_use"
+    assert content[1]["id"] == "call_123"
+    assert messages == original_messages
 
 
 def test_anthropic_chat_omitted_thinking_enables_replayable_reasoning_history():
@@ -874,7 +893,7 @@ def test_deepseek_anthropic_messages_preserves_thinking_and_sanitizes_custom_too
     assert messages == original_messages
 
 
-def test_deepseek_anthropic_messages_rejects_tool_history_without_thinking():
+def test_deepseek_anthropic_messages_backfills_tool_history_without_thinking():
     config = DeepSeekAnthropicMessagesConfig()
     messages = [
         {
@@ -891,31 +910,38 @@ def test_deepseek_anthropic_messages_rejects_tool_history_without_thinking():
     ]
     original_messages = deepcopy(messages)
 
-    with pytest.raises(AnthropicError, match="requires non-empty reasoning"):
-        config.transform_anthropic_messages_request(
-            model="deepseek-v4-flash",
-            messages=messages,
-            anthropic_messages_optional_request_params={
-                "max_tokens": 100,
-                "thinking": {"type": "enabled"},
-                "output_config": {"effort": "high"},
-            },
-            litellm_params=GenericLiteLLMParams(),
-            headers={},
-        )
+    request: Final = config.transform_anthropic_messages_request(
+        model="deepseek-v4-flash",
+        messages=messages,
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+            "output_config": {"effort": "high"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
 
+    assert request["thinking"]["type"] == "enabled"
+    content: Final = request["messages"][0]["content"]
+    _assert_single_space_thinking_prefix(content)
+    assert len(content) == 3
+    assert content[1]["text"] == "I will check the weather."
+    assert content[2]["id"] == "toolu_123"
+    assert content[2]["input"]["city"] == "Tokyo"
+    assert request["messages"][1] == messages[1]
     assert messages == original_messages
 
 
 @pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize("stream", [False, True])
-async def test_router_selected_deepseek_messages_rejects_reasoningless_tool_history(stream):
+async def test_router_selected_deepseek_messages_backfills_reasoningless_tool_history(stream):
     captured_requests = []
 
     def mock_transport(request):
         request_body = json.loads(request.content)
         captured_requests.append(request_body)
-        if request_body["stream"]:
+        if request_body.get("stream") is True:
             return httpx.Response(
                 200,
                 request=request,
@@ -959,7 +985,7 @@ async def test_router_selected_deepseek_messages_rejects_reasoningless_tool_hist
         {
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "I will use the tool."},
+                {"type": "thinking", "thinking": ""},
                 {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
             ],
         },
@@ -971,21 +997,31 @@ async def test_router_selected_deepseek_messages_rejects_reasoningless_tool_hist
 
     try:
         with patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client", return_value=http_client):
-            with pytest.raises(AnthropicError, match="requires non-empty reasoning") as error:
-                await router.aanthropic_messages(
-                    max_tokens=100,
-                    messages=messages,
-                    model="deepseek-group",
-                    stream=stream,
-                    thinking={"type": "enabled"},
+            response: Final = await router.aanthropic_messages(
+                max_tokens=100,
+                messages=messages,
+                model="deepseek-group",
+                stream=stream,
+                thinking={"type": "enabled"},
+            )
+            if stream:
+                chunks: Final = [chunk async for chunk in response]
+                assert b"".join(chunks) == (
+                    b'event: message_start\ndata: {"type":"message_start"}\n\n'
+                    b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
                 )
     finally:
         await GLOBAL_LOGGING_WORKER.stop()
         await http_client.client.aclose()
         router.discard()
 
-    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
-    assert captured_requests == []
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["thinking"]["type"] == "enabled"
+    content: Final = captured_requests[0]["messages"][0]["content"]
+    _assert_single_space_thinking_prefix(content)
+    assert len(content) == 2
+    assert content[1]["type"] == "tool_use"
+    assert content[1]["id"] == "toolu_123"
 
 
 def test_deepseek_anthropic_tool_thinking_policy_leaves_non_tool_request_enabled():
@@ -1568,25 +1604,33 @@ def test_deepseek_anthropic_messages_does_not_promote_tool_text_to_reasoning(thi
     ]
 
 
-def test_deepseek_anthropic_messages_rejects_reasoningless_tool_history():
-    with pytest.raises(AnthropicError, match="requires non-empty reasoning") as error:
-        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
-            model="deepseek-v4-pro",
-            messages=[
-                {
-                    "role": "assistant",
-                    "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-                }
-            ],
-            anthropic_messages_optional_request_params={
-                "max_tokens": 100,
-                "thinking": {"type": "enabled"},
-            },
-            litellm_params=GenericLiteLLMParams(),
-            headers={},
-        )
+def test_deepseek_anthropic_messages_backfills_reasoningless_tool_history():
+    messages: Final = [
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
+        }
+    ]
+    original_messages: Final = deepcopy(messages)
 
-    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
+    request: Final = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "enabled"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["thinking"]["type"] == "enabled"
+    content: Final = request["messages"][0]["content"]
+    _assert_single_space_thinking_prefix(content)
+    assert len(content) == 2
+    assert content[1]["type"] == "tool_use"
+    assert content[1]["id"] == "toolu_123"
+    assert messages == original_messages
 
 
 @pytest.mark.parametrize("model", ["deepseek-v4-pro", "claude-sonnet-4-5", "router-alias"])
@@ -1631,22 +1675,26 @@ def test_deepseek_anthropic_messages_non_v4_explicit_thinking_is_preserved(model
     assert request["thinking"] == {"type": "enabled"}
 
 
-def test_deepseek_anthropic_messages_omitted_thinking_rejects_reasoningless_tool_history():
-    with pytest.raises(AnthropicError, match="requires non-empty reasoning") as error:
-        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
-            model="deepseek-v4-pro",
-            messages=[
-                {
-                    "role": "assistant",
-                    "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-                }
-            ],
-            anthropic_messages_optional_request_params={"max_tokens": 100},
-            litellm_params=GenericLiteLLMParams(),
-            headers={},
-        )
+def test_deepseek_anthropic_messages_omitted_thinking_backfills_reasoningless_tool_history():
+    request: Final = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
+            }
+        ],
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
 
-    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
+    assert request["thinking"]["type"] == "enabled"
+    content: Final = request["messages"][0]["content"]
+    _assert_single_space_thinking_prefix(content)
+    assert len(content) == 2
+    assert content[1]["type"] == "tool_use"
+    assert content[1]["id"] == "toolu_123"
 
 
 def test_deepseek_anthropic_messages_omitted_thinking_enables_thinking_block_history():
@@ -1760,7 +1808,7 @@ def test_deepseek_anthropic_messages_omits_only_false_stream(stream, expected_st
 
 
 def test_deepseek_anthropic_messages_placeholder_is_exactly_one_space():
-    request = DeepSeekAnthropicMessagesConfig(missing_reasoning="placeholder").transform_anthropic_messages_request(
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
         model="deepseek-v4-pro",
         messages=[
             {
@@ -3170,7 +3218,7 @@ async def test_redacted_deepseek_chat_tool_history_falls_back_before_deepseek_ht
 
 @pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize("modify_params", [False, True])
-async def test_deepseek_chat_tool_history_without_reasoning_skips_http(modify_params):
+async def test_deepseek_chat_tool_history_without_reasoning_reaches_http(modify_params):
     captured_requests = []
 
     def mock_transport(request):
@@ -3209,36 +3257,42 @@ async def test_deepseek_chat_tool_history_without_reasoning_skips_http(modify_pa
 
     try:
         with patch.object(litellm, "modify_params", modify_params):
-            with pytest.raises(litellm.BadRequestError, match="requires non-empty reasoning") as error:
-                await router.acompletion(
-                    model="deepseek-group",
-                    messages=[
-                        {"role": "user", "content": "Use the weather tool."},
-                        {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": "call_123",
-                                    "type": "function",
-                                    "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
-                                }
-                            ],
-                        },
-                        {"role": "tool", "tool_call_id": "call_123", "content": "Sunny"},
-                    ],
-                    max_tokens=100,
-                    thinking={"type": "enabled"},
-                    allowed_openai_params=["thinking"],
-                    client=http_client,
-                )
+            response: Final = await router.acompletion(
+                model="deepseek-group",
+                messages=[
+                    {"role": "user", "content": "Use the weather tool."},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_123",
+                                "type": "function",
+                                "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_123", "content": "Sunny"},
+                ],
+                max_tokens=100,
+                thinking={"type": "enabled"},
+                allowed_openai_params=["thinking"],
+                client=http_client,
+            )
     finally:
         await GLOBAL_LOGGING_WORKER.stop()
         await http_client.client.aclose()
         router.discard()
 
-    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
-    assert captured_requests == []
+    assert response.choices[0].message.content == "Done"
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["thinking"]["type"] == "enabled"
+    content: Final = captured_requests[0]["messages"][1]["content"]
+    _assert_single_space_thinking_prefix(content)
+    assert len(content) == 2
+    assert content[1]["type"] == "tool_use"
+    assert content[1]["id"] == "call_123"
+    assert content[1]["input"]["city"] == "Paris"
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -3343,7 +3397,7 @@ async def test_router_configured_deepseek_chat_disables_tool_thinking_on_first_t
         },
     ],
 )
-async def test_deepseek_chat_non_tool_calls_history_without_reasoning_skips_http(assistant_message):
+async def test_deepseek_chat_tool_history_shapes_without_reasoning_reach_http(assistant_message):
     captured_requests = []
 
     def mock_transport(request):
@@ -3384,22 +3438,25 @@ async def test_deepseek_chat_non_tool_calls_history_without_reasoning_skips_http
         messages = [{"role": "user", "content": "Use the tool."}, assistant_message]
         if assistant_message.get("function_call") is not None:
             messages.append({"role": "function", "name": "get_weather", "content": "Sunny"})
-        with pytest.raises(litellm.BadRequestError, match="requires non-empty reasoning") as error:
-            await router.acompletion(
-                model="deepseek-group",
-                messages=messages,
-                max_tokens=100,
-                thinking={"type": "enabled"},
-                allowed_openai_params=["thinking"],
-                client=http_client,
-            )
+        response: Final = await router.acompletion(
+            model="deepseek-group",
+            messages=messages,
+            max_tokens=100,
+            thinking={"type": "enabled"},
+            allowed_openai_params=["thinking"],
+            client=http_client,
+        )
     finally:
         await GLOBAL_LOGGING_WORKER.stop()
         await http_client.client.aclose()
         router.discard()
 
-    assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
-    assert captured_requests == []
+    assert response.choices[0].message.content == "Done"
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["thinking"]["type"] == "enabled"
+    assistant_content: Final = captured_requests[0]["messages"][1]["content"]
+    _assert_single_space_thinking_prefix(assistant_content)
+    assert any(block.get("type") in ("tool_use", "server_tool_use") for block in assistant_content[1:])
 
 
 @pytest.mark.asyncio(loop_scope="module")

@@ -1167,7 +1167,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         transformed_messages: Final = _deepseek_history(
             normalized_messages,
             require_reasoning=require_reasoning,
-            missing_reasoning=self._missing_reasoning,
+            missing_reasoning=self._missing_reasoning or "placeholder",
         )
         anthropic_messages_request: Final = super().transform_anthropic_messages_request(
             model=model,

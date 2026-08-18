@@ -1826,7 +1826,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             messages = prepare_deepseek_chat_history(
                 messages,
                 require_reasoning=thinking_enabled,
-                missing_reasoning=protocol_context.missing_reasoning,
+                missing_reasoning=protocol_context.missing_reasoning or "placeholder",
             )
 
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
