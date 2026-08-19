@@ -387,6 +387,63 @@ def _deepseek_tool_call_blocks(tool_calls: Sequence[object], message_index: int)
     ]
 
 
+def _as_deepseek_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return cast(Mapping[str, object], value)  # cast-ok: provider payload objects have JSON string keys
+
+
+def _matching_deepseek_tool_call(tool_calls: Sequence[object], tool_use_id: object) -> Mapping[str, object] | None:
+    if not isinstance(tool_use_id, str) or not tool_use_id.strip():
+        return None
+    matching_tool_calls: Final = tuple(
+        typed_tool_call
+        for tool_call in tool_calls
+        if (typed_tool_call := _as_deepseek_mapping(tool_call)) is not None and typed_tool_call.get("id") == tool_use_id
+    )
+    if len(matching_tool_calls) != 1 or matching_tool_calls[0].get("type", "function") != "function":
+        return None
+    return matching_tool_calls[0]
+
+
+def _deepseek_tool_call_input(tool_call: Mapping[str, object], message_index: int) -> Mapping[str, object] | None:
+    matching_blocks: Final = _deepseek_tool_call_blocks((tool_call,), message_index)
+    if len(matching_blocks) != 1 or (matching_block := _as_deepseek_mapping(matching_blocks[0])) is None:
+        return None
+    return _as_deepseek_mapping(matching_block.get("input"))
+
+
+def _repair_deepseek_tool_use_block(block: object, tool_calls: Sequence[object], message_index: int) -> object:
+    typed_block: Final = _as_deepseek_mapping(block)
+    if typed_block is None:
+        return deepcopy(block)
+    if typed_block.get("type") != "tool_use":
+        return deepcopy(typed_block)
+    missing_fields: Final = frozenset(field for field in ("name", "input") if field not in typed_block)
+    if not missing_fields:
+        return deepcopy(typed_block)
+    matching_tool_call: Final = _matching_deepseek_tool_call(tool_calls, typed_block.get("id"))
+    if matching_tool_call is None:
+        return deepcopy(typed_block)
+    typed_function: Final = _as_deepseek_mapping(matching_tool_call.get("function"))
+    matching_name: Final = typed_function.get("name") if typed_function is not None else None
+    matching_input: Final = (
+        _deepseek_tool_call_input(matching_tool_call, message_index) if "input" in missing_fields else None
+    )
+    original_items: Final = tuple((key, deepcopy(value)) for key, value in typed_block.items())
+    repaired_items: Final = (
+        *(
+            (("name", matching_name),)
+            if "name" in missing_fields and isinstance(matching_name, str) and matching_name.strip()
+            else ()
+        ),
+        *((("input", deepcopy(matching_input)),) if "input" in missing_fields and matching_input is not None else ()),
+    )
+    return {  # mutable-ok: provider tool_use blocks require concrete JSON objects
+        key: value for key, value in (*original_items, *repaired_items)
+    }
+
+
 def _normalize_deepseek_assistant_tool_history(
     message: Mapping[str, object], message_index: int
 ) -> Mapping[str, object]:
@@ -423,7 +480,7 @@ def _normalize_deepseek_assistant_tool_history(
         return transformed_message
     raw_content: Final = transformed_message.get("content")
     content_blocks: Final = (
-        tuple(deepcopy(block) for block in raw_content)
+        tuple(_repair_deepseek_tool_use_block(block, tool_calls, message_index) for block in raw_content)
         if isinstance(raw_content, list)
         else ({"type": "text", "text": raw_content},)  # mutable-ok: provider text block is a JSON object
         if isinstance(raw_content, str) and raw_content.strip()
@@ -576,6 +633,35 @@ def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], 
             ),
             model=model,
             llm_provider="deepseek",
+        )
+
+
+def _invalid_deepseek_tool_use_field(block: object) -> str | None:
+    typed_block: Final = _as_deepseek_mapping(block)
+    if typed_block is None:
+        return None
+    if typed_block.get("type") not in _DEEPSEEK_TOOL_USE_BLOCK_TYPES:
+        return None
+    tool_use_id: Final = typed_block.get("id")
+    if not isinstance(tool_use_id, str) or not tool_use_id.strip():
+        return "id"
+    name: Final = typed_block.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return "name"
+    return None if isinstance(typed_block.get("input"), Mapping) else "input"
+
+
+def _validate_deepseek_tool_use_blocks(messages: Sequence[Mapping[str, object]]) -> None:
+    invalid_fields: Final = tuple(
+        invalid_field
+        for message in messages
+        for field in ("content", "thinking_blocks")
+        for block, _ in _content_blocks(_message_blocks(message, field))
+        if (invalid_field := _invalid_deepseek_tool_use_field(block)) is not None
+    )
+    if invalid_fields:
+        raise _deepseek_history_validation_error(
+            f"DeepSeek Anthropic tool_use block is missing or has invalid {invalid_fields[0]}"
         )
 
 
@@ -1169,6 +1255,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             require_reasoning=require_reasoning,
             missing_reasoning=self._missing_reasoning or "placeholder",
         )
+        _validate_deepseek_tool_use_blocks(transformed_messages)
         anthropic_messages_request: Final = super().transform_anthropic_messages_request(
             model=model,
             messages=transformed_messages,

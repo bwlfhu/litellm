@@ -2342,6 +2342,248 @@ def test_deepseek_content_validation_does_not_scan_tool_input_payloads():
     assert request["messages"][0]["content"][1]["input"] == {"type": "image"}
 
 
+@pytest.mark.parametrize(
+    ("tool_use", "tool_arguments", "expected_tool_use"),
+    [
+        (
+            {"type": "tool_use", "id": "call_123", "input": {"city": "Paris"}},
+            "not-json",
+            {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {"city": "Paris"}},
+        ),
+        (
+            {"type": "tool_use", "id": "call_123", "name": "get_weather"},
+            '{"city":"Paris"}',
+            {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {"city": "Paris"}},
+        ),
+        (
+            {"type": "tool_use", "id": "call_123"},
+            '{"city":"Paris"}',
+            {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {"city": "Paris"}},
+        ),
+    ],
+)
+def test_deepseek_anthropic_messages_repairs_incomplete_tool_use_from_matching_tool_call(
+    tool_use, tool_arguments, expected_tool_use
+):
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": [tool_use],
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": tool_arguments},
+                    }
+                ],
+            }
+        ],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "disabled"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"][0]["content"] == [expected_tool_use]
+
+
+@pytest.mark.parametrize("missing_field", ["id", "name", "input"])
+def test_deepseek_anthropic_messages_rejects_incomplete_tool_use_without_exact_source(missing_field):
+    tool_use = {"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}}
+    tool_use.pop(missing_field)
+
+    with pytest.raises(AnthropicError, match=rf"missing or has invalid {missing_field}") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [tool_use],
+                    "tool_calls": [
+                        {
+                            "id": "call_other",
+                            "type": "function",
+                            "function": {"name": "other_tool", "arguments": "{}"},
+                        }
+                    ],
+                }
+            ],
+            anthropic_messages_optional_request_params={
+                "max_tokens": 100,
+                "thinking": {"type": "disabled"},
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("tool_use", "invalid_field"),
+    [
+        ({"type": "tool_use", "id": " ", "name": "get_weather", "input": {}}, "id"),
+        ({"type": "tool_use", "id": "call_123", "name": " ", "input": {}}, "name"),
+        ({"type": "tool_use", "id": "call_123", "name": "get_weather", "input": []}, "input"),
+    ],
+)
+@pytest.mark.parametrize("has_matching_tool_call", [False, True])
+def test_deepseek_anthropic_messages_rejects_invalid_tool_use_fields(tool_use, invalid_field, has_matching_tool_call):
+    tool_calls = (
+        [
+            {
+                "id": "call_123",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"},
+            }
+        ]
+        if has_matching_tool_call
+        else []
+    )
+    with pytest.raises(AnthropicError, match=rf"missing or has invalid {invalid_field}") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[{"role": "assistant", "content": [tool_use], "tool_calls": tool_calls}],
+            anthropic_messages_optional_request_params={
+                "max_tokens": 100,
+                "thinking": {"type": "disabled"},
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert error.value.status_code == 400
+
+
+def test_deepseek_anthropic_messages_rejects_ambiguous_tool_use_repair():
+    duplicate_tool_call = {
+        "id": "call_123",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": "{}"},
+    }
+
+    with pytest.raises(AnthropicError, match="missing or has invalid name") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_123", "input": {}}],
+                    "tool_calls": [duplicate_tool_call, duplicate_tool_call],
+                }
+            ],
+            anthropic_messages_optional_request_params={
+                "max_tokens": 100,
+                "thinking": {"type": "disabled"},
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert error.value.status_code == 400
+
+
+def test_deepseek_anthropic_messages_rejects_repair_from_non_function_tool_call():
+    with pytest.raises(AnthropicError, match="missing or has invalid name") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_123", "input": {}}],
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "custom",
+                            "function": {"name": "get_weather", "arguments": "{}"},
+                        }
+                    ],
+                }
+            ],
+            anthropic_messages_optional_request_params={
+                "max_tokens": 100,
+                "thinking": {"type": "disabled"},
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert error.value.status_code == 400
+
+
+def test_deepseek_anthropic_messages_rejects_repair_from_malformed_arguments():
+    with pytest.raises(AnthropicError, match="tool_calls contain invalid arguments") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_123", "name": "get_weather"}],
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": "not-json"},
+                        }
+                    ],
+                }
+            ],
+            anthropic_messages_optional_request_params={
+                "max_tokens": 100,
+                "thinking": {"type": "disabled"},
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert error.value.status_code == 400
+
+
+def test_deepseek_anthropic_messages_preserves_complete_tool_use_over_matching_tool_call():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_123",
+                        "name": "content_tool",
+                        "input": {"source": "content"},
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "top_level_tool", "arguments": '{"source":"tool_calls"}'},
+                    }
+                ],
+            }
+        ],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "disabled"},
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"][0]["content"] == [
+        {
+            "type": "tool_use",
+            "id": "call_123",
+            "name": "content_tool",
+            "input": {"source": "content"},
+        }
+    ]
+
+
 def test_deepseek_anthropic_messages_drops_non_tool_redacted_thinking():
     messages = [
         {
