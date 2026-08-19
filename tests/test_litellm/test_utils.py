@@ -4315,6 +4315,8 @@ def test_deepseek_v4_models_in_cost_map():
         assert info["output_cost_per_token"] == expected_output
         assert info["cache_read_input_token_cost"] == expected_cache
         assert info["max_input_tokens"] == 1_000_000
+        assert info["max_output_tokens"] == 384_000
+        assert info["max_tokens"] == 384_000
         assert info["supports_function_calling"] is True
         assert info["supports_tool_choice"] is True
 
@@ -4330,6 +4332,9 @@ def test_deepseek_v4_models_in_cost_map():
         assert info["input_cost_per_token"] == expected_input
         assert info["output_cost_per_token"] == expected_output
         assert info["cache_read_input_token_cost"] == expected_cache
+        assert info["max_input_tokens"] == 1_000_000
+        assert info["max_output_tokens"] == 384_000
+        assert info["max_tokens"] == 384_000
         assert info["supports_function_calling"] is True
         assert info["supports_tool_choice"] is True
 
@@ -4359,6 +4364,8 @@ def test_deepseek_v4_models_in_backup_cost_map():
         assert info["output_cost_per_token"] == expected_output
         assert info["cache_read_input_token_cost"] == expected_cache
         assert info["max_input_tokens"] == 1_000_000
+        assert info["max_output_tokens"] == 384_000
+        assert info["max_tokens"] == 384_000
 
     # --- provider-prefixed names ---
     for key, expected_input, expected_output, expected_cache in [
@@ -4372,6 +4379,9 @@ def test_deepseek_v4_models_in_backup_cost_map():
         assert info["input_cost_per_token"] == expected_input
         assert info["output_cost_per_token"] == expected_output
         assert info["cache_read_input_token_cost"] == expected_cache
+        assert info["max_input_tokens"] == 1_000_000
+        assert info["max_output_tokens"] == 384_000
+        assert info["max_tokens"] == 384_000
 
 
 _FIREWORKS_MODELS = [
