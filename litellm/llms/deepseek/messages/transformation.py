@@ -1252,6 +1252,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         force_disabled: Final = (
             isinstance(requested_thinking, Mapping)
             and requested_thinking.get("type") == "enabled"
+            and bool(anthropic_messages_optional_request_params.get("tools"))
             and not _deepseek_history_supports_thinking(normalized_messages)
         )
         normalized_reasoning_params: Final = _without_adaptive_reasoning_params(
