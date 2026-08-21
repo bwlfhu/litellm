@@ -1772,23 +1772,37 @@ def test_deepseek_anthropic_messages_explicit_disabled_strips_reasoning_from_mix
     ]
 
 
-def test_deepseek_anthropic_messages_enabled_thinking_allows_reasoningless_non_tool_history():
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "deepseek-v4-flash"])
+def test_deepseek_anthropic_messages_enabled_thinking_disables_when_non_tool_history_lost_reasoning(model):
     request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
-        model="deepseek-v4-pro",
+        model=model,
         messages=[
-            {"role": "user", "content": "Hello"},
+            {"role": "user", "content": "First turn"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Replayable reasoning"},
+                    {"type": "text", "text": "First answer"},
+                ],
+            },
+            {"role": "user", "content": "Next turn"},
             {"role": "assistant", "content": [{"type": "text", "text": "An ordinary answer"}]},
+            {"role": "user", "content": "Continue"},
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
             "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
         },
         litellm_params=GenericLiteLLMParams(),
         headers={},
     )
 
-    assert request["thinking"] == {"type": "enabled"}
-    assert request["messages"][1]["content"] == [{"type": "text", "text": "An ordinary answer"}]
+    assert request["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in request
+    assert "output_config" not in request
+    assert request["messages"][1]["content"] == [{"type": "text", "text": "First answer"}]
+    assert request["messages"][3]["content"] == [{"type": "text", "text": "An ordinary answer"}]
 
 
 @pytest.mark.parametrize(("stream", "expected_stream"), [(False, None), (True, True)])

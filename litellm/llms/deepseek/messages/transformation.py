@@ -811,6 +811,29 @@ def deepseek_messages_have_tool_history(messages: Iterable[Mapping[str, object]]
     return any(_chat_message_has_tool_history(message) for message in messages)
 
 
+def _block_has_replayable_reasoning(block: object) -> bool:
+    if not isinstance(block, Mapping) or block.get("type") != "thinking":
+        return False
+    thinking: Final = block.get("thinking")
+    return isinstance(thinking, str) and bool(thinking.strip())
+
+
+def _message_has_replayable_reasoning(message: Mapping[str, object]) -> bool:
+    return _nonempty_reasoning_content(message) is not None or any(
+        _block_has_replayable_reasoning(block)
+        for field in ("content", "thinking_blocks")
+        for block in _message_blocks(message, field)
+    )
+
+
+def _deepseek_history_supports_thinking(messages: Iterable[object]) -> bool:
+    return all(
+        _message_has_replayable_reasoning(message) or _chat_message_has_tool_history(message)
+        for message in messages
+        if isinstance(message, Mapping) and message.get("role") == "assistant"
+    )
+
+
 def _prepare_deepseek_chat_message(
     message: dict,
     require_reasoning: bool,
@@ -1036,7 +1059,7 @@ def _normalize_deepseek_reasoning_effort(effort: object) -> str | None:
             return effort
 
 
-def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> dict:
+def _without_adaptive_reasoning_params(request_params: Mapping[str, object], force_disabled: bool = False) -> dict:
     raw_reasoning_effort: Final = request_params.get("reasoning_effort")
     normalized_reasoning_effort: Final = _normalize_deepseek_reasoning_effort(raw_reasoning_effort)
     without_reasoning_effort: Final = {
@@ -1078,7 +1101,7 @@ def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> 
                 "thinking": {"type": "enabled"},
             }
         return normalized_output_config
-    thinking_type: Final = raw_thinking.get("type")
+    thinking_type: Final = "disabled" if force_disabled else raw_thinking.get("type")
     if thinking_type == "disabled":
         return {
             **without_output_config,
@@ -1225,8 +1248,15 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         _validate_deepseek_content_blocks(messages, model=model)
         normalized_messages: Final = _normalize_deepseek_native_tool_history(messages)
         _validate_deepseek_content_blocks(normalized_messages, model=model)
+        requested_thinking: Final = anthropic_messages_optional_request_params.get("thinking")
+        force_disabled: Final = (
+            isinstance(requested_thinking, Mapping)
+            and requested_thinking.get("type") == "enabled"
+            and not _deepseek_history_supports_thinking(normalized_messages)
+        )
         normalized_reasoning_params: Final = _without_adaptive_reasoning_params(
-            anthropic_messages_optional_request_params
+            anthropic_messages_optional_request_params,
+            force_disabled=force_disabled,
         )
         normalized_tool_choice: Final = _normalized_tool_choice(normalized_reasoning_params.get("tool_choice"))
         request_params_with_tool_choice: Final = {
