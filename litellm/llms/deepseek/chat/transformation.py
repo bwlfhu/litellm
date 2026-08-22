@@ -408,16 +408,6 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         require an explicit thinking parameter.
         """
         optional_params = self._drop_unsupported_tools(optional_params)
-        protocol_context: Final = get_deployment_protocol_context(litellm_params)
-        if (
-            protocol_context is not None
-            and protocol_context.tool_thinking == "disabled"
-            and (
-                bool(optional_params.get("tools"))
-                or any(self._message_has_tool_history(message) for message in messages)
-            )
-        ):
-            optional_params = {**optional_params, "thinking": {"type": "disabled"}}
         thinking_mode_active: Final = self._thinking_mode_active(model=model, optional_params=optional_params)
         messages = self._fill_reasoning_content(
             messages,
@@ -446,16 +436,6 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         fix for multi-turn thinking-mode conversations.
         """
         optional_params = self._drop_unsupported_tools(optional_params)
-        protocol_context: Final = get_deployment_protocol_context(litellm_params)
-        if (
-            protocol_context is not None
-            and protocol_context.tool_thinking == "disabled"
-            and (
-                bool(optional_params.get("tools"))
-                or any(self._message_has_tool_history(message) for message in messages)
-            )
-        ):
-            optional_params = {**optional_params, "thinking": {"type": "disabled"}}
         thinking_mode_active: Final = self._thinking_mode_active(model=model, optional_params=optional_params)
         messages = self._fill_reasoning_content(
             messages,

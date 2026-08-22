@@ -497,7 +497,7 @@ async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history(
     assert body["messages"][1]["tool_calls"] == [tool_call]
 
 
-def test_deployment_tool_thinking_disabled_skips_history_validation():
+def test_deployment_tool_thinking_legacy_field_does_not_disable_thinking():
     context = _build_deployment_protocol_context(
         {
             "deepseek_anthropic_tool_thinking": "disabled",
@@ -519,7 +519,8 @@ def test_deployment_tool_thinking_disabled_skips_history_validation():
         headers={},
     )
 
-    assert body["thinking"] == {"type": "disabled"}
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["messages"][1]["reasoning_content"] == " "
 
 
 @pytest.mark.asyncio
