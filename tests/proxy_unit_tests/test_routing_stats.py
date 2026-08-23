@@ -1,4 +1,6 @@
+import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -6,11 +8,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from litellm.caching.redis_cache import RedisCache
-from litellm.utils import Rules, function_setup
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
-from litellm.proxy.observability.observability_endpoints import get_routing_stats, router as observability_router
+from litellm.proxy.observability.observability_endpoints import (
+    get_model_status,
+    get_routing_stats,
+)
+from litellm.proxy.observability.observability_endpoints import (
+    router as observability_router,
+)
 from litellm.proxy.observability.routing_stats import RoutingStatsLogger, RoutingStatsStore
+from litellm.router_utils.cooldown_cache import CooldownCache
+from litellm.utils import Rules, function_setup
 
 
 class FakePipeline:
@@ -378,13 +387,35 @@ async def test_routing_stats_filters_by_channel_and_model_group(monkeypatch):
     await store.record_terminal(gaccode, "attempt-gaccode", True, now, now)
 
     assert [item["model_id"] for item in await store.query(5, channel="primary-channel")] == ["deployment-primary"]
-    assert [item["model_id"] for item in await store.query(5, model_group="claude-opus-5")] == [
-        "deployment-gaccode"
-    ]
+    assert [item["model_id"] for item in await store.query(5, model_group="claude-opus-5")] == ["deployment-gaccode"]
 
 
 def _user(role: LitellmUserRoles) -> UserAPIKeyAuth:
     return UserAPIKeyAuth(user_role=role)
+
+
+class FakeStatusRedis:
+    def __init__(self, values=None, health_state=None):
+        self.values = values or {}
+        self.health_state = health_state
+        self.batch_get_keys = []
+        self.get_keys = []
+
+    async def async_batch_get_cache(self, key_list):
+        self.batch_get_keys.append(key_list)
+        return {key: self.values[key] for key in key_list if key in self.values}
+
+    async def async_get_cache(self, key):
+        self.get_keys.append(key)
+        return self.health_state
+
+
+def _status_router(redis_cache, deployments):
+    return SimpleNamespace(
+        cache=SimpleNamespace(redis_cache=redis_cache),
+        health_state_cache=SimpleNamespace(staleness_threshold=60.0),
+        get_model_list=lambda: deployments,
+    )
 
 
 @pytest.mark.asyncio
@@ -397,7 +428,7 @@ async def test_routing_stats_endpoint_requires_admin_view_permission():
 
 @pytest.mark.asyncio
 async def test_routing_stats_endpoint_returns_503_without_coordination_redis(monkeypatch):
-    import litellm.proxy.proxy_server as proxy_server
+    from litellm.proxy import proxy_server
 
     monkeypatch.setattr(proxy_server, "redis_usage_cache", None)
     with pytest.raises(HTTPException) as exc_info:
@@ -408,7 +439,7 @@ async def test_routing_stats_endpoint_returns_503_without_coordination_redis(mon
 
 @pytest.mark.asyncio
 async def test_routing_stats_endpoint_returns_redis_aggregates(monkeypatch):
-    import litellm.proxy.proxy_server as proxy_server
+    from litellm.proxy import proxy_server
 
     store, _ = make_store(monkeypatch)
     now = datetime.now(timezone.utc)
@@ -435,6 +466,139 @@ async def test_routing_stats_endpoint_returns_redis_aggregates(monkeypatch):
 
     assert response["window"] == "5m"
     assert response["items"][0]["model_id"] == "deployment-1"
+
+
+@pytest.mark.asyncio
+async def test_model_status_endpoint_requires_admin_view_permission():
+    with pytest.raises(HTTPException) as exc_info:
+        await get_model_status(model=None, user_api_key_dict=_user(LitellmUserRoles.INTERNAL_USER))
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_model_status_endpoint_returns_503_without_router_or_redis(monkeypatch):
+    from litellm.proxy import proxy_server
+
+    monkeypatch.setattr(proxy_server, "llm_router", None)
+    with pytest.raises(HTTPException) as exc_info:
+        await get_model_status(model=None, user_api_key_dict=_user(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY))
+    assert exc_info.value.status_code == 503
+
+    monkeypatch.setattr(
+        proxy_server,
+        "llm_router",
+        _status_router(redis_cache=None, deployments=[]),
+    )
+    monkeypatch.setattr(proxy_server, "redis_usage_cache", None)
+    with pytest.raises(HTTPException) as exc_info:
+        await get_model_status(model=None, user_api_key_dict=_user(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY))
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_model_status_endpoint_returns_only_fresh_redis_exceptions(monkeypatch):
+    from litellm.proxy import proxy_server
+
+    now = time.time()
+    cooldown_key = CooldownCache.get_cooldown_cache_key("deployment-cooldown")
+    redis_cache = FakeStatusRedis(
+        values={
+            cooldown_key: {
+                "exception_received": "upstream failed ****************",
+                "status_code": "502",
+                "timestamp": now,
+                "cooldown_time": 30,
+            }
+        },
+        health_state={
+            "deployment-health": {
+                "is_healthy": False,
+                "timestamp": now,
+                "reason": "background_health_check_failed",
+            },
+            "deployment-stale": {
+                "is_healthy": False,
+                "timestamp": now - 61,
+                "reason": "stale",
+            },
+            "deployment-healthy": {
+                "is_healthy": True,
+                "timestamp": now,
+                "reason": "",
+            },
+        },
+    )
+    deployments = [
+        {"model_name": "model-a", "model_info": {"id": "deployment-cooldown"}},
+        {"model_name": "model-b", "model_info": {"id": "deployment-health"}},
+        {"model_name": "model-c", "model_info": {"id": "deployment-stale"}},
+        {"model_name": "model-d", "model_info": {"id": "deployment-healthy"}},
+    ]
+    monkeypatch.setattr(proxy_server, "llm_router", _status_router(redis_cache, deployments))
+    monkeypatch.setattr(proxy_server, "redis_usage_cache", None)
+
+    response = await get_model_status(
+        model=None,
+        user_api_key_dict=_user(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY),
+    )
+
+    assert response["source"] == "redis"
+    assert response["router_deployments"] == 4
+    assert response["returned"] == 2
+    assert [item["deployment_id"] for item in response["items"]] == [
+        "deployment-cooldown",
+        "deployment-health",
+    ]
+    assert response["items"][0]["states"] == ("cooldown",)
+    assert response["items"][0]["cooldown"]["status_code"] == 502
+    assert response["items"][1]["states"] == ("health_unhealthy",)
+    assert response["items"][1]["health"]["reason"] == "background_health_check_failed"
+    assert len(redis_cache.batch_get_keys) == 1
+    assert len(redis_cache.get_keys) == 1
+
+
+@pytest.mark.asyncio
+async def test_model_status_endpoint_combines_states_and_filters_model(monkeypatch):
+    from litellm.proxy import proxy_server
+
+    now = time.time()
+    deployment_id = "deployment-both"
+    redis_cache = FakeStatusRedis(
+        values={
+            CooldownCache.get_cooldown_cache_key(deployment_id): {
+                "exception_received": "failed",
+                "status_code": 429,
+                "timestamp": now,
+                "cooldown_time": 30,
+            }
+        },
+        health_state={
+            deployment_id: {
+                "is_healthy": False,
+                "timestamp": now,
+                "reason": "background_health_check_failed",
+            }
+        },
+    )
+    deployments = [
+        {
+            "model_name": "model-a",
+            "model_info": {"id": deployment_id, "team_public_model_name": "alias-a"},
+        },
+        {"model_name": "model-b", "model_info": {"id": "deployment-other"}},
+    ]
+    monkeypatch.setattr(proxy_server, "llm_router", _status_router(redis_cache, deployments))
+    monkeypatch.setattr(proxy_server, "redis_usage_cache", None)
+
+    response = await get_model_status(
+        model="alias-a",
+        user_api_key_dict=_user(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY),
+    )
+
+    assert response["router_deployments"] == 1
+    assert response["returned"] == 1
+    assert response["items"][0]["states"] == ("cooldown", "health_unhealthy")
 
 
 def test_routing_stats_logger_ignores_unrouted_calls():
@@ -587,7 +751,7 @@ def test_routing_stats_uses_one_redis_cluster_slot_per_terminal_attempt(monkeypa
 
 
 def test_routing_stats_asgi_validates_window_parameter(monkeypatch):
-    import litellm.proxy.proxy_server as proxy_server
+    from litellm.proxy import proxy_server
 
     store, _ = make_store(monkeypatch)
     monkeypatch.setattr(proxy_server, "redis_usage_cache", store.redis_cache)
