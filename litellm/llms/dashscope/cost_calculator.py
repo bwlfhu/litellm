@@ -5,7 +5,7 @@ Handles tiered pricing and prompt caching scenarios.
 """
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 from litellm.litellm_core_utils.llm_cost_calc.tiered_pricing import calculate_tiered_cost
 from litellm.types.utils import ModelInfo, Usage
@@ -41,6 +41,26 @@ def _extract_token_breakdown(usage: Usage) -> TokenBreakdown:
     completion_tokens: Final = (usage.completion_tokens or 0) - reasoning_tokens
 
     return TokenBreakdown(text_tokens, cached_tokens, completion_tokens, reasoning_tokens)
+
+
+_THINKING_RATE_KEYS: Final = (
+    ("input_cost_per_token", "input_cost_per_token_thinking"),
+    ("cache_read_input_token_cost", "cache_read_input_token_cost_thinking"),
+    ("output_cost_per_token", "output_cost_per_token_thinking"),
+)
+
+
+def _with_thinking_rates(model_info: ModelInfo, breakdown: TokenBreakdown) -> ModelInfo:
+    if breakdown.reasoning_tokens == 0:
+        return model_info
+    overrides: Final = {
+        base_key: model_info.get(thinking_key)
+        for base_key, thinking_key in _THINKING_RATE_KEYS
+        if model_info.get(thinking_key) is not None
+    }
+    if not overrides:
+        return model_info
+    return cast("ModelInfo", {**model_info, **overrides})
 
 
 def _calculate_prompt_cost(
@@ -120,8 +140,9 @@ def cost_per_token(model: str, usage: Usage) -> tuple[float, float]:
     Returns:
         Tuple[float, float] - (prompt_cost_in_usd, completion_cost_in_usd)
     """
-    model_info: Final = get_model_info(model=model, custom_llm_provider="dashscope")
+    base_model_info: Final = get_model_info(model=model, custom_llm_provider="dashscope")
     breakdown: Final = _extract_token_breakdown(usage)
+    model_info: Final = _with_thinking_rates(model_info=base_model_info, breakdown=breakdown)
     tiered_pricing = model_info.get("tiered_pricing") if isinstance(model_info.get("tiered_pricing"), list) else None
 
     prompt_cost = _calculate_prompt_cost(breakdown=breakdown, model_info=model_info, tiered_pricing=tiered_pricing)

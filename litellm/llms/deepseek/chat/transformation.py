@@ -8,11 +8,14 @@ from typing import Any, Final, Literal, cast, overload
 
 import litellm
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
-    handle_messages_with_content_list_to_str_conversion,
+    convert_content_list_to_str,
+    extract_search_results_text,
 )
+from litellm.llms.deepseek.common_utils import warn_missing_reasoning_placeholders
 from litellm.router_protocol import get_deployment_protocol_context
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues
+from litellm.utils import is_thinking_always_on, supports_reasoning, supports_vision
 
 from ...openai.chat.gpt_transformation import OpenAIGPTConfig
 
@@ -275,7 +278,7 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         missing_reasoning: Final = (
             protocol_context.missing_reasoning if protocol_context is not None else None
         ) or "placeholder"
-        return [  # mutable-ok: chat transformation contract returns a concrete message list
+        transformed: Final = [  # mutable-ok: chat transformation contract returns a concrete message list
             self._fill_reasoning_content_message(
                 message,
                 model=model,
@@ -284,6 +287,8 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
             )
             for message in messages
         ]
+        warn_missing_reasoning_placeholders(transformed)
+        return transformed
 
     @overload
     def _transform_messages(
@@ -301,27 +306,74 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
     def _transform_messages(
         self, messages: list[AllMessageValues], model: str, is_async: bool = False
     ) -> list[AllMessageValues] | Coroutine[Any, Any, list[AllMessageValues]]:
-        """
-        DeepSeek does not support content in list format.
-        """
-        messages = handle_messages_with_content_list_to_str_conversion(messages)
+        forward_images: Final = any(isinstance(message.get("content"), list) for message in messages) and supports_vision(
+            model=model,
+            custom_llm_provider="deepseek",
+        )
+        transformed: Final = [
+            self._forward_or_collapse_content(message=message, forward_images=forward_images) for message in messages
+        ]
         if is_async:
-            return super()._transform_messages(messages=messages, model=model, is_async=True)
+            return super()._transform_messages(messages=transformed, model=model, is_async=True)
         else:
-            return super()._transform_messages(messages=messages, model=model, is_async=False)
+            return super()._transform_messages(messages=transformed, model=model, is_async=False)
+
+    def _forward_or_collapse_content(
+        self,
+        message: AllMessageValues,
+        forward_images: bool,
+    ) -> AllMessageValues:
+        content: Final = message.get("content")
+        if (
+            forward_images
+            and isinstance(content, list)
+            and message.get("role") == "user"
+            and all(self._is_forwardable_content_block(block) for block in content)
+            and any(isinstance(block, Mapping) and block.get("type") == "image_url" for block in content)
+        ):
+            search_text: Final = extract_search_results_text(message.get("search_results"))
+            forwarded_content: Final = [*content, {"type": "text", "text": search_text}] if search_text else content
+            forwarded: Final = {
+                **{key: value for key, value in message.items() if key != "search_results"},
+                "content": forwarded_content,
+            }
+            return cast(AllMessageValues, forwarded)
+
+        collapsed: Final = convert_content_list_to_str(message=message)
+        if not collapsed or collapsed == content:
+            return message
+        return cast(AllMessageValues, {**message, "content": collapsed})
+
+    @staticmethod
+    def _is_forwardable_content_block(block: object) -> bool:
+        if not isinstance(block, Mapping):
+            return False
+        block_type: Final = block.get("type")
+        if block_type == "text":
+            return isinstance(block.get("text"), str)
+        if block_type != "image_url":
+            return False
+        image_url: Final = block.get("image_url")
+        if isinstance(image_url, str):
+            return bool(image_url)
+        if not isinstance(image_url, Mapping):
+            return False
+        url: Final = image_url.get("url")
+        return isinstance(url, str) and bool(url)
 
     def _thinking_mode_active(self, model: str, optional_params: dict) -> bool:
         """
         Returns True when thinking mode is active for this request.
         """
+        if not supports_reasoning(model=model, custom_llm_provider="deepseek"):
+            return False
         thinking: Final = optional_params.get("thinking")
         thinking_type: Final = thinking.get("type") if isinstance(thinking, Mapping) else None
         if thinking_type == "disabled":
             return False
         if thinking_type == "enabled":
             return True
-        normalized_model: Final = model.rsplit("/", maxsplit=1)[-1].lower()
-        return normalized_model.startswith("deepseek-v4")
+        return is_thinking_always_on(model=model, custom_llm_provider="deepseek")
 
     @staticmethod
     def _drop_unsupported_tools(optional_params: dict) -> dict:

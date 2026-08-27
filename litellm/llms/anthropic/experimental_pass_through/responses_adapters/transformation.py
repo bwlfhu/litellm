@@ -6,8 +6,13 @@ path used for OpenAI and Azure models.
 """
 
 import json
+from collections.abc import Iterable, Mapping
+from itertools import groupby
 from typing import Any, Final, cast
 
+from litellm.litellm_core_utils.prompt_templates.common_utils import (
+    responses_reasoning_item_from_thinking_blocks,
+)
 from litellm.litellm_core_utils.reasoning_effort_utils import (
     reasoning_effort_from_thinking_budget,
 )
@@ -29,7 +34,11 @@ from litellm.types.llms.anthropic_messages.anthropic_response import (
     AnthropicMessagesResponse,
     AnthropicUsage,
 )
-from litellm.types.llms.openai import ResponseAPIUsage, ResponsesAPIResponse
+from litellm.types.llms.openai import (
+    ChatCompletionThinkingBlock,
+    ResponseAPIUsage,
+    ResponsesAPIResponse,
+)
 
 
 class LiteLLMAnthropicToResponsesAPIAdapter:
@@ -55,6 +64,52 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
 
         chat_usage = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(raw_usage)
         return LiteLLMAnthropicMessagesAdapter._translate_openai_usage_to_anthropic_usage(chat_usage)
+
+    @staticmethod
+    def _summary_part_text(part: object) -> str:
+        if isinstance(part, Mapping):
+            return str(part.get("text") or "")
+        return str(getattr(part, "text", None) or "")
+
+    @classmethod
+    def _thinking_blocks_from_reasoning_item(
+        cls,
+        summary: Iterable[object],
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            AnthropicResponseContentBlockThinking(
+                type="thinking",
+                thinking=text,
+                signature=None,
+            ).model_dump()
+            for part in summary
+            if (text := cls._summary_part_text(part))
+        )
+
+    @staticmethod
+    def _assistant_block_group_key(indexed_block: tuple[int, Mapping[str, Any]]) -> str:
+        index, block = indexed_block
+        return "thinking" if block.get("type") == "thinking" else f"block:{index}"
+
+    @classmethod
+    def _assistant_group_to_input_item(
+        cls,
+        group: tuple[Mapping[str, Any], ...],
+    ) -> dict[str, Any] | None:
+        first: Final = group[0]
+        block_type: Final = first.get("type")
+        if block_type == "thinking":
+            blocks: Final = cast(tuple[ChatCompletionThinkingBlock, ...], group)
+            reasoning_item: Final = responses_reasoning_item_from_thinking_blocks(blocks)
+            return None if reasoning_item is None else dict(reasoning_item)
+        if block_type == "tool_use":
+            return {
+                "type": "function_call",
+                "call_id": first.get("id", ""),
+                "name": first.get("name", ""),
+                "arguments": json.dumps(first.get("input", {})),
+            }
+        return None
 
     # ------------------------------------------------------------------ #
     # Request translation: Anthropic -> Responses API                     #
@@ -154,27 +209,17 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
                         }
                     )
                 elif isinstance(content, list):
-                    asst_parts: list[dict[str, Any]] = []
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type")
-                        if btype == "text":
-                            asst_parts.append({"type": "output_text", "text": block.get("text", "")})
-                        elif btype == "tool_use":
-                            # tool_use becomes a top-level function_call item
-                            input_items.append(
-                                {
-                                    "type": "function_call",
-                                    "call_id": block.get("id", ""),
-                                    "name": block.get("name", ""),
-                                    "arguments": json.dumps(block.get("input", {})),
-                                }
-                            )
-                        elif btype == "thinking":
-                            thinking_text = block.get("thinking", "")
-                            if thinking_text:
-                                asst_parts.append({"type": "output_text", "text": thinking_text})
+                    blocks: Final = tuple(block for block in content if isinstance(block, dict))
+                    input_items.extend(
+                        item
+                        for _, grouped in groupby(enumerate(blocks), key=self._assistant_block_group_key)
+                        if (item := self._assistant_group_to_input_item(tuple(block for _, block in grouped))) is not None
+                    )
+                    asst_parts: Final = [
+                        {"type": "output_text", "text": block.get("text", "")}
+                        for block in blocks
+                        if block.get("type") == "text"
+                    ]
                     if asst_parts:
                         input_items.append(
                             {
@@ -409,16 +454,7 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
 
         for item in response.output:
             if isinstance(item, ResponseReasoningItem):
-                for summary in item.summary:
-                    text = getattr(summary, "text", "")
-                    if text:
-                        content.append(
-                            AnthropicResponseContentBlockThinking(
-                                type="thinking",
-                                thinking=text,
-                                signature=None,
-                            ).model_dump()
-                        )
+                content.extend(self._thinking_blocks_from_reasoning_item(item.summary))
 
             elif isinstance(item, ResponseOutputMessage):
                 for part in item.content:
@@ -450,6 +486,12 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
                             content.append(
                                 AnthropicResponseContentBlockText(type="text", text=part.get("text", "")).model_dump()
                             )
+                elif item_type == "reasoning":
+                    content.extend(
+                        self._thinking_blocks_from_reasoning_item(
+                            cast(Iterable[object], item.get("summary") or ()),
+                        )
+                    )
                 elif item_type == "function_call":
                     try:
                         input_data = json.loads(item.get("arguments", "{}"))

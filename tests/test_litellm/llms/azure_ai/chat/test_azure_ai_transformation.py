@@ -262,3 +262,27 @@ def test_drop_tool_level_extra_fields_strips_copilot_mcp_server_name():
         assert "copilot_mcp_server_name" not in tool
     assert result["tools"][0]["type"] == "function"
     assert result["tools"][1]["function"]["name"] == "read_file"
+
+
+def test_transform_messages_strips_internal_reasoning_fields_with_image():
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Here is the image."},
+                {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "Internal.", "signature": "sig1"}],
+            "reasoning_content": "Internal.",
+            "provider_specific_fields": {"reasoning": "Internal."},
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+    result = AzureAIStudioConfig()._transform_messages(messages=messages, model="test-model")
+
+    assert result[0]["content"] == messages[0]["content"]
+    assert "thinking_blocks" not in result[0]
+    assert "reasoning_content" not in result[0]
+    assert "provider_specific_fields" not in result[0]
+    assert "cache_control" not in result[0]

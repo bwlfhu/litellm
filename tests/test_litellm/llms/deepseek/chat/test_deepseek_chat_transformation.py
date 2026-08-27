@@ -1,8 +1,64 @@
+from copy import deepcopy
+
 import pytest
 
 import litellm
 from litellm.llms.deepseek.chat.transformation import DeepSeekChatConfig
 from litellm.router_protocol import _build_deployment_protocol_context
+
+
+@pytest.fixture
+def deepseek_vision_models():
+    model_names = (
+        "deepseek-v4-flash-vision-exp",
+        "deepseek/deepseek-v4-flash-vision-exp",
+    )
+    prior_entries = {name: litellm.model_cost.get(name) for name in model_names}
+    litellm.register_model(
+        {
+            name: {
+                "litellm_provider": "deepseek",
+                "mode": "chat",
+                "supports_vision": True,
+            }
+            for name in model_names
+        }
+    )
+    yield
+    for name, prior_entry in prior_entries.items():
+        if prior_entry is None:
+            litellm.model_cost.pop(name, None)
+        else:
+            litellm.model_cost[name] = prior_entry
+
+
+@pytest.fixture
+def deepseek_always_on_models():
+    model_names = (
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+        "deepseek/review-prefixed-only-v4",
+    )
+    prior_entries = {name: litellm.model_cost.get(name) for name in model_names}
+    litellm.register_model(
+        {
+            name: {
+                "litellm_provider": "deepseek",
+                "mode": "chat",
+                "supports_reasoning": True,
+                "thinking_always_on": True,
+            }
+            for name in model_names
+        }
+    )
+    yield
+    for name, prior_entry in prior_entries.items():
+        if prior_entry is None:
+            litellm.model_cost.pop(name, None)
+        else:
+            litellm.model_cost[name] = prior_entry
 
 
 def _function_tool(name: str) -> dict:
@@ -165,6 +221,111 @@ async def test_async_transform_request_strips_unsupported_tools_from_body():
     assert body["tools"][0]["function"]["name"] == "shell"
 
 
+def test_vision_model_preserves_user_image_content_list(deepseek_vision_models):
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this image"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://example.com/image.jpg", "detail": "auto"},
+            },
+        ],
+    }
+
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-v4-flash-vision-exp",
+        messages=[message],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][0]["content"] == message["content"]
+
+
+async def test_async_vision_model_preserves_image_and_search_results(deepseek_vision_models):
+    body = await DeepSeekChatConfig().async_transform_request(
+        model="deepseek/deepseek-v4-flash-vision-exp",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Use this context"},
+                    {"type": "image_url", "image_url": "https://example.com/image.jpg"},
+                ],
+                "search_results": [{"source": "kb", "content": [{"text": "result"}]}],
+            }
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][0]["content"][-1] == {"type": "text", "text": "kbresult"}
+    assert "search_results" not in body["messages"][0]
+
+
+@pytest.mark.parametrize("search_results", [[], [{"rank": 1}]])
+def test_vision_model_drops_search_results_without_extractable_text(deepseek_vision_models, search_results):
+    content = [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+    ]
+
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-v4-flash-vision-exp",
+        messages=[{"role": "user", "content": content, "search_results": search_results}],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][0]["content"] == content
+    assert "search_results" not in body["messages"][0]
+
+
+@pytest.mark.parametrize("model", ["deepseek-chat", "deepseek-v4-flash"])
+def test_non_vision_model_collapses_image_content_list(model):
+    body = DeepSeekChatConfig().transform_request(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+                ],
+            }
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][0]["content"] == "Describe this image"
+
+
+def test_vision_model_collapses_malformed_image_content_list(deepseek_vision_models):
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-v4-flash-vision-exp",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image"},
+                    {"type": "image_url", "image_url": {}},
+                ],
+            }
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][0]["content"] == "Describe this image"
+
+
 def test_thinking_mode_does_not_fill_ordinary_assistant_reasoning():
     body = DeepSeekChatConfig().transform_request(
         model="deepseek-reasoner",
@@ -202,7 +363,7 @@ def test_thinking_mode_backfills_missing_reasoning_for_tool_history():
 
 
 @pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek/deepseek-v4-pro"])
-def test_v4_thinking_mode_is_active_by_default(model):
+def test_v4_thinking_mode_is_active_by_default(model, deepseek_always_on_models):
     body = DeepSeekChatConfig().transform_request(
         model=model,
         messages=[
@@ -233,21 +394,39 @@ def test_reasoning_capable_v3_thinking_mode_requires_explicit_enablement():
     )
 
 
-@pytest.mark.parametrize("model", ["deepseek-v4-pro", "deepseek/deepseek-v4-future"])
-def test_v4_chat_models_default_to_thinking(model):
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "deepseek/deepseek-v4-flash"])
+def test_registered_v4_chat_models_default_to_thinking(model, deepseek_always_on_models):
     config = DeepSeekChatConfig()
 
     assert config._thinking_mode_active(model=model, optional_params={}) is True
 
 
-@pytest.mark.parametrize("model", ["deepseek-v3.2", "router-alias", "deepseek-v4-future"])
-def test_explicit_enabled_chat_thinking_overrides_model_detection(model):
+def test_prefixed_model_metadata_preserves_thinking_always_on(deepseek_always_on_models):
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek/review-prefixed-only-v4",
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_function_tool("shell")],
+            }
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["messages"][0]["reasoning_content"] == " "
+
+
+@pytest.mark.parametrize("model", ["router-alias", "deepseek-v4-future"])
+def test_unknown_models_do_not_activate_thinking(model):
     assert (
         DeepSeekChatConfig()._thinking_mode_active(
             model=model,
-            optional_params={"thinking": {"type": "enabled"}},
+            optional_params={},
         )
-        is True
+        is False
     )
 
 
@@ -476,7 +655,7 @@ def test_thinking_mode_replaces_whitespace_reasoning_with_placeholder():
 
 
 @pytest.mark.asyncio
-async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history():
+async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history(deepseek_always_on_models):
     tool_call = _function_tool_call("shell")
     body = await DeepSeekChatConfig().async_transform_request(
         model="deepseek-v4-pro",
@@ -495,6 +674,37 @@ async def test_async_thinking_mode_backfills_missing_reasoning_for_tool_history(
 
     assert body["messages"][1]["reasoning_content"] == " "
     assert body["messages"][1]["tool_calls"] == [tool_call]
+
+
+def test_placeholder_warning_is_aggregated_and_history_is_immutable(caplog):
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_function_tool_call("shell")],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_function_tool_call("apply_patch")],
+        },
+    ]
+    original_messages = deepcopy(messages)
+    caplog.set_level("WARNING", logger=litellm.verbose_logger.name)
+
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-reasoner",
+        messages=messages,
+        optional_params={"thinking": {"type": "enabled"}},
+        litellm_params={},
+        headers={},
+    )
+
+    warnings = [record.getMessage() for record in caplog.records if "single-space placeholder" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "2 assistant message(s)" in warnings[0]
+    assert sum(message.get("reasoning_content") == " " for message in body["messages"]) == 2
+    assert messages == original_messages
 
 
 def test_deployment_tool_thinking_legacy_field_does_not_disable_thinking():

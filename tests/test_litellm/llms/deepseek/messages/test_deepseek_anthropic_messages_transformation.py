@@ -1908,6 +1908,78 @@ def test_deepseek_anthropic_messages_placeholder_is_exactly_one_space():
     assert request["thinking"] == {"type": "enabled"}
 
 
+def test_deepseek_anthropic_placeholder_warning_is_aggregated(caplog):
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "first_tool", "input": {}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_2", "name": "second_tool", "input": {}},
+            ],
+        },
+    ]
+    original_messages = deepcopy(messages)
+    caplog.set_level("WARNING", logger=litellm.verbose_logger.name)
+
+    request = DeepSeekAnthropicMessagesConfig(missing_reasoning="placeholder").transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "enabled"}},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    warnings = [record.getMessage() for record in caplog.records if "single-space placeholder" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "2 assistant message(s)" in warnings[0]
+    assert sum(message["content"][0] == {"type": "thinking", "thinking": " "} for message in request["messages"]) == 2
+    assert messages == original_messages
+
+
+def test_deepseek_chat_bridge_placeholder_warning_is_aggregated(caplog):
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "first_tool", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "second_tool", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
+    caplog.set_level("WARNING", logger=litellm.verbose_logger.name)
+
+    prepared = prepare_deepseek_chat_history(
+        messages,
+        require_reasoning=True,
+        missing_reasoning="placeholder",
+    )
+
+    warnings = [record.getMessage() for record in caplog.records if "single-space placeholder" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "2 assistant message(s)" in warnings[0]
+    assert sum(message["thinking_blocks"][0]["thinking"] == " " for message in prepared) == 2
+
+
 def test_deepseek_anthropic_messages_prefers_real_sidecar_reasoning_to_placeholder():
     request = DeepSeekAnthropicMessagesConfig(missing_reasoning="placeholder").transform_anthropic_messages_request(
         model="deepseek-v4-pro",

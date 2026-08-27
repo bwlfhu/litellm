@@ -2521,6 +2521,10 @@ def supports_reasoning(model: str, custom_llm_provider: str | None = None) -> bo
     return _supports_factory(model=model, custom_llm_provider=custom_llm_provider, key="supports_reasoning")
 
 
+def is_thinking_always_on(model: str, custom_llm_provider: str | None = None) -> bool:
+    return _supports_factory(model=model, custom_llm_provider=custom_llm_provider, key="thinking_always_on")
+
+
 def supports_native_structured_output(model: str, custom_llm_provider: str | None = None) -> bool:
     """
     Check if the given model supports native structured outputs and return a boolean value.
@@ -5524,6 +5528,9 @@ def _get_model_info_helper(
                 cache_read_input_token_cost_above_512k_tokens=_model_info.get(
                     "cache_read_input_token_cost_above_512k_tokens", None
                 ),
+                cache_read_input_token_cost_thinking=_model_info.get(
+                    "cache_read_input_token_cost_thinking", None
+                ),
                 cache_read_input_token_cost_flex=_model_info.get("cache_read_input_token_cost_flex", None),
                 cache_read_input_token_cost_priority=_model_info.get("cache_read_input_token_cost_priority", None),
                 cache_creation_input_token_cost_above_1hr=_model_info.get(
@@ -5543,6 +5550,7 @@ def _get_model_info_helper(
                     "input_cost_per_token_above_272k_tokens_flex", None
                 ),
                 input_cost_per_token_above_512k_tokens=_model_info.get("input_cost_per_token_above_512k_tokens", None),
+                input_cost_per_token_thinking=_model_info.get("input_cost_per_token_thinking", None),
                 input_cost_per_query=_model_info.get("input_cost_per_query", None),
                 input_cost_per_second=_model_info.get("input_cost_per_second", None),
                 input_cost_per_audio_token=_model_info.get("input_cost_per_audio_token", None),
@@ -5566,6 +5574,7 @@ def _get_model_info_helper(
                 output_cost_per_character=_model_info.get("output_cost_per_character", None),
                 output_cost_per_reasoning_token=_model_info.get("output_cost_per_reasoning_token", None),
                 output_cost_per_reasoning_token_flex=_model_info.get("output_cost_per_reasoning_token_flex", None),
+                output_cost_per_token_thinking=_model_info.get("output_cost_per_token_thinking", None),
                 output_cost_per_reasoning_token_priority=_model_info.get(
                     "output_cost_per_reasoning_token_priority", None
                 ),
@@ -5621,6 +5630,7 @@ def _get_model_info_helper(
                 supports_url_context=_model_info.get("supports_url_context", None),
                 supports_reasoning=_model_info.get("supports_reasoning", None),
                 supports_adaptive_thinking=_model_info.get("supports_adaptive_thinking", None),
+                thinking_always_on=_model_info.get("thinking_always_on", None),
                 supports_mid_conversation_system=_model_info.get("supports_mid_conversation_system", None),
                 supports_none_reasoning_effort=_model_info.get("supports_none_reasoning_effort", None),
                 supports_minimal_reasoning_effort=_model_info.get("supports_minimal_reasoning_effort", None),

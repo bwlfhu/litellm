@@ -3419,3 +3419,81 @@ def test_output_item_done_with_stream_map_keeps_empty_delta():
     )
     assert chunk.choices[0].delta.tool_calls is None
     assert chunk.choices[0].finish_reason is None
+
+
+def test_assistant_message_with_tool_calls_keeps_content_and_thinking():
+    handler = LiteLLMResponsesTransformationHandler()
+    messages = [
+        {
+            "role": "assistant",
+            "content": "Let me look that up.",
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "I need the weather tool.", "signature": "sig1"}
+            ],
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "Denver"}'},
+                }
+            ],
+        }
+    ]
+
+    input_items, _ = handler.convert_chat_completion_messages_to_responses_api(messages)
+
+    assert [item["type"] for item in input_items] == ["reasoning", "message", "function_call"]
+    assert input_items[0] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "I need the weather tool."}],
+    }
+    assert input_items[1]["content"] == [{"type": "output_text", "text": "Let me look that up."}]
+
+
+def test_thinking_only_assistant_turn_emits_reasoning_item():
+    handler = LiteLLMResponsesTransformationHandler()
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "thinking_blocks": [{"type": "thinking", "thinking": "Still considering.", "signature": "sig1"}],
+        }
+    ]
+
+    input_items, _ = handler.convert_chat_completion_messages_to_responses_api(messages)
+
+    assert input_items == [
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Still considering."}],
+        }
+    ]
+
+
+def test_stored_reasoning_items_take_precedence_over_thinking_blocks():
+    handler = LiteLLMResponsesTransformationHandler()
+    messages = [
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "reasoning_items": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_real",
+                    "summary": [{"type": "summary_text", "text": "Stored reasoning."}],
+                }
+            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "Derived reasoning.", "signature": "sig1"}],
+        }
+    ]
+
+    input_items, _ = handler.convert_chat_completion_messages_to_responses_api(messages)
+
+    reasoning_items = [item for item in input_items if item["type"] == "reasoning"]
+    assert reasoning_items == [
+        {
+            "type": "reasoning",
+            "id": "rs_real",
+            "summary": [{"type": "summary_text", "text": "Stored reasoning."}],
+        }
+    ]

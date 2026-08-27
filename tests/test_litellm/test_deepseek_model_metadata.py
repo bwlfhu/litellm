@@ -18,11 +18,7 @@ sys.path.insert(
 )  # Adds the parent directory to the system path
 
 import litellm
-from litellm.utils import (
-    _supports_factory,
-    supports_response_schema,
-)
-
+from litellm.utils import _supports_factory, supports_response_schema
 
 # ---------------------------------------------------------------------------
 # Data-level tests – verify the JSON files are in sync
@@ -94,6 +90,37 @@ class TestDeepSeekModelCostEntries:
             data = json.load(f)
         entry = data.get("deepseek/deepseek-reasoner", {})
         assert entry.get("supports_response_schema") is True
+
+    def test_recent_provider_entries_match_in_both_cost_maps(self):
+        main_path = os.path.join(
+            os.path.dirname(os.path.dirname(litellm.__file__)),
+            "model_prices_and_context_window.json",
+        )
+        with open(main_path, encoding="utf-8") as f:
+            main_data = json.load(f)
+        backup_data = _load_backup_json()
+
+        for model in (
+            "dashscope/deepseek-v4-pro-0813",
+            "scaleway/deepseek-v4-flash-0731",
+        ):
+            assert main_data[model] == backup_data[model]
+
+    def test_dashscope_deepseek_v4_pro_thinking_prices_are_mapped(self):
+        entry = _load_backup_json()["dashscope/deepseek-v4-pro-0813"]
+
+        assert entry["input_cost_per_token_thinking"] == 1.272e-06
+        assert entry["cache_read_input_token_cost_thinking"] == 1.27e-07
+        assert entry["output_cost_per_token_thinking"] == 3.816e-06
+        assert entry["supports_reasoning"] is True
+
+    def test_scaleway_deepseek_v4_flash_cache_price_is_mapped(self):
+        entry = _load_backup_json()["scaleway/deepseek-v4-flash-0731"]
+
+        assert entry["input_cost_per_token"] == 4e-07
+        assert entry["cache_read_input_token_cost"] == 8e-08
+        assert entry["output_cost_per_token"] == 8e-07
+        assert entry["supports_reasoning"] is True
 
 
 # ---------------------------------------------------------------------------

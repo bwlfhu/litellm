@@ -132,7 +132,7 @@ class AnthropicResponsesStreamWrapper:
                     {
                         "type": "content_block_start",
                         "index": block_idx,
-                        "content_block": {"type": "thinking", "thinking": ""},
+                        "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                     }
                 )
             return

@@ -23,6 +23,7 @@ from litellm.llms.anthropic.experimental_pass_through.messages.streaming_iterato
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
+from litellm.llms.deepseek.common_utils import warn_missing_reasoning_placeholders
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
 from litellm.types.router import GenericLiteLLMParams
@@ -780,7 +781,7 @@ def _deepseek_history(
     require_reasoning: bool,
     missing_reasoning: Literal["placeholder"] | None,
 ) -> list[dict]:
-    return [
+    transformed: Final = [
         _deepseek_history_message(
             message,
             require_reasoning=require_reasoning,
@@ -788,6 +789,8 @@ def _deepseek_history(
         )
         for message in messages
     ]
+    warn_missing_reasoning_placeholders(transformed)
+    return transformed
 
 
 def _message_blocks(message: Mapping[str, object], field: str) -> Sequence[object]:
@@ -988,13 +991,15 @@ def prepare_deepseek_chat_history(
         )
         for message in messages
     ]
-    return [
+    upgraded: Final = [
         _upgrade_legacy_function_result(
             _upgrade_legacy_function_call(message, message_index),
             _legacy_function_result_call_id(prepared_messages, message_index),
         )
         for message_index, message in enumerate(prepared_messages)
     ]
+    warn_missing_reasoning_placeholders(upgraded)
+    return upgraded
 
 
 def _normalized_tool_choice(tool_choice: object) -> object:

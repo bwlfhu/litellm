@@ -28,6 +28,14 @@ class AzureFoundryErrorStrings(str, enum.Enum):
     SET_EXTRA_PARAMETERS_TO_PASS_THROUGH = "Set extra-parameters to 'pass-through'"
 
 
+NON_OPENAI_SPEC_MESSAGE_FIELDS: Final = (
+    "thinking_blocks",
+    "reasoning_content",
+    "provider_specific_fields",
+    "cache_control",
+)
+
+
 class AzureAIStudioConfig(OpenAIConfig):
     def get_supported_openai_params(self, model: str) -> list:
         model_supports_tool_choice = True  # azure ai supports this by default
@@ -171,6 +179,8 @@ class AzureAIStudioConfig(OpenAIConfig):
             2. If message contains an image or audio, send as is (user-intended)
         """
         for message in messages:
+            for field in NON_OPENAI_SPEC_MESSAGE_FIELDS:
+                message.pop(field, None)
             # Do nothing if the message contains an image or audio
             if _audio_or_image_in_message_content(message):
                 continue

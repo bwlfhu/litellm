@@ -21,6 +21,9 @@ from pydantic import BaseModel
 import litellm
 from litellm import ModelResponse
 from litellm._logging import verbose_logger
+from litellm.litellm_core_utils.prompt_templates.common_utils import (
+    responses_reasoning_item_from_thinking_blocks,
+)
 from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
 from litellm.llms.base_llm.bridges.completion_transformation import (
     CompletionTransformationBridge,
@@ -68,6 +71,17 @@ def _get_reasoning_items(
     if items:
         return items
     return []
+
+
+def _reasoning_input_items(msg: "AllMessageValues") -> list[dict[str, object]]:
+    items: Final = _get_reasoning_items(msg)
+    stored: Final = [_reasoning_item_to_response_input(item) for item in items]
+    if stored:
+        return stored
+    raw_blocks: Final = msg.get("thinking_blocks") or ()
+    blocks: Final = cast("Iterable[ChatCompletionThinkingBlock]", raw_blocks)
+    from_thinking: Final = responses_reasoning_item_from_thinking_blocks(blocks)
+    return [] if from_thinking is None else [dict(from_thinking)]
 
 
 def _build_reasoning_item(
@@ -317,8 +331,15 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                         )
                     )
             elif role == "assistant" and tool_calls and isinstance(tool_calls, list):
-                for r_item in _get_reasoning_items(msg):
-                    input_items.append(_reasoning_item_to_response_input(r_item))
+                input_items.extend(_reasoning_input_items(msg))
+                if content:
+                    input_items.append(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": self._convert_content_to_responses_format(content, "assistant"),
+                        }
+                    )
                 for tool_call in tool_calls:
                     function = tool_call.get("function")
                     custom = tool_call.get("custom")
@@ -345,8 +366,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                         raise ValueError(f"tool call not supported: {tool_call}")
             elif content is not None:
                 if role == "assistant":
-                    for r_item in _get_reasoning_items(msg):
-                        input_items.append(_reasoning_item_to_response_input(r_item))
+                    input_items.extend(_reasoning_input_items(msg))
                 input_items.append(
                     {
                         "type": "message",
@@ -354,6 +374,8 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                         "content": self._convert_content_to_responses_format(content, cast(str, role)),
                     }
                 )
+            elif role == "assistant":
+                input_items.extend(_reasoning_input_items(msg))
 
         return input_items, instructions
 

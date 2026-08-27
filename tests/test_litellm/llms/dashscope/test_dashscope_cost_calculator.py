@@ -8,7 +8,6 @@ Tests the cost calculation for Dashscope models including:
 - Correctly calculates costs for token counts exceeding the highest defined tier.
 """
 
-import json
 import math
 import os
 import sys
@@ -22,7 +21,11 @@ import litellm
 from litellm.llms.dashscope.cost_calculator import (
     cost_per_token as dashscope_cost_per_token,
 )
-from litellm.types.utils import Usage, PromptTokensDetailsWrapper
+from litellm.types.utils import (
+    CompletionTokensDetailsWrapper,
+    PromptTokensDetailsWrapper,
+    Usage,
+)
 
 
 class TestDashscopeCostCalculator:
@@ -33,6 +36,49 @@ class TestDashscopeCostCalculator:
         """Set up the model cost map for testing by loading it locally."""
         os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
         litellm.model_cost = litellm.get_model_cost_map(url="")
+
+    def test_deepseek_v4_pro_thinking_mode_uses_thinking_rates(self):
+        usage = Usage(
+            prompt_tokens=1000,
+            completion_tokens=500,
+            prompt_tokens_details=PromptTokensDetailsWrapper(cached_tokens=200),
+            completion_tokens_details=CompletionTokensDetailsWrapper(reasoning_tokens=300),
+        )
+
+        prompt_cost, completion_cost = dashscope_cost_per_token(
+            model="deepseek-v4-pro-0813", usage=usage
+        )
+
+        model_info = litellm.get_model_info("dashscope/deepseek-v4-pro-0813")
+        expected_prompt_cost = (
+            800 * model_info["input_cost_per_token_thinking"]
+            + 200 * model_info["cache_read_input_token_cost_thinking"]
+        )
+        expected_completion_cost = 500 * model_info["output_cost_per_token_thinking"]
+
+        assert math.isclose(prompt_cost, expected_prompt_cost, rel_tol=1e-10)
+        assert math.isclose(completion_cost, expected_completion_cost, rel_tol=1e-10)
+
+    def test_deepseek_v4_pro_non_thinking_mode_uses_base_rates(self):
+        usage = Usage(
+            prompt_tokens=1000,
+            completion_tokens=500,
+            prompt_tokens_details=PromptTokensDetailsWrapper(cached_tokens=200),
+        )
+
+        prompt_cost, completion_cost = dashscope_cost_per_token(
+            model="deepseek-v4-pro-0813", usage=usage
+        )
+
+        model_info = litellm.get_model_info("dashscope/deepseek-v4-pro-0813")
+        expected_prompt_cost = (
+            800 * model_info["input_cost_per_token"]
+            + 200 * model_info["cache_read_input_token_cost"]
+        )
+        expected_completion_cost = 500 * model_info["output_cost_per_token"]
+
+        assert math.isclose(prompt_cost, expected_prompt_cost, rel_tol=1e-10)
+        assert math.isclose(completion_cost, expected_completion_cost, rel_tol=1e-10)
 
     def test_dashscope_flat_pricing_fallback(self):
         """
