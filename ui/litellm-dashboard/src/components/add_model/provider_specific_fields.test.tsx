@@ -57,6 +57,20 @@ vi.mock("../networking", async () => {
         ],
       },
       {
+        provider: "Deepseek",
+        provider_display_name: Providers.Deepseek,
+        litellm_provider: "deepseek",
+        default_model_placeholder: "deepseek-chat",
+        credential_fields: [
+          {
+            key: "api_key",
+            label: "API Key",
+            field_type: "password",
+            required: true,
+          },
+        ],
+      },
+      {
         provider: "Azure",
         provider_display_name: Providers.Azure,
         litellm_provider: "azure",
@@ -180,6 +194,26 @@ describe("ProviderSpecificFields", () => {
       const apiBaseInput = screen.getByPlaceholderText("https://...");
       expect(apiBaseInput).toBeInTheDocument();
       expect(apiBaseInput).toHaveAttribute("type", "text");
+    });
+  });
+
+  it("submits the Deepseek API key from the provider credential field", async () => {
+    const queryClient = createQueryClient();
+    const onFinish = vi.fn();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Form onFinish={onFinish}>
+          <ProviderSpecificFields selectedProvider={Providers.Deepseek} />
+        </Form>
+      </QueryClientProvider>,
+    );
+
+    const apiKeyInput = await screen.findByLabelText("API Key");
+    fireEvent.change(apiKeyInput, { target: { value: "sk-test-deepseek" } });
+    fireEvent.submit(apiKeyInput.closest("form")!);
+
+    await waitFor(() => {
+      expect(onFinish).toHaveBeenCalledWith(expect.objectContaining({ api_key: "sk-test-deepseek" }));
     });
   });
 

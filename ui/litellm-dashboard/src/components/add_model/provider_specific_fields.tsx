@@ -1,7 +1,8 @@
 import { useProviderFields } from "@/app/(dashboard)/hooks/providers/useProviderFields";
 import { UploadOutlined } from "@ant-design/icons";
-import { Text, TextInput } from "@tremor/react";
-import { Button as Button2, Col, Form, Input, Row, Select, Typography, Upload, UploadProps } from "antd";
+import { Text } from "@tremor/react";
+import { Input as ShadcnInput } from "@/components/ui/input";
+import { Button as Button2, Col, Form, Input as AntdInput, Row, Select, Typography, Upload, UploadProps } from "antd";
 import React from "react";
 import { CredentialItem, ProviderCredentialFieldMetadata } from "../networking";
 import { provider_map, Providers } from "../provider_info_helpers";
@@ -216,6 +217,59 @@ const ProviderSpecificFields: React.FC<ProviderSpecificFieldsProps> = ({ selecte
     },
   };
 
+  const renderFieldControl = (field: ProviderCredentialField) => {
+    if (field.type === "select") {
+      return (
+        <Select placeholder={field.placeholder} defaultValue={field.defaultValue}>
+          {field.options?.map((option) => (
+            <Select.Option key={option} value={option}>
+              {option}
+            </Select.Option>
+          ))}
+        </Select>
+      );
+    }
+
+    if (field.type === "upload") {
+      return (
+        <Upload
+          {...handleUpload}
+          onChange={(info) => {
+            if (uploadProps?.onChange) {
+              uploadProps.onChange(info);
+            }
+          }}
+        >
+          <Button2 icon={<UploadOutlined />}>Click to Upload</Button2>
+        </Upload>
+      );
+    }
+
+    if (field.type === "textarea") {
+      return (
+        <AntdInput.TextArea
+          placeholder={field.placeholder}
+          defaultValue={field.defaultValue}
+          rows={6}
+          style={{ fontFamily: "monospace", fontSize: "12px" }}
+        />
+      );
+    }
+
+    if (field.type === "password") {
+      return <AntdInput.Password placeholder={field.placeholder} defaultValue={field.defaultValue} />;
+    }
+
+    return (
+      <ShadcnInput
+        placeholder={field.placeholder}
+        type="text"
+        defaultValue={field.defaultValue}
+        onChange={field.key === "api_base" ? handleApiBaseChange : undefined}
+      />
+    );
+  };
+
   return (
     <>
       {isLoading && allFields.length === 0 && (
@@ -243,40 +297,7 @@ const ProviderSpecificFields: React.FC<ProviderSpecificFieldsProps> = ({ selecte
             tooltip={field.tooltip}
             className={field.key === "vertex_credentials" ? "mb-0" : undefined}
           >
-            {field.type === "select" ? (
-              <Select placeholder={field.placeholder} defaultValue={field.defaultValue}>
-                {field.options?.map((option) => (
-                  <Select.Option key={option} value={option}>
-                    {option}
-                  </Select.Option>
-                ))}
-              </Select>
-            ) : field.type === "upload" ? (
-              <Upload
-                {...handleUpload}
-                onChange={(info) => {
-                  if (uploadProps?.onChange) {
-                    uploadProps.onChange(info);
-                  }
-                }}
-              >
-                <Button2 icon={<UploadOutlined />}>Click to Upload</Button2>
-              </Upload>
-            ) : field.type === "textarea" ? (
-              <Input.TextArea
-                placeholder={field.placeholder}
-                defaultValue={field.defaultValue}
-                rows={6}
-                style={{ fontFamily: "monospace", fontSize: "12px" }}
-              />
-            ) : (
-              <TextInput
-                placeholder={field.placeholder}
-                type={field.type === "password" ? "password" : "text"}
-                defaultValue={field.defaultValue}
-                onChange={field.key === "api_base" ? handleApiBaseChange : undefined}
-              />
-            )}
+            {renderFieldControl(field)}
           </Form.Item>
 
           {/* Special case for Vertex Credentials help text */}
