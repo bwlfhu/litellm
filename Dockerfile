@@ -42,6 +42,14 @@ ARG UV_INDEX_URL
 ARG APK_REPOSITORY
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG NO_PROXY
+
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    no_proxy=${NO_PROXY}
 
 WORKDIR /app
 USER root
@@ -66,9 +74,7 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_PYTHON_DOWNLOADS=0 \
     UV_INDEX_URL=${UV_INDEX_URL} \
     npm_config_registry=${NPM_REGISTRY} \
-    PATH="/app/.venv/bin:${PATH}" \
-    HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY}
+    PATH="/app/.venv/bin:${PATH}"
 
 # Copy dependency metadata first for layer caching
 COPY pyproject.toml uv.lock ./
@@ -118,9 +124,13 @@ FROM $LITELLM_RUNTIME_IMAGE AS runtime
 USER root
 
 ARG APK_REPOSITORY
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 
 # node (without npm) is required by the prisma CLI at runtime
-RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
+RUN http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" no_proxy="${NO_PROXY}" \
+    apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
     bash openssl tzdata nodejs python-3.13 libsndfile
 
 WORKDIR /app
