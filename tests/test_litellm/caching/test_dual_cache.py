@@ -12,9 +12,7 @@ from litellm.caching.redis_cache import RedisCache
 
 @pytest.mark.asyncio
 async def test_dual_cache_async_batch_get_cache_coalesces_concurrent_redis_reads():
-    dual_cache = DualCache(
-        redis_cache=MagicMock(spec=RedisCache), default_redis_batch_cache_expiry=10
-    )
+    dual_cache = DualCache(redis_cache=MagicMock(spec=RedisCache), default_redis_batch_cache_expiry=10)
     keys = ["shared_a", "shared_b"]
     start_gate = asyncio.Event()
 
@@ -41,9 +39,7 @@ async def test_dual_cache_async_batch_get_cache_coalesces_concurrent_redis_reads
 
 @pytest.mark.asyncio
 async def test_dual_cache_async_batch_get_cache_rolls_back_redis_reservation_on_error():
-    dual_cache = DualCache(
-        redis_cache=MagicMock(spec=RedisCache), default_redis_batch_cache_expiry=10
-    )
+    dual_cache = DualCache(redis_cache=MagicMock(spec=RedisCache), default_redis_batch_cache_expiry=10)
     keys = ["shared_a", "shared_b"]
 
     with patch.object(
@@ -89,6 +85,23 @@ async def test_dual_cache_async_set_cache_injects_default_in_memory_ttl():
 
 
 @pytest.mark.asyncio
+async def test_dual_cache_async_increment_injects_default_in_memory_ttl():
+    in_memory_cache = InMemoryCache(default_ttl=600)
+    dual_cache = DualCache(
+        in_memory_cache=in_memory_cache,
+        default_in_memory_ttl=60,
+    )
+
+    before = time.time()
+    await dual_cache.async_increment_cache(key="spend:key:k", value=1.0)
+    after = time.time()
+
+    expiry = in_memory_cache.ttl_dict["spend:key:k"]
+    assert expiry >= before + 60
+    assert expiry <= after + 60
+
+
+@pytest.mark.asyncio
 async def test_dual_cache_redis_backfill_injects_default_in_memory_ttl():
     """
     A Redis-hit backfill into the in-memory tier must honor
@@ -123,9 +136,7 @@ async def test_dual_cache_batch_redis_backfill_injects_default_in_memory_ttl():
     default_in_memory_ttl, same as the single-key path."""
     in_memory_cache = InMemoryCache(default_ttl=600)
     mock_redis = MagicMock(spec=RedisCache)
-    mock_redis.async_batch_get_cache = AsyncMock(
-        return_value={"batch_backfill_key": "redis_value"}
-    )
+    mock_redis.async_batch_get_cache = AsyncMock(return_value={"batch_backfill_key": "redis_value"})
     dual_cache = DualCache(
         in_memory_cache=in_memory_cache,
         redis_cache=mock_redis,
@@ -237,9 +248,7 @@ async def test_circuit_breaker_open_skips_redis():
 
     class FakeRedis:
         def __init__(self):
-            self._circuit_breaker = RedisCircuitBreaker(
-                failure_threshold=3, recovery_timeout=60
-            )
+            self._circuit_breaker = RedisCircuitBreaker(failure_threshold=3, recovery_timeout=60)
             self._circuit_breaker._state = "open"
             self._circuit_breaker._opened_at = time.time()
             self.call_count = 0
@@ -292,9 +301,7 @@ def test_circuit_breaker_half_open_concurrent_calls_are_fast_failed():
 
     # All subsequent concurrent callers: HALF_OPEN → fast-fail (return True)
     for _ in range(10):
-        assert (
-            cb.is_open() is True
-        ), "concurrent callers should be fast-failed in HALF_OPEN"
+        assert cb.is_open() is True, "concurrent callers should be fast-failed in HALF_OPEN"
 
 
 def test_circuit_breaker_disabled_never_opens():
@@ -338,9 +345,7 @@ async def test_circuit_breaker_disabled_guard_always_calls_method():
 
     class FakeRedis:
         def __init__(self):
-            self._circuit_breaker = RedisCircuitBreaker(
-                failure_threshold=1, recovery_timeout=60, enabled=False
-            )
+            self._circuit_breaker = RedisCircuitBreaker(failure_threshold=1, recovery_timeout=60, enabled=False)
             self.call_count = 0
 
         @_redis_circuit_breaker_guard

@@ -30,7 +30,12 @@ class AzureFoundryErrorStrings(str, enum.Enum):
     SET_EXTRA_PARAMETERS_TO_PASS_THROUGH = "Set extra-parameters to 'pass-through'"
 
 
-NON_OPENAI_SPEC_MESSAGE_FIELDS: Final = ("thinking_blocks", "provider_specific_fields", "cache_control")
+NON_OPENAI_SPEC_MESSAGE_FIELDS: Final = (
+    "thinking_blocks",
+    "reasoning_content",
+    "provider_specific_fields",
+    "cache_control",
+)
 
 
 class AzureAIStudioConfig(OpenAIConfig):

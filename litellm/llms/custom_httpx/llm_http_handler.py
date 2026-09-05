@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import ssl
+import time
 from collections.abc import AsyncIterator, Coroutine, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -83,6 +84,7 @@ from litellm.responses.streaming_iterator import (
     ResponsesWebSocketStreaming,
     SyncResponsesAPIStreamingIterator,
 )
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.types.containers.main import (
     ContainerFileListResponse,
     ContainerListResponse,
@@ -146,6 +148,8 @@ from litellm.utils import (
     ModelResponse,
     ProviderConfigManager,
     async_pre_call_deployment_hook,
+    log_anthropic_response_shape,
+    log_tool_request_shape,
 )
 
 
@@ -187,6 +191,29 @@ else:
     LiteLLMLoggingObj = Any
 
 _ResponseT = TypeVar("_ResponseT")
+_STREAM_TIMING_LOG_ENABLED: Final = os.getenv("LITELLM_STREAM_TIMING_LOG", "").lower() in {"1", "true", "yes"}
+
+
+def _log_anthropic_stream_timing(
+    event: str,
+    started_at: float,
+    model: str,
+    logging_obj: LiteLLMLoggingObj,
+    status_code: int | None = None,
+    error_type: str | None = None,
+) -> None:
+    if not _STREAM_TIMING_LOG_ENABLED:
+        return
+    call_id: Final = getattr(logging_obj, "litellm_call_id", None)
+    verbose_logger.info(
+        "Anthropic stream timing event=%s elapsed_ms=%.1f model=%s call_id=%s status_code=%s error_type=%s",
+        event,
+        (time.monotonic() - started_at) * 1000,
+        model,
+        call_id if isinstance(call_id, str) else "-",
+        status_code if status_code is not None else "-",
+        error_type or "-",
+    )
 
 
 class _DeleteRequestKwargs(TypedDict, total=False):
@@ -524,6 +551,17 @@ class BaseLLMHTTPHandler:
 
         if extra_body is not None:
             data = {**data, **extra_body}
+
+        tool_shape_call_id: Final = getattr(logging_obj, "litellm_call_id", None)
+        log_tool_request_shape(
+            tools=data.get("tools"),
+            tool_choice=data.get("tool_choice"),
+            endpoint="/v1/chat/completions",
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            phase="provider_dispatch",
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+        )
 
         headers, signed_json_body = provider_config.sign_request(
             headers=headers,
@@ -1965,6 +2003,7 @@ class BaseLLMHTTPHandler:
         litellm_params_dict: Final = dict(litellm_params)
         optional_params_dict: Final = dict(litellm_params)
         for attempt_idx in range(max_attempts):
+            started_at: Final = time.monotonic()
             try:
                 response = await async_httpx_client.post(
                     url=request_url,
@@ -1975,8 +2014,23 @@ class BaseLLMHTTPHandler:
                     timeout=timeout,
                 )
                 response.raise_for_status()
+                _log_anthropic_stream_timing(
+                    event="upstream_headers",
+                    started_at=started_at,
+                    model=model,
+                    logging_obj=logging_obj,
+                    status_code=response.status_code,
+                )
                 return response
             except httpx.HTTPStatusError as e:
+                _log_anthropic_stream_timing(
+                    event="upstream_error",
+                    started_at=started_at,
+                    model=model,
+                    logging_obj=logging_obj,
+                    status_code=e.response.status_code,
+                    error_type=type(e).__name__,
+                )
                 hit_max_attempt = attempt_idx + 1 == max_attempts
                 should_retry = provider_config.should_retry_anthropic_messages_on_http_error(
                     e=e, litellm_params=litellm_params_dict
@@ -2001,8 +2055,17 @@ class BaseLLMHTTPHandler:
                     )
                     logging_obj.model_call_details.update(request_body)
                     continue
+                if provider_config.should_disable_anthropic_messages_fallbacks_on_http_error(e):
+                    setattr(e, "_litellm_disable_fallbacks", True)
                 raise self._handle_error(e=e, provider_config=provider_config)
             except Exception as e:
+                _log_anthropic_stream_timing(
+                    event="upstream_error",
+                    started_at=started_at,
+                    model=model,
+                    logging_obj=logging_obj,
+                    error_type=type(e).__name__,
+                )
                 raise self._handle_error(e=e, provider_config=provider_config)
 
         raise RuntimeError("unreachable: anthropic messages HTTP retry loop exited without return")
@@ -2048,6 +2111,7 @@ class BaseLLMHTTPHandler:
         api_base: str | None = None,
         stream: bool | None = False,
         kwargs: dict[str, Any] | None = None,
+        deployment_protocol_context: object | None = None,
     ) -> AnthropicMessagesResponse | AsyncIterator:
         from litellm.litellm_core_utils.get_provider_specific_headers import (
             ProviderSpecificHeaderUtils,
@@ -2110,12 +2174,26 @@ class BaseLLMHTTPHandler:
             litellm_params={
                 "preset_cache_key": None,
                 "stream_response": {},
-                "model_info": kwargs.get("model_info"),
                 **vertex_location_params,
+                **({"model_info": kwargs["model_info"]} if kwargs.get("model_info") is not None else {}),
+                **(
+                    {"litellm_metadata": litellm_params["litellm_metadata"]}
+                    if litellm_params.get("litellm_metadata") is not None
+                    else {}
+                ),
                 **anthropic_messages_optional_request_params,
             },
             custom_llm_provider=custom_llm_provider,
         )
+        kwargs_for_agentic: Final = {
+            **kwargs,
+            **(
+                {"_litellm_deployment_protocol_context": deployment_protocol_context}
+                if deployment_protocol_context is not None
+                else {}
+            ),
+            **({"api_base": api_base} if api_base is not None else {}),
+        }
 
         additional_drop_params: Final[list[str]] = litellm_params.get("additional_drop_params") or []
         if additional_drop_params:
@@ -2133,6 +2211,18 @@ class BaseLLMHTTPHandler:
             anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
             litellm_params=litellm_params,
             headers=headers,
+        )
+        tool_shape_call_id: Final = getattr(logging_obj, "litellm_call_id", None)
+        log_tool_request_shape(
+            tools=request_body.get("tools"),
+            tool_choice=request_body.get("tool_choice"),
+            endpoint="/v1/messages",
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            phase="provider_dispatch",
+            call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+            warn_when_missing=False,
+            log_when_present=True,
         )
         logging_obj.stream = stream
         logging_obj.model_call_details.update(request_body)
@@ -2196,6 +2286,14 @@ class BaseLLMHTTPHandler:
             ),
         )
         if rust_messages_response is not None:
+            log_anthropic_response_shape(
+                content=rust_messages_response.get("content"),
+                stop_reason=rust_messages_response.get("stop_reason"),
+                model=model,
+                custom_llm_provider=custom_llm_provider,
+                call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+                stream=bool(stream),
+            )
             if stream:
                 return self._rust_anthropic_messages_fake_stream(rust_messages_response)
             return await self._finalize_anthropic_messages_response(
@@ -2207,7 +2305,7 @@ class BaseLLMHTTPHandler:
                 logging_obj=logging_obj,
                 custom_llm_provider=custom_llm_provider,
                 api_key=api_key,
-                kwargs=kwargs,
+                kwargs=kwargs_for_agentic,
             )
 
         response: Final = await self._async_post_anthropic_messages_with_http_error_retry(
@@ -2271,7 +2369,7 @@ class BaseLLMHTTPHandler:
                 anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
                 logging_obj=logging_obj,
                 custom_llm_provider=custom_llm_provider,
-                kwargs={**kwargs, "api_key": api_key} if api_key else kwargs,
+                kwargs={**kwargs_for_agentic, "api_key": api_key} if api_key else kwargs_for_agentic,
             )
             return AnthropicMessagesStreamingResponse(
                 completion_stream=initial_response,
@@ -2283,6 +2381,14 @@ class BaseLLMHTTPHandler:
                 raw_response=response,
                 logging_obj=logging_obj,
             )
+            log_anthropic_response_shape(
+                content=initial_response.get("content"),
+                stop_reason=initial_response.get("stop_reason"),
+                model=model,
+                custom_llm_provider=custom_llm_provider,
+                call_id=tool_shape_call_id if isinstance(tool_shape_call_id, str) else None,
+                stream=False,
+            )
 
         return await self._finalize_anthropic_messages_response(
             initial_response=initial_response,
@@ -2293,7 +2399,7 @@ class BaseLLMHTTPHandler:
             logging_obj=logging_obj,
             custom_llm_provider=custom_llm_provider,
             api_key=api_key,
-            kwargs=kwargs,
+            kwargs=kwargs_for_agentic,
         )
 
     async def _finalize_anthropic_messages_response(
@@ -2416,6 +2522,7 @@ class BaseLLMHTTPHandler:
         api_base: str | None = None,
         stream: bool | None = False,
         kwargs: dict[str, object] | None = None,
+        deployment_protocol_context: object | None = None,
     ) -> AnthropicMessagesResponse | Coroutine[object, object, AnthropicMessagesResponse | AsyncIterator]:
         """
         LLM HTTP Handler for Anthropic Messages
@@ -2435,6 +2542,7 @@ class BaseLLMHTTPHandler:
                 api_base=api_base,
                 stream=stream,
                 kwargs=kwargs,
+                deployment_protocol_context=deployment_protocol_context,
             )
         raise ValueError("anthropic_messages_handler is not implemented for sync calls")
 
@@ -5263,10 +5371,34 @@ class BaseLLMHTTPHandler:
         if patch.messages is None:
             raise ValueError("Agentic loop plan missing patched messages")
 
-        full_model_name = model
-        if logging_obj is not None:
-            agentic_params: Final[Mapping[str, object]] = logging_obj.model_call_details.get("agentic_loop_params", {})
-            full_model_name = cast(str, agentic_params.get("model", model))
+        agentic_params: Final[Mapping[str, object]] = (
+            logging_obj.model_call_details.get("agentic_loop_params", {}) if logging_obj is not None else {}
+        )
+        raw_full_model_name: Final = agentic_params.get("model")
+        full_model_name: Final = raw_full_model_name if isinstance(raw_full_model_name, str) else model
+        logical_custom_llm_provider: Final = (
+            agentic_params.get("custom_llm_provider")
+            if isinstance(agentic_params.get("custom_llm_provider"), str)
+            else None
+        )
+        patch_custom_llm_provider: Final = (
+            patch.kwargs.get("custom_llm_provider")
+            if isinstance(patch.kwargs.get("custom_llm_provider"), str)
+            else None
+        )
+        initial_custom_llm_provider: Final = (
+            kwargs.get("custom_llm_provider") if isinstance(kwargs.get("custom_llm_provider"), str) else None
+        )
+        dispatch_custom_llm_provider: Final = initial_custom_llm_provider or logical_custom_llm_provider
+        patch_provider_is_inherited: Final = (
+            patch_custom_llm_provider is not None and patch_custom_llm_provider == dispatch_custom_llm_provider
+        )
+        current_model_names: Final = frozenset({model, full_model_name})
+        model_changed: Final = patch.model is not None and patch.model not in current_model_names
+        provider_changed: Final = patch_custom_llm_provider is not None and not patch_provider_is_inherited
+        api_base_changed: Final = "api_base" in patch.kwargs and patch.kwargs.get("api_base") != kwargs.get("api_base")
+        api_key_changed: Final = "api_key" in patch.kwargs and patch.kwargs.get("api_key") != kwargs.get("api_key")
+        target_changed: Final = model_changed or provider_changed or api_base_changed or api_key_changed
 
         optional_params: Final = dict(anthropic_messages_optional_request_params)
         optional_params.update(patch.optional_params)
@@ -5281,7 +5413,12 @@ class BaseLLMHTTPHandler:
         if max_tokens is None:
             max_tokens = cast(int, kwargs.get("max_tokens", 1024))
 
-        internal_keys: Final = {"litellm_logging_obj"}
+        internal_keys: Final = {
+            "litellm_logging_obj",
+            "_litellm_deployment_protocol_context",
+            "custom_llm_provider",
+            *({"api_base", "api_key"} if target_changed else set()),
+        }
         kwargs_for_followup: Final = {
             k: v
             for k, v in kwargs.items()
@@ -5290,16 +5427,32 @@ class BaseLLMHTTPHandler:
             and k not in internal_keys
             and k not in optional_params
         }
-        kwargs_for_followup.update(patch.kwargs)
+        kwargs_for_followup.update(
+            {
+                key: value
+                for key, value in patch.kwargs.items()
+                if key != "_litellm_deployment_protocol_context"
+                and not (target_changed and key == "custom_llm_provider" and patch_provider_is_inherited)
+                and not (target_changed and key in {"api_base", "api_key"} and value == kwargs.get(key))
+            }
+        )
         kwargs_for_followup["_agentic_loop_depth"] = depth + 1
         kwargs_for_followup["max_agentic_loops"] = max_loops
         kwargs_for_followup["_agentic_loop_fingerprints"] = fingerprints + [fingerprint]
+        protocol_context: Final = get_deployment_protocol_context(kwargs)
+        if protocol_context is not None and not target_changed:
+            kwargs_for_followup["_litellm_deployment_protocol_context"] = protocol_context
+        if patch_custom_llm_provider is not None and not patch_provider_is_inherited:
+            kwargs_for_followup["custom_llm_provider"] = patch_custom_llm_provider
+        elif not model_changed and (logical_custom_llm_provider or initial_custom_llm_provider) is not None:
+            kwargs_for_followup["custom_llm_provider"] = logical_custom_llm_provider or initial_custom_llm_provider
 
+        followup_model: Final = patch.model if model_changed else full_model_name
         response: AnthropicMessagesResponse | AsyncIterator[object] = await anthropic_messages.acreate(
             **{
                 "max_tokens": max_tokens,
                 "messages": patch.messages,
-                "model": patch.model or full_model_name,
+                "model": followup_model,
                 "stream": stream,
                 **optional_params,
                 **kwargs_for_followup,
@@ -5931,11 +6084,14 @@ class BaseLLMHTTPHandler:
                 headers=error_headers,
             )
 
-        raise provider_config.get_error_class(
+        mapped_error: Final = provider_config.get_error_class(
             error_message=error_text,
             status_code=status_code,
             headers=error_headers,
         )
+        if getattr(e, "_litellm_disable_fallbacks", False):
+            setattr(mapped_error, "_litellm_disable_fallbacks", True)
+        raise mapped_error
 
     @staticmethod
     def _append_query_params(url: str, query_params: RealtimeQueryParams | None) -> str:

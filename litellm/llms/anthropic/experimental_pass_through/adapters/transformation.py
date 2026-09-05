@@ -64,6 +64,7 @@ from openai.types.chat.chat_completion_chunk import Choice as OpenAIStreamingCho
 
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
     parse_tool_call_arguments,
+    reasoning_content_from_thinking_blocks,
     with_prompt_cache_breakpoint,
 )
 from litellm.litellm_core_utils.prompt_templates.factory import (
@@ -195,6 +196,7 @@ class AnthropicAdapter:
         response: ModelResponse,
         tool_name_mapping: dict[str, str] | None = None,
         polyfill_result: PolyfillResult | None = None,
+        thinking_disabled: bool = False,
     ) -> AnthropicMessagesResponse | None:
         """
         Translate OpenAI response to Anthropic format.
@@ -210,6 +212,7 @@ class AnthropicAdapter:
             response=response,
             tool_name_mapping=tool_name_mapping,
             polyfill_result=polyfill_result,
+            thinking_disabled=thinking_disabled,
         )
 
     def translate_completion_output_params_streaming(
@@ -219,6 +222,7 @@ class AnthropicAdapter:
         tool_name_mapping: dict[str, str] | None = None,
         polyfill_result: PolyfillResult | None = None,
         is_async: bool = True,
+        thinking_disabled: bool = False,
     ) -> AsyncIterator[bytes] | Iterator[bytes] | None:
         """
         Translate OpenAI streaming response to Anthropic format.
@@ -245,6 +249,7 @@ class AnthropicAdapter:
             applied_edits=applied_edits,
             compaction_block=compaction_block,
             iterations_usage=iterations_usage,
+            thinking_disabled=thinking_disabled,
         )
         # Return the SSE-wrapped version for proper event formatting.
         if is_async:
@@ -592,6 +597,9 @@ class LiteLLMAnthropicMessagesAdapter:
                     assistant_message["tool_calls"] = tool_calls
                 if len(thinking_blocks) > 0:
                     assistant_message["thinking_blocks"] = thinking_blocks
+                reasoning_content: Final = reasoning_content_from_thinking_blocks(thinking_blocks)
+                if reasoning_content:
+                    assistant_message["reasoning_content"] = reasoning_content
                 new_messages.append(assistant_message)
 
         return new_messages
@@ -781,7 +789,10 @@ class LiteLLMAnthropicMessagesAdapter:
                 name=truncated_name,
             )
             if "input_schema" in tool:
-                function_chunk["parameters"] = tool["input_schema"]
+                input_schema = dict(tool["input_schema"] or {})
+                if tool_type in {"function", "custom"} and input_schema.get("type") == tool_type:
+                    input_schema["type"] = "object"
+                function_chunk["parameters"] = input_schema  # type: ignore
             if "description" in tool:
                 function_chunk["description"] = tool["description"]
             if "strict" in tool:
@@ -1217,11 +1228,12 @@ class LiteLLMAnthropicMessagesAdapter:
         self,
         choices: list[Choices],
         tool_name_mapping: dict[str, str] | None = None,
+        thinking_disabled: bool = False,
     ) -> list[dict[str, Any]]:
         new_content: Final[list[dict[str, Any]]] = []
         for choice in choices:
             # Handle thinking blocks first
-            if hasattr(choice.message, "thinking_blocks") and choice.message.thinking_blocks:
+            if not thinking_disabled and hasattr(choice.message, "thinking_blocks") and choice.message.thinking_blocks:
                 for thinking_block in choice.message.thinking_blocks:
                     if thinking_block.get("type") == "thinking":
                         thinking_value = thinking_block.get("thinking", "")
@@ -1242,7 +1254,11 @@ class LiteLLMAnthropicMessagesAdapter:
                             ).model_dump()
                         )
             # Handle reasoning_content when thinking_blocks is not present
-            elif hasattr(choice.message, "reasoning_content") and choice.message.reasoning_content:
+            elif (
+                not thinking_disabled
+                and hasattr(choice.message, "reasoning_content")
+                and choice.message.reasoning_content
+            ):
                 new_content.append(
                     AnthropicResponseContentBlockThinking(
                         type="thinking",
@@ -1288,7 +1304,7 @@ class LiteLLMAnthropicMessagesAdapter:
                     # Add provider_specific_fields if signature is present
                     if provider_specific_fields:
                         tool_use_block.provider_specific_fields = provider_specific_fields
-                    new_content.append(tool_use_block.model_dump())
+                    new_content.append(tool_use_block.model_dump(exclude_none=True))
 
         return new_content
 
@@ -1381,6 +1397,7 @@ class LiteLLMAnthropicMessagesAdapter:
         response: ModelResponse,
         tool_name_mapping: dict[str, str] | None = None,
         polyfill_result: PolyfillResult | None = None,
+        thinking_disabled: bool = False,
     ) -> AnthropicMessagesResponse:
         """
         Translate OpenAI response to Anthropic format.
@@ -1396,6 +1413,7 @@ class LiteLLMAnthropicMessagesAdapter:
         anthropic_content: Final = self._translate_openai_content_to_anthropic(
             choices=response.choices,
             tool_name_mapping=tool_name_mapping,
+            thinking_disabled=thinking_disabled,
         )
 
         if polyfill_result is not None and polyfill_result.compaction_block is not None:
@@ -1435,7 +1453,9 @@ class LiteLLMAnthropicMessagesAdapter:
         return translated_obj
 
     def _translate_streaming_openai_chunk_to_anthropic_content_block(
-        self, choices: list[OpenAIStreamingChoice | StreamingChoices]
+        self,
+        choices: list[OpenAIStreamingChoice | StreamingChoices],
+        thinking_disabled: bool = False,
     ) -> tuple[
         Literal["text", "tool_use", "thinking"],
         "ContentBlockContentBlockDict",
@@ -1466,34 +1486,40 @@ class LiteLLMAnthropicMessagesAdapter:
                         "signature": thought_sig,
                     }
                 return "tool_use", cast("ContentBlockContentBlockDict", tool_block)
-            elif choice.delta.content is not None and len(choice.delta.content) > 0:
-                return "text", TextBlock(type="text", text="")
-            elif isinstance(choice, StreamingChoices) and hasattr(choice.delta, "thinking_blocks"):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and hasattr(choice.delta, "thinking_blocks")
+            ):
                 thinking_blocks = choice.delta.thinking_blocks or []
                 if len(thinking_blocks) > 0:
                     thinking_block = thinking_blocks[0]
                     if thinking_block["type"] == "thinking":
-                        thinking = thinking_block.get("thinking") or ""
-                        signature = thinking_block.get("signature") or ""
-
-                        assert isinstance(thinking, str)
-                        assert isinstance(signature, str)
-
                         return "thinking", ChatCompletionThinkingBlock(
-                            type="thinking", thinking=thinking, signature=signature
+                            type="thinking",
+                            thinking=thinking_block.get("thinking") or "",
+                            signature=thinking_block.get("signature") or "",
                         )
             # OpenAI-compatible reasoning backends (e.g. vLLM/SGLang reasoning
             # parsers) populate ``reasoning_content`` without ``thinking_blocks``.
             # ``Delta`` deletes the ``thinking_blocks`` attribute when unset, so the
             # branch above is skipped entirely; open a ``thinking`` block here so the
             # matching ``thinking_delta`` stream is not emitted into a text block.
-            elif isinstance(choice, StreamingChoices) and getattr(choice.delta, "reasoning_content", None):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and getattr(choice.delta, "reasoning_content", None)
+            ):
                 return "thinking", ChatCompletionThinkingBlock(type="thinking", thinking="", signature="")
+            elif choice.delta.content is not None and len(choice.delta.content) > 0:
+                return "text", TextBlock(type="text", text="")
 
         return "text", TextBlock(type="text", text="")
 
     def _translate_streaming_openai_chunk_to_anthropic(
-        self, choices: list[OpenAIStreamingChoice | StreamingChoices]
+        self,
+        choices: list[OpenAIStreamingChoice | StreamingChoices],
+        thinking_disabled: bool = False,
     ) -> tuple[
         StreamingContentBlockDeltaType,
         ContentTextBlockDelta | ContentJsonBlockDelta | ContentThinkingBlockDelta | ContentThinkingSignatureBlockDelta,
@@ -1510,7 +1536,11 @@ class LiteLLMAnthropicMessagesAdapter:
                 for tool in choice.delta.tool_calls:
                     if tool.function is not None and tool.function.arguments is not None:
                         partial_json = (partial_json or "") + tool.function.arguments
-            elif isinstance(choice, StreamingChoices) and hasattr(choice.delta, "thinking_blocks"):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and hasattr(choice.delta, "thinking_blocks")
+            ):
                 thinking_blocks = choice.delta.thinking_blocks or []
                 if len(thinking_blocks) > 0:
                     for thinking_block in thinking_blocks:
@@ -1525,7 +1555,11 @@ class LiteLLMAnthropicMessagesAdapter:
                             reasoning_signature += signature
             # Handle reasoning_content when thinking_blocks is not present
             # This handles providers like OpenRouter that return reasoning_content
-            elif isinstance(choice, StreamingChoices) and hasattr(choice.delta, "reasoning_content"):
+            elif (
+                not thinking_disabled
+                and isinstance(choice, StreamingChoices)
+                and hasattr(choice.delta, "reasoning_content")
+            ):
                 if choice.delta.reasoning_content is not None:
                     reasoning_content += choice.delta.reasoning_content
 
@@ -1545,6 +1579,7 @@ class LiteLLMAnthropicMessagesAdapter:
         response: ModelResponse,
         current_content_block_index: int,
         applied_edits: list[AppliedEdit] | None = None,
+        thinking_disabled: bool = False,
     ) -> ContentBlockDelta | MessageBlockDelta:
         ## base case - final chunk w/ finish reason
         if response.choices[0].finish_reason is not None:
@@ -1572,7 +1607,10 @@ class LiteLLMAnthropicMessagesAdapter:
         (
             type_of_content,
             content_block_delta,
-        ) = self._translate_streaming_openai_chunk_to_anthropic(choices=response.choices)
+        ) = self._translate_streaming_openai_chunk_to_anthropic(
+            choices=response.choices,
+            thinking_disabled=thinking_disabled,
+        )
         return ContentBlockDelta(
             type="content_block_delta",
             index=current_content_block_index,

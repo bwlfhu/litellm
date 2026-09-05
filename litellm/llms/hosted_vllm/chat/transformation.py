@@ -170,6 +170,7 @@ class HostedVLLMChatConfig(OpenAIGPTConfig):
         for message in messages:
             if message["role"] == "assistant":
                 message.pop("thinking_blocks", None)
+                message.pop("reasoning_content", None)
                 existing_content = message.get("content")
                 if isinstance(existing_content, list):
                     text_parts = []

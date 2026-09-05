@@ -29,6 +29,7 @@ import textwrap
 import threading
 import time
 import traceback
+from collections.abc import Iterator as IteratorABC
 from dataclasses import dataclass, field
 from functools import lru_cache, wraps
 from importlib import resources
@@ -235,8 +236,20 @@ except (ImportError, AttributeError, TypeError):
 # Convert to str (if necessary)
 claude_json_str = json.dumps(json_data)
 import importlib.metadata
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Final, Literal, Optional, Union, cast, get_args
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    Literal,
+    Optional,
+    Protocol,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    runtime_checkable,
+)
 
 from litellm import utils as litellm_utils
 
@@ -1101,6 +1114,9 @@ def function_setup(
 
         ## check if metadata is passed in
         litellm_params: Final[dict[str, object]] = {"api_base": ""}
+        routing_stats_metadata: Final = kwargs.pop("_litellm_routing_stats_metadata", None)
+        if isinstance(routing_stats_metadata, dict):
+            litellm_params["routing_stats_metadata"] = routing_stats_metadata
         if "metadata" in kwargs:
             litellm_params["metadata"] = kwargs["metadata"]
         if "litellm_metadata" in kwargs and isinstance(kwargs["litellm_metadata"], dict):
@@ -1340,6 +1356,17 @@ def post_call_processing(
         raise e
 
 
+_SinglePassItemT = TypeVar("_SinglePassItemT")
+
+
+def materialize_single_pass_iterable(
+    values: Iterable[_SinglePassItemT] | None,
+) -> Iterable[_SinglePassItemT] | None:
+    if isinstance(values, IteratorABC):
+        return list(values)
+    return values
+
+
 def client(original_function):
     Rules: Final = litellm_utils.Rules
     rules_obj: Final = Rules()
@@ -1349,6 +1376,8 @@ def client(original_function):
         # DO NOT MOVE THIS. It always needs to run first
         # Check if this is an async function. If so only execute the async function
         call_type = original_function.__name__
+        if call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
+            kwargs["tools"] = materialize_single_pass_iterable(kwargs["tools"])
         if _is_async_request(kwargs):
             # [OPTIONAL] CHECK MAX RETRIES / REQUEST
             if litellm.num_retries_per_request is not None:
@@ -1650,6 +1679,9 @@ def client(original_function):
 
     @wraps(original_function)
     async def wrapper_async(*args, **kwargs):
+        call_type = original_function.__name__
+        if call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
+            kwargs["tools"] = materialize_single_pass_iterable(kwargs["tools"])
         print_args_passed_to_litellm(original_function, args, kwargs)
         start_time: Final = datetime.datetime.now()
         result = None
@@ -1662,7 +1694,6 @@ def client(original_function):
             start_time=start_time,
         )
         # only set litellm_call_id if its not in kwargs
-        call_type = original_function.__name__
         if "litellm_call_id" not in kwargs:
             kwargs["litellm_call_id"] = str(uuid.uuid4())
 
@@ -2612,6 +2643,10 @@ def supports_reasoning(model: str, custom_llm_provider: str | None = None) -> bo
     Check if the given model supports reasoning and return a boolean value.
     """
     return _supports_factory(model=model, custom_llm_provider=custom_llm_provider, key="supports_reasoning")
+
+
+def is_thinking_always_on(model: str, custom_llm_provider: str | None = None) -> bool:
+    return _supports_factory(model=model, custom_llm_provider=custom_llm_provider, key="thinking_always_on")
 
 
 def supports_native_structured_output(model: str, custom_llm_provider: str | None = None) -> bool:
@@ -5652,6 +5687,7 @@ def _get_model_info_helper(
                 cache_read_input_token_cost_above_512k_tokens=_model_info.get(
                     "cache_read_input_token_cost_above_512k_tokens", None
                 ),
+                cache_read_input_token_cost_thinking=_model_info.get("cache_read_input_token_cost_thinking", None),
                 cache_read_input_token_cost_flex=_model_info.get("cache_read_input_token_cost_flex", None),
                 cache_read_input_token_cost_priority=_model_info.get("cache_read_input_token_cost_priority", None),
                 cache_read_input_token_cost_ultrafast=_model_info.get("cache_read_input_token_cost_ultrafast", None),
@@ -5672,6 +5708,7 @@ def _get_model_info_helper(
                     "input_cost_per_token_above_272k_tokens_flex", None
                 ),
                 input_cost_per_token_above_512k_tokens=_model_info.get("input_cost_per_token_above_512k_tokens", None),
+                input_cost_per_token_thinking=_model_info.get("input_cost_per_token_thinking", None),
                 input_cost_per_query=_model_info.get("input_cost_per_query", None),
                 input_cost_per_second=_model_info.get("input_cost_per_second", None),
                 input_cost_per_audio_token=_model_info.get("input_cost_per_audio_token", None),
@@ -5697,6 +5734,7 @@ def _get_model_info_helper(
                 output_cost_per_character=_model_info.get("output_cost_per_character", None),
                 output_cost_per_reasoning_token=_model_info.get("output_cost_per_reasoning_token", None),
                 output_cost_per_reasoning_token_flex=_model_info.get("output_cost_per_reasoning_token_flex", None),
+                output_cost_per_token_thinking=_model_info.get("output_cost_per_token_thinking", None),
                 output_cost_per_reasoning_token_priority=_model_info.get(
                     "output_cost_per_reasoning_token_priority", None
                 ),
@@ -7670,6 +7708,288 @@ def validate_and_fix_openai_tools(tools: list | None) -> list[dict] | None:
         elif isinstance(tool, dict):
             new_tools.append(tool)
     return new_tools
+
+
+@runtime_checkable
+class _ToolShapeMapping(Protocol):
+    def get(self, key: str, default: object = None, /) -> object: ...
+
+
+@runtime_checkable
+class _SizedToolCollection(Protocol):
+    def __len__(self) -> int: ...
+
+    def __iter__(self) -> Iterator[object]: ...
+
+
+_TOOL_DIAGNOSTICS_TRUE_VALUES: Final = frozenset({"1", "true", "yes", "on"})
+_TOOL_TYPE_PREFIX_LABELS: Final = (
+    ("function", "function"),
+    ("custom", "custom"),
+    ("computer", "computer"),
+    ("bash", "bash"),
+    ("text_editor", "text_editor"),
+    ("web_search", "web_search"),
+    ("web_fetch", "web_fetch"),
+    ("code_execution", "code_execution"),
+    ("tool_search", "tool_search"),
+    ("mcp", "mcp"),
+    ("memory", "memory"),
+)
+_ANTHROPIC_CONTENT_BLOCK_TYPES: Final = frozenset(
+    {
+        "text",
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+        "server_tool_use",
+        "web_search_tool_result",
+        "web_fetch_tool_result",
+        "code_execution_tool_result",
+        "mcp_tool_use",
+        "mcp_tool_result",
+    }
+)
+_ANTHROPIC_STOP_REASONS: Final = frozenset(
+    {
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "tool_use",
+        "pause_turn",
+        "refusal",
+        "model_context_window_exceeded",
+    }
+)
+
+
+def is_tool_diagnostics_enabled() -> bool:
+    """Return whether redacted tool lifecycle diagnostics should run."""
+    value: Final = os.getenv("LITELLM_TOOL_DIAGNOSTICS", "")
+    return value.strip().lower() in _TOOL_DIAGNOSTICS_TRUE_VALUES and verbose_logger.isEnabledFor(logging.INFO)
+
+
+def log_tool_request_shape(
+    *,
+    tools: object,
+    tool_choice: object,
+    endpoint: str,
+    model: str | None,
+    custom_llm_provider: str | None,
+    phase: str,
+    call_id: str | None = None,
+    warn_when_missing: bool = False,
+    log_when_present: bool = False,
+) -> None:
+    """Log a redacted structural summary when a tool declaration may be missing."""
+    diagnostics_enabled: Final = log_when_present and is_tool_diagnostics_enabled()
+    tools_for_diagnostics: Final[object] = tools
+    tools_present: Final = tools is not None
+    tool_count: int | None = 0 if tools is None else None
+    tool_types: frozenset[str] = frozenset()
+
+    if isinstance(tools, _ToolShapeMapping):
+        try:
+            tool_count = 0 if isinstance(tools, _SizedToolCollection) and len(tools) == 0 else 1
+        except Exception:
+            tool_count = None
+        tool_type: Final = _tool_shape_get(tools, "type")
+        if isinstance(tool_type, str):
+            tool_types = frozenset((_safe_tool_type_label(tool_type),))
+    elif isinstance(tools, (list, tuple, set, frozenset)):
+        try:
+            tool_collection: Final = cast(  # cast-ok: concrete containers above implement the sized iterable protocol
+                _SizedToolCollection, tools
+            )
+            tool_count = len(tool_collection)
+            tool_types = frozenset(
+                tool_type
+                for tool in tool_collection
+                for tool_type in (_tool_type_from_shape(tool),)
+                if tool_type is not None
+            )
+        except Exception:
+            tool_count = None
+            tool_types = frozenset()
+
+    summary: Final = {
+        "call_id": call_id,
+        "endpoint": endpoint,
+        "phase": phase,
+        "model": model,
+        "provider": custom_llm_provider,
+        "tool_choice_present": tool_choice is not None,
+        "tools_present": tools_present,
+        "tool_count": tool_count,
+        "tool_types": tuple(sorted(tool_types)),
+        "tool_schema_hash": _tool_schema_hash(tools_for_diagnostics) if diagnostics_enabled else None,
+    }
+    try:
+        malformed_tool_schemas = _malformed_tool_schema_shapes(tools_for_diagnostics)
+    except Exception:
+        malformed_tool_schemas = ()
+    if malformed_tool_schemas:
+        verbose_logger.warning(
+            "Tool request shape contains malformed schemas: %s",
+            {**summary, "malformed_tool_schemas": malformed_tool_schemas},
+        )
+    elif not tools_present or tool_count == 0:
+        if tool_choice is not None:
+            verbose_logger.warning("Tool request shape indicates tool_choice without tools: %s", summary)
+        elif warn_when_missing:
+            verbose_logger.warning("Tool request shape contains no tools: %s", summary)
+        elif diagnostics_enabled:
+            verbose_logger.info("Tool request shape: %s", summary)
+    elif diagnostics_enabled:
+        verbose_logger.info("Tool request shape: %s", summary)
+    elif tools_present and not log_when_present:
+        verbose_logger.debug("Tool request shape: %s", summary)
+
+
+def _tool_schema_hash(tools: object) -> str | None:
+    try:
+        if isinstance(tools, BaseModel):
+            serializable_tools: object = tools.model_dump()
+        elif isinstance(tools, (list, tuple)):
+            tool_collection: Final = cast(Iterable[object], tools)  # cast-ok: guarded untyped request collection
+            serializable_tools = tuple(
+                tool.model_dump() if isinstance(tool, BaseModel) else tool for tool in tool_collection
+            )
+        elif isinstance(tools, dict):
+            serializable_tools = cast(  # cast-ok: guarded dict from an untyped tool request
+                dict[str, object], tools
+            )
+        else:
+            return None
+        encoded_tools: Final = json.dumps(
+            serializable_tools,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except Exception:  # noqa: BLE001  # diagnostics must never interrupt a model request
+        return None
+    return hashlib.sha256(encoded_tools).hexdigest()[:16]
+
+
+def log_anthropic_response_shape(
+    *,
+    content: object,
+    stop_reason: object,
+    model: str | None,
+    custom_llm_provider: str | None,
+    call_id: str | None,
+    stream: bool,
+) -> None:
+    if not is_tool_diagnostics_enabled():
+        return
+    content_blocks: Final = (
+        tuple(
+            cast(Iterable[object], content)  # cast-ok: guarded list or tuple from an untyped provider response
+        )
+        if isinstance(content, (list, tuple))
+        else ()
+    )
+    content_block_types: Final = tuple(
+        block_type
+        for block in content_blocks
+        for raw_block_type in (_tool_shape_get(block, "type") if isinstance(block, _ToolShapeMapping) else None,)
+        if isinstance(raw_block_type, str)
+        for block_type in (_safe_enum_label(raw_block_type, _ANTHROPIC_CONTENT_BLOCK_TYPES),)
+    )
+    verbose_logger.info(
+        "Anthropic tool response shape: %s",
+        {
+            "call_id": call_id,
+            "endpoint": "/v1/messages",
+            "phase": "provider_response",
+            "model": model,
+            "provider": custom_llm_provider,
+            "stream": stream,
+            "stop_reason": (
+                _safe_enum_label(stop_reason, _ANTHROPIC_STOP_REASONS) if isinstance(stop_reason, str) else None
+            ),
+            "content_block_count": len(content_blocks),
+            "content_block_types": tuple(sorted(frozenset(content_block_types))),
+            "tool_use_count": sum(block_type in ("tool_use", "server_tool_use") for block_type in content_block_types),
+        },
+    )
+
+
+def _tool_type_from_shape(tool: object) -> str | None:
+    if not isinstance(tool, _ToolShapeMapping):
+        return None
+    tool_type: Final = _tool_shape_get(tool, "type")
+    return _safe_tool_type_label(tool_type) if isinstance(tool_type, str) else None
+
+
+def _safe_tool_type_label(value: str) -> str:
+    for prefix, label in _TOOL_TYPE_PREFIX_LABELS:
+        if value == prefix or value.startswith(f"{prefix}_"):
+            return label
+    return "other"
+
+
+def _safe_enum_label(value: str, allowed_values: frozenset[str]) -> str:
+    return value if value in allowed_values else "other"
+
+
+def _tool_shape_get(tool: _ToolShapeMapping, key: str) -> object:
+    try:
+        return tool.get(key)
+    except Exception:
+        return None
+
+
+def _malformed_tool_schema_shapes(tools: object) -> tuple[dict[str, str | int], ...]:
+    if not isinstance(tools, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(
+        summary
+        for tool_index, tool in enumerate(tools)
+        for summary in (_malformed_tool_schema_shape(tool=tool, tool_index=tool_index),)
+        if summary is not None
+    )
+
+
+def _malformed_tool_schema_shape(tool: object, tool_index: int) -> dict[str, str | int] | None:
+    if not isinstance(tool, _ToolShapeMapping):
+        return None
+    tool_type: Final = _tool_shape_get(tool, "type")
+    function: Final = _tool_shape_get(tool, "function")
+    if tool_type == "function" and isinstance(function, _ToolShapeMapping):
+        parameters = _tool_shape_get(function, "parameters")
+        schema_key = "parameters"
+    elif tool_type == "function":
+        parameters = _tool_shape_get(tool, "parameters")
+        schema_key = "parameters"
+    else:
+        parameters = _tool_shape_get(tool, "input_schema")
+        schema_key = "input_schema"
+    if not isinstance(parameters, _ToolShapeMapping):
+        return None
+    root_type: Final = _tool_shape_get(parameters, "type")
+    if root_type is None or root_type == "object":
+        return None
+    return {
+        "tool_index": tool_index,
+        "schema_key": schema_key,
+        "root_type_kind": _tool_schema_root_type_kind(root_type),
+    }
+
+
+def _tool_schema_root_type_kind(root_type: object) -> str:
+    if isinstance(root_type, str):
+        return "string"
+    if isinstance(root_type, bool):
+        return "boolean"
+    if isinstance(root_type, (int, float)):
+        return "number"
+    if isinstance(root_type, list):
+        return "array"
+    if isinstance(root_type, dict):
+        return "object"
+    return "other"
 
 
 def validate_and_fix_thinking_param(

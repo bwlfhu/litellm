@@ -7295,3 +7295,33 @@ class TestRouterModelNameOnNonStreamingResponse:
         )
 
         assert response[ROUTER_MODEL_NAME_RESPONSE_FIELD] == "deep-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_stream_timing_observes_upstream_stream_without_changing_frames(enabled, monkeypatch, caplog):
+    import logging
+
+    from litellm.proxy import common_request_processing as processing
+
+    monkeypatch.setattr(processing, "_STREAM_TIMING_LOG_ENABLED", enabled)
+    caplog.set_level(logging.INFO, logger=processing.verbose_proxy_logger.name)
+    frames = ("data: first\n\n", "data: [DONE]\n\n")
+
+    async def stream():
+        for frame in frames:
+            yield frame
+
+    response = await processing.create_response(
+        generator=stream(), media_type="text/event-stream", headers={"x-request-id": "timing-regression"}
+    )
+    assert tuple([frame async for frame in response.body_iterator]) == frames
+    timing_logs = [record.getMessage() for record in caplog.records if "SSE stream timing event=" in record.getMessage()]
+    if enabled:
+        assert len(timing_logs) == 3
+        assert "event=first_chunk_ready" in timing_logs[0]
+        assert "event=downstream_first_chunk" in timing_logs[1]
+        assert "event=stream_closed" in timing_logs[2]
+        assert all("request_id=timing-regression" in entry for entry in timing_logs)
+    else:
+        assert timing_logs == []

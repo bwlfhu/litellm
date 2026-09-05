@@ -68,6 +68,7 @@ GATE_SLOT_LOCK := python3 scripts/gate_slot_lock.py
 LINT_DEP_INSTALL ?= install-dev
 LINT_E2E_DEP_INSTALL ?= lint-install
 LINT_DEP_BASE ?= lint-fetch-base
+export LINT_BASE ?= origin/litellm_internal_staging
 LINT_JOBS := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 LINT_OUTPUT_SYNC := $(if $(filter output-sync,$(.FEATURES)),--output-sync=target,)
 
@@ -133,7 +134,11 @@ format-check: install-dev
 # Single fetch of the PR base so the delta-based gates below share one network round
 # trip instead of each re-fetching when chained from `lint`.
 lint-fetch-base:
-	git fetch origin litellm_internal_staging
+	@if [ "$(LINT_BASE)" = "origin/litellm_internal_staging" ]; then \
+		git fetch origin litellm_internal_staging; \
+	else \
+		git rev-parse --verify '$(LINT_BASE)^{commit}' >/dev/null; \
+	fi
 
 # Mirror test-linting.yml's lint job environment: the proxy-dev group plus a generated
 # Prisma client, so `basedpyright tests/e2e` resolves the same modules CI does. The
@@ -150,7 +155,7 @@ lint-install:
 # recursively, so 'litellm/*.py' covers nested modules and the top-level files that
 # CI's 'litellm/**/*.py' skips, which makes this target a superset of the CI step.
 lint-format-check-changed: $(LINT_DEP_INSTALL) $(LINT_DEP_BASE)
-	@files=$$(git diff --name-only --diff-filter=ACMR origin/litellm_internal_staging...HEAD -- 'litellm/*.py' | grep -v '^litellm/enterprise/' || true); \
+	@files=$$(git diff --name-only --diff-filter=ACMR $(LINT_BASE)...HEAD -- 'litellm/*.py' | grep -v '^litellm/enterprise/' || true); \
 	if [ -z "$$files" ]; then \
 		echo "No changed litellm Python files to format-check."; \
 	else \
@@ -195,7 +200,7 @@ lint-ruff-FULL-dev: install-dev
 	else echo "No changed .py files to check."; fi
 
 lint-basedpyright: $(LINT_DEP_INSTALL) $(LINT_DEP_BASE)
-	$(UV_RUN) python scripts/type_check_gate.py --base origin/litellm_internal_staging
+	$(UV_RUN) python scripts/type_check_gate.py --base $(LINT_BASE)
 
 lint-e2e-basedpyright: $(LINT_E2E_DEP_INSTALL)
 	$(UV_RUN) basedpyright tests/e2e
@@ -203,37 +208,37 @@ lint-e2e-basedpyright: $(LINT_E2E_DEP_INSTALL)
 # Type-discipline budget (mutable collections / casts / type guards / kwargs /
 # unexplained suppressions), the test-linting.yml step `make lint` used to omit.
 lint-type-discipline: $(LINT_DEP_INSTALL) $(LINT_DEP_BASE)
-	$(UV_RUN) python scripts/type_discipline_gate.py --base origin/litellm_internal_staging
+	$(UV_RUN) python scripts/type_discipline_gate.py --base $(LINT_BASE)
 
 # Test-quality budget (zero-assert / mock-echo tests, sys.path.insert, raw env writes,
 # litellm module-global mutation, credential-gated skips, conftest snapshot
 # inventory), counted across tests/ the same delta-vs-base way.
 lint-test-quality: $(LINT_DEP_INSTALL) $(LINT_DEP_BASE)
-	$(UV_RUN) python scripts/test_quality_gate.py --base origin/litellm_internal_staging
+	$(UV_RUN) python scripts/test_quality_gate.py --base $(LINT_BASE)
 
 # --update lowers each limit by what this branch fixed since its branch point, so
 # it needs the base ref fetched to resolve the merge-base.
 lint-basedpyright-budget-update: install-dev lint-fetch-base
-	$(UV_RUN) python scripts/type_check_gate.py --update
+	$(UV_RUN) python scripts/type_check_gate.py --update --base $(LINT_BASE)
 
 lint-format: format-check
 
 lint-ruff-budget: install-dev
-	$(UV_RUN) python scripts/ruff_strict_gate.py
+	$(UV_RUN) python scripts/ruff_strict_gate.py --base $(LINT_BASE)
 
 # Strict gate, invoked the same way CI does in test-linting.yml so a local pass
 # means the CI check will pass too.
 lint-gate: $(LINT_DEP_INSTALL) $(LINT_DEP_BASE)
-	$(UV_RUN) python scripts/ruff_strict_gate.py --base origin/litellm_internal_staging
+	$(UV_RUN) python scripts/ruff_strict_gate.py --base $(LINT_BASE)
 
 lint-ruff-budget-update: install-dev lint-fetch-base
-	$(UV_RUN) python scripts/ruff_strict_gate.py --update
+	$(UV_RUN) python scripts/ruff_strict_gate.py --update --base $(LINT_BASE)
 
 lint-type-discipline-budget-update: install-dev lint-fetch-base
-	$(UV_RUN) python scripts/type_discipline_gate.py --update
+	$(UV_RUN) python scripts/type_discipline_gate.py --update --base $(LINT_BASE)
 
 lint-test-quality-budget-update: install-dev lint-fetch-base
-	$(UV_RUN) python scripts/test_quality_gate.py --update
+	$(UV_RUN) python scripts/test_quality_gate.py --update --base $(LINT_BASE)
 
 # Ratchet all budgets in one shot (ruff strict + type-discipline + test quality + basedpyright)
 lint-budget-update: lint-ruff-budget-update lint-type-discipline-budget-update lint-test-quality-budget-update lint-basedpyright-budget-update

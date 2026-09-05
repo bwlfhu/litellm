@@ -11,8 +11,10 @@ content survives.
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from typing import AsyncIterator
+
+import pytest
 
 from litellm.llms.anthropic.experimental_pass_through.adapters.streaming_iterator import (
     AnthropicStreamWrapper,
@@ -20,8 +22,10 @@ from litellm.llms.anthropic.experimental_pass_through.adapters.streaming_iterato
 )
 from litellm.llms.base_llm.base_model_iterator import MockResponseIterator
 from litellm.types.utils import (
+    ChatCompletionDeltaToolCall,
     Choices,
     Delta,
+    Function,
     Message,
     ModelResponse,
     ModelResponseStream,
@@ -31,9 +35,7 @@ from litellm.types.utils import (
 )
 
 
-def _build_fake_stream(
-    content: str, finish_reason: str = "stop"
-) -> MockResponseIterator:
+def _build_fake_stream(content: str, finish_reason: str = "stop") -> MockResponseIterator:
     """Mimic a Vertex Gemma `:predict` fake stream: one collapsed chunk."""
     model_response = ModelResponse()
     model_response.choices = [
@@ -56,6 +58,24 @@ def _collect_async(wrapper: AnthropicStreamWrapper) -> str:
         return "".join(out)
 
     return asyncio.run(_run())
+
+
+def _collect_sync(wrapper: AnthropicStreamWrapper) -> str:
+    return "".join(raw.decode() if isinstance(raw, bytes) else raw for raw in wrapper.anthropic_sse_wrapper())
+
+
+def _parse_sse(sse: str) -> list[dict]:
+    return [
+        json.loads(line[len("data: ") :])
+        for block in sse.split("\n\n")
+        for line in block.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+async def _async_chunks(chunks: list[ModelResponseStream]) -> AsyncIterator[ModelResponseStream]:
+    for chunk in chunks:
+        yield chunk
 
 
 def test_fake_stream_content_reaches_anthropic_sse():
@@ -133,9 +153,7 @@ def test_delayed_usage_chunk_preserves_cache_tokens():
     wrapper = AnthropicStreamWrapper(completion_stream=iter(chunks), model="gpt-4o")
     events = list(wrapper)
 
-    message_delta = next(
-        event for event in events if event.get("type") == "message_delta"
-    )
+    message_delta = next(event for event in events if event.get("type") == "message_delta")
 
     assert message_delta["usage"]["input_tokens"] == 70
     assert message_delta["usage"]["output_tokens"] == 5
@@ -145,13 +163,7 @@ def test_delayed_usage_chunk_preserves_cache_tokens():
 
 def test_splitter_passes_through_non_combined_chunks():
     """A chunk with content but no finish_reason is not split."""
-    chunk = ModelResponseStream(
-        choices=[
-            StreamingChoices(
-                index=0, delta=Delta(content="partial"), finish_reason=None
-            )
-        ]
-    )
+    chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content="partial"), finish_reason=None)])
     chunks = list(_CombinedChunkSplitter(iter([chunk])))
     assert len(chunks) == 1
     assert chunks[0].choices[0].delta.content == "partial"
@@ -159,11 +171,7 @@ def test_splitter_passes_through_non_combined_chunks():
 
 def test_splitter_splits_combined_chunk_into_content_then_finish():
     """A chunk with both content and finish_reason becomes two chunks."""
-    chunk = ModelResponseStream(
-        choices=[
-            StreamingChoices(index=0, delta=Delta(content="done"), finish_reason="stop")
-        ]
-    )
+    chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content="done"), finish_reason="stop")])
     content_chunk, finish_chunk = list(_CombinedChunkSplitter(iter([chunk])))
 
     assert content_chunk.choices[0].delta.content == "done"
@@ -193,9 +201,7 @@ def test_split_clears_reasoning_and_thinking_on_finish_chunk():
         reasoning_content="some reasoning",
         thinking_blocks=[{"type": "thinking"}],
     )
-    chunk = SimpleNamespace(
-        choices=[SimpleNamespace(finish_reason="stop", delta=delta)]
-    )
+    chunk = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", delta=delta)])
 
     content_chunk, finish_chunk = _CombinedChunkSplitter._split(chunk)
 
@@ -289,3 +295,104 @@ def test_thinking_then_signature_chunk_does_not_crash_stream():
 
     assert "message_stop" in sse
     assert "Done" in sse
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("reasoning_carrier", ["reasoning_content", "thinking_blocks"])
+def test_reasoning_only_chunk_is_suppressed_without_losing_following_text(is_async: bool, reasoning_carrier: str):
+    reasoning_delta = (
+        Delta(reasoning_content="internal reasoning")
+        if reasoning_carrier == "reasoning_content"
+        else Delta(thinking_blocks=[{"type": "thinking", "thinking": "internal reasoning"}])
+    )
+    chunks = [
+        ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=reasoning_delta,
+                    finish_reason=None,
+                )
+            ],
+        ),
+        ModelResponseStream(
+            choices=[StreamingChoices(index=0, delta=Delta(content="visible answer"), finish_reason=None)],
+        ),
+        ModelResponseStream(
+            choices=[StreamingChoices(index=0, delta=Delta(), finish_reason="stop")],
+            usage=Usage(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+        ),
+    ]
+    completion_stream = _async_chunks(chunks) if is_async else iter(chunks)
+    wrapper = AnthropicStreamWrapper(
+        completion_stream=completion_stream,
+        model="deepseek-reasoner",
+        thinking_disabled=True,
+    )
+
+    sse = _collect_async(wrapper) if is_async else _collect_sync(wrapper)
+    events = _parse_sse(sse)
+    delta_types = [event.get("delta", {}).get("type") for event in events]
+    block_types = [event.get("content_block", {}).get("type") for event in events]
+
+    assert "thinking_delta" not in delta_types
+    assert "thinking" not in block_types
+    assert "".join(event.get("delta", {}).get("text", "") for event in events) == "visible answer"
+
+
+def test_combined_reasoning_text_and_finish_chunk_keeps_text_when_thinking_is_disabled():
+    chunk = ModelResponseStream(
+        choices=[
+            StreamingChoices(
+                index=0,
+                delta=Delta(content="visible answer", reasoning_content="internal reasoning"),
+                finish_reason="stop",
+            )
+        ],
+        usage=Usage(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+    )
+    wrapper = AnthropicStreamWrapper(
+        completion_stream=iter([chunk]),
+        model="deepseek-reasoner",
+        thinking_disabled=True,
+    )
+
+    events = _parse_sse(_collect_sync(wrapper))
+
+    assert all(event.get("delta", {}).get("type") != "thinking_delta" for event in events)
+    assert "".join(event.get("delta", {}).get("text", "") for event in events) == "visible answer"
+
+
+def test_reasoning_and_tool_call_chunk_keeps_tool_when_thinking_is_disabled():
+    tool_call = ChatCompletionDeltaToolCall(
+        index=0,
+        id="call_123",
+        function=Function(name="get_weather", arguments='{"city":"Paris"}'),
+        type="function",
+    )
+    chunks = [
+        ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(reasoning_content="internal reasoning", tool_calls=[tool_call]),
+                    finish_reason=None,
+                )
+            ],
+        ),
+        ModelResponseStream(
+            choices=[StreamingChoices(index=0, delta=Delta(), finish_reason="tool_calls")],
+            usage=Usage(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+        ),
+    ]
+    wrapper = AnthropicStreamWrapper(
+        completion_stream=iter(chunks),
+        model="deepseek-reasoner",
+        thinking_disabled=True,
+    )
+
+    events = _parse_sse(_collect_sync(wrapper))
+    block_starts = [event["content_block"] for event in events if event.get("type") == "content_block_start"]
+
+    assert all(event.get("delta", {}).get("type") != "thinking_delta" for event in events)
+    assert block_starts == [{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}}]

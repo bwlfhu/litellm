@@ -15,10 +15,12 @@ import hashlib
 import inspect
 import json
 import time
-from collections.abc import Awaitable, Callable, Sequence
+import uuid
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import litellm
 from litellm._logging import print_verbose, verbose_logger
@@ -723,11 +725,11 @@ class RedisCache(BaseCache):
         try:
             if not hasattr(_redis_client, "set"):
                 raise Exception("Redis client cannot set cache. Attribute not found.")
-            result: Final = await _redis_client.set(
-                name=key,
-                value=json.dumps(value),
-                nx=nx,
-                ex=ttl,
+            result: Final = (
+                await self._async_write_spend_counter(key=key, value=float(value), operation="set", ttl=ttl, nx=nx)
+                is not None
+                if self._is_key_spend_counter(key)
+                else await _redis_client.set(name=key, value=json.dumps(value), nx=nx, ex=ttl)
             )
             print_verbose(f"Successfully Set ASYNC Redis Cache: key: {key}\nValue {value}\nttl={ttl}")
             end_time = time.time()
@@ -964,8 +966,14 @@ class RedisCache(BaseCache):
         _used_ttl: Final = self.get_ttl(ttl=ttl)
         key = self.check_and_fix_namespace(key=key)
         try:
-            result: Final = await _redis_client.incrbyfloat(name=key, amount=value)
-            if _used_ttl is not None:
+            result: Final = (
+                await self._async_write_spend_counter(
+                    key=key, value=value, operation="increment", ttl=_used_ttl, refresh_ttl=refresh_ttl
+                )
+                if self._is_key_spend_counter(key)
+                else await _redis_client.incrbyfloat(name=key, amount=value)
+            )
+            if _used_ttl is not None and not self._is_key_spend_counter(key):
                 if refresh_ttl:
                     await _redis_client.expire(key, _used_ttl)
                 else:
@@ -987,6 +995,7 @@ class RedisCache(BaseCache):
                     parent_otel_span=parent_otel_span,
                 )
             )
+            assert result is not None
             return result
         except Exception as e:
             ## LOGGING ##
@@ -1029,6 +1038,8 @@ class RedisCache(BaseCache):
         _redis_client: Final = self.init_async_client()
         _used_ttl: Final = self.get_ttl(ttl=ttl)
         key = self.check_and_fix_namespace(key=key)
+        if self._is_key_spend_counter(key):
+            return await self._async_write_spend_counter(key=key, value=value, operation="max", ttl=_used_ttl)
         lua: Final = (
             "local cur = redis.call('GET', KEYS[1]) "
             "if cur == false or tonumber(cur) < tonumber(ARGV[1]) then "
@@ -1037,7 +1048,7 @@ class RedisCache(BaseCache):
             "return ARGV[1] end "
             "return cur"
         )
-        result = cast(
+        result = cast(  # cast-ok: redis-py eval has no precise result type
             "str | bytes | int | float | None",
             await _redis_client.eval(lua, 1, key, str(value), str(int(_used_ttl or 0))),
         )
@@ -1046,6 +1057,126 @@ class RedisCache(BaseCache):
         if isinstance(result, bytes):
             result = result.decode()
         return float(result)
+
+    def _is_key_spend_counter(self, key: str) -> bool:
+        return key.startswith(self.check_and_fix_namespace(key="spend:key:"))
+
+    @staticmethod
+    def _spend_counter_generation_key(key: str) -> str:
+        return f"{key}:generation:{{{key}}}"
+
+    async def _async_write_spend_counter(
+        self,
+        key: str,
+        value: float,
+        operation: Literal["set", "increment", "max"],
+        ttl: int | None,
+        nx: bool = False,
+        refresh_ttl: bool = False,
+    ) -> float | None:
+        client: Final = self.init_async_client()
+        lua: Final = (
+            "local cur = redis.call('GET', KEYS[1]) "
+            "if ARGV[1] == 'set' and ARGV[4] == '1' and cur then return false end "
+            "local replace = ARGV[1] == 'set' or "
+            "(ARGV[1] == 'max' and (not cur or tonumber(cur) < tonumber(ARGV[2]))) "
+            "if replace then redis.call('SET', KEYS[1], ARGV[2]) "
+            "elseif ARGV[1] == 'increment' then redis.call('INCRBYFLOAT', KEYS[1], ARGV[2]) end "
+            "if ARGV[1] == 'set' or not cur or redis.call('EXISTS', KEYS[2]) == 0 then "
+            "redis.call('SET', KEYS[2], ARGV[6]) end "
+            "if tonumber(ARGV[3]) > 0 and (replace or "
+            "(ARGV[1] == 'increment' and (ARGV[5] == '1' or redis.call('PTTL', KEYS[1]) == -1))) then "
+            "redis.call('EXPIRE', KEYS[1], ARGV[3]) end "
+            "local remaining = redis.call('PTTL', KEYS[1]) "
+            "if remaining >= 0 then redis.call('PEXPIRE', KEYS[2], remaining) "
+            "else redis.call('PERSIST', KEYS[2]) end "
+            "return redis.call('GET', KEYS[1])"
+        )
+        result: Final = cast(  # cast-ok: Redis eval returns the Lua scalar or nil
+            "str | bytes | None",
+            await client.eval(
+                lua,
+                2,
+                key,
+                self._spend_counter_generation_key(key),
+                operation,
+                str(value),
+                str(int(ttl or 0)),
+                "1" if nx else "0",
+                "1" if refresh_ttl else "0",
+                str(uuid.uuid4()),
+            ),
+        )
+        return float(result) if result is not None else None
+
+    @_redis_circuit_breaker_guard
+    async def async_get_spend_counter_generation(self, key: str) -> str | None:
+        client: Final = self.init_async_client()
+        namespaced_key: Final = self.check_and_fix_namespace(key=key)
+        lua: Final = (
+            "if redis.call('EXISTS', KEYS[1]) == 0 then return false end "
+            "if redis.call('EXISTS', KEYS[2]) == 0 then "
+            "redis.call('SET', KEYS[2], ARGV[1]) "
+            "local remaining = redis.call('PTTL', KEYS[1]) "
+            "if remaining >= 0 then redis.call('PEXPIRE', KEYS[2], remaining) end end "
+            "return redis.call('GET', KEYS[2])"
+        )
+        result: Final = cast(  # cast-ok: Redis eval returns the Lua scalar or nil
+            "str | bytes | None",
+            await client.eval(
+                lua, 2, namespaced_key, self._spend_counter_generation_key(namespaced_key), str(uuid.uuid4())
+            ),
+        )
+        return result.decode() if isinstance(result, bytes) else result
+
+    @_redis_circuit_breaker_guard
+    async def async_subtract_floor_zero(
+        self,
+        key: str,
+        value: float,
+        expected_generation: str | None = None,
+        ttl: int | None = None,
+    ) -> float | None:
+        _redis_client: Final = self.init_async_client()
+        _used_ttl: Final = self.get_ttl(ttl=ttl)
+        namespaced_key: Final = self.check_and_fix_namespace(key=key)
+        if expected_generation is None:
+            lua_legacy: Final = (
+                "local cur = tonumber(redis.call('GET', KEYS[1]) or '0') "
+                "local next = cur - tonumber(ARGV[1]) "
+                "if next < 0 then next = 0 end "
+                "redis.call('SET', KEYS[1], next) "
+                "if tonumber(ARGV[2]) > 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end "
+                "return tostring(next)"
+            )
+            result_legacy: Final = await _redis_client.eval(lua_legacy, 1, namespaced_key, str(value), str(int(_used_ttl or 0)))
+            return float(result_legacy.decode() if isinstance(result_legacy, bytes) else result_legacy)
+        lua: Final = (
+            "if redis.call('GET', KEYS[2]) ~= ARGV[3] then return false end "
+            "local cur = redis.call('GET', KEYS[1]) "
+            "if not cur then return false end "
+            "local next = tonumber(cur) - tonumber(ARGV[1]) "
+            "if next < 0 then next = 0 end "
+            "redis.call('SET', KEYS[1], next) "
+            "redis.call('SET', KEYS[2], ARGV[4]) "
+            "if tonumber(ARGV[2]) > 0 then "
+            "redis.call('EXPIRE', KEYS[1], ARGV[2]) redis.call('EXPIRE', KEYS[2], ARGV[2]) end "
+            "return tostring(next)"
+        )
+        result: Final = cast(  # cast-ok: Redis eval returns the Lua scalar or nil
+            "str | bytes | None",
+            await _redis_client.eval(
+                lua,
+                2,
+                namespaced_key,
+                self._spend_counter_generation_key(namespaced_key),
+                str(value),
+                str(int(_used_ttl or 0)),
+                expected_generation,
+                str(uuid.uuid4()),
+            ),
+        )
+        return float(result) if result is not None else None
 
     async def flush_cache_buffer(self):
         print_verbose(f"flushing to redis....reached size of buffer {len(self.redis_batch_writing_buffer)}")
@@ -1276,6 +1407,16 @@ class RedisCache(BaseCache):
             _record_swallowed_redis_failure(self._circuit_breaker, e)
             return key_value_dict
 
+    @_redis_circuit_breaker_guard
+    async def async_batch_get_cache_strict(self, key_list: Sequence[str]) -> Mapping[str, object]:
+        keys: Final = [
+            self.check_and_fix_namespace(key=key) for key in key_list
+        ]  # mutable-ok: Redis and Cluster bulk-read overrides require a list
+        results: Final = await self._async_run_redis_mget_operation(keys=keys)
+        return MappingProxyType(
+            {key: self._get_cache_logic(cached_response=value) for key, value in zip(key_list, results, strict=True)}
+        )
+
     def sync_ping(self) -> bool:
         """
         Tests if the sync redis client is correctly setup.
@@ -1415,6 +1556,8 @@ class RedisCache(BaseCache):
         # typed as Any, redis python lib has incomplete type stubs for RedisCluster and does not include `delete`
         _redis_client: Final[Any] = self.init_async_client()
         key = self.check_and_fix_namespace(key=key)
+        if self._is_key_spend_counter(key):
+            return await _redis_client.delete(key, self._spend_counter_generation_key(key))
         # keys is str
         return await _redis_client.delete(key)
 

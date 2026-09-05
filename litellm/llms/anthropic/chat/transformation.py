@@ -26,6 +26,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
 )
 from litellm.llms.base_llm.base_utils import type_to_response_format_param
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
+from litellm.router_protocol import get_deployment_protocol_context
 from litellm.types.llms.anthropic import (
     ANTHROPIC_ADVISOR_TOOL_TYPE,
     ANTHROPIC_BETA_HEADER_VALUES,
@@ -1797,6 +1798,27 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             anthropic_messages_pt,
         )
 
+        protocol_context: Final = get_deployment_protocol_context(litellm_params)
+        optional_params.pop("_litellm_deployment_protocol_context", None)
+        preserve_unsigned_thinking_blocks: Final = protocol_context is not None
+        if preserve_unsigned_thinking_blocks:
+            from litellm.llms.deepseek.messages.transformation import (
+                default_deepseek_anthropic_thinking_to_enabled,
+                omit_false_stream_for_deepseek_anthropic,
+                prepare_deepseek_chat_history,
+            )
+
+            optional_params = omit_false_stream_for_deepseek_anthropic(
+                default_deepseek_anthropic_thinking_to_enabled(optional_params, model=model)
+            )
+            thinking: Final = optional_params.get("thinking")
+            thinking_enabled: Final = isinstance(thinking, dict) and thinking.get("type") == "enabled"
+            messages = prepare_deepseek_chat_history(
+                messages,
+                require_reasoning=thinking_enabled,
+                missing_reasoning=protocol_context.missing_reasoning or "placeholder",
+            )
+
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
             optional_params["tools"], _ = self._map_tools(add_dummy_tool(custom_llm_provider="anthropic"))
 
@@ -1808,7 +1830,8 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         # Anthropic errors with: "When thinking is disabled, an assistant message cannot contain thinking"
         # Related issue: https://github.com/BerriAI/litellm/issues/18926
         if (
-            optional_params.get("thinking") is not None
+            protocol_context is None
+            and optional_params.get("thinking") is not None
             and messages is not None
             and last_assistant_with_tool_calls_has_no_thinking_blocks(messages)
             and not any_assistant_message_has_thinking_blocks(messages)
@@ -1819,7 +1842,6 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                     "Dropping 'thinking' param because the last assistant message with tool_calls "
                     "has no thinking_blocks. The model won't use extended thinking for this turn."
                 )
-
         AnthropicConfig._maybe_drop_speed_param(
             model=model,
             optional_params=optional_params,
@@ -1862,6 +1884,15 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             messages = self._rewrite_tool_names_in_messages(messages, _name_forward_map)
         if _name_reverse_map and isinstance(litellm_params, dict):
             litellm_params[ANTHROPIC_TOOL_NAME_REVERSE_MAP_KEY] = _name_reverse_map
+        if get_deployment_protocol_context(litellm_params) is not None and isinstance(
+            optional_params.get("tools"), list
+        ):
+            optional_params["tools"] = [
+                {key: value for key, value in tool.items() if key != "type"}
+                if isinstance(tool, dict) and tool.get("type") == "custom"
+                else tool
+                for tool in optional_params["tools"]
+            ]
 
         # Separate system prompt from rest of message
         anthropic_system_message_list: Final = self.translate_system_message(messages=messages)
@@ -1874,7 +1905,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 model=model,
                 messages=messages,
                 llm_provider=self._resolved_provider,
+                preserve_unsigned_thinking_blocks=preserve_unsigned_thinking_blocks,
             )
+        except AnthropicError:
+            raise
         except Exception as e:
             raise AnthropicError(
                 status_code=400,

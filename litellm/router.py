@@ -83,6 +83,7 @@ from litellm.litellm_core_utils.sensitive_data_masker import (
     mask_sensitive_structure,
 )
 from litellm.llms.openai_like.json_loader import JSONProviderRegistry
+from litellm.router_protocol import _build_deployment_protocol_context
 from litellm.router_strategy.budget_limiter import RouterBudgetLimiting
 from litellm.router_strategy.least_busy import LeastBusyLoggingHandler
 from litellm.router_strategy.lowest_cost import LowestCostLoggingHandler
@@ -133,7 +134,6 @@ from litellm.router_utils.cooldown_handlers import (
     DEFAULT_COOLDOWN_TIME_SECONDS,
     _async_get_cooldown_deployments,
     _async_get_cooldown_deployments_with_debug_info,
-    _first_present,  # pyright: ignore[reportPrivateUsage] - shared internal helper across router_utils submodules, matching the other cooldown_handlers imports on this line
     _get_cooldown_deployments,
     _set_cooldown_deployments,
     is_advisor_orchestration_failure,
@@ -2275,7 +2275,10 @@ class Router:
                 return self
 
             async def __anext__(self):
-                return await self._async_generator.__anext__()
+                item: Final = await self._async_generator.__anext__()
+                if not self.chunks or self.chunks[-1] is not item:
+                    self.chunks.append(item)
+                return item
 
         async def stream_with_fallbacks():
             fallback_response = None  # Track for cleanup in finally
@@ -2399,6 +2402,7 @@ class Router:
         from litellm.responses.litellm_completion_transformation.streaming_iterator import (
             LiteLLMCompletionStreamingIterator,
         )
+        from litellm.responses.utils import ResponseAPILoggingUtils
         from litellm.types.llms.openai import (
             ResponseAPIUsage,
             ResponseCompletedEvent,
@@ -2441,12 +2445,14 @@ class Router:
         # Native path: completed_response is set only if RESPONSE_COMPLETED
         # arrived before the error (uncommon mid-stream but worth checking).
         # Already ResponseAPIUsage-shaped — return as-is.
-        completed: Final = source_iterator.completed_response
+        completed: Final = getattr(source_iterator, "completed_response", None)
         if isinstance(
             completed,
             (ResponseCompletedEvent, ResponseFailedEvent, ResponseIncompleteEvent),
         ):
-            return completed.response.usage
+            response: Final = completed.response
+            usage: Final = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            return ResponseAPILoggingUtils._coerce_response_api_usage(usage)
         return None
 
     @staticmethod
@@ -2480,16 +2486,25 @@ class Router:
             (ResponseCompletedEvent, ResponseFailedEvent, ResponseIncompleteEvent),
         ):
             return
-        response: Final = fallback_item.response
-        if response.usage is None:
-            return
+        from litellm.responses.utils import ResponseAPILoggingUtils
 
-        fb: Final = response.usage
-        response.usage = ResponseAPIUsage(
-            input_tokens=(partial_usage.input_tokens or 0) + (fb.input_tokens or 0),
-            output_tokens=(partial_usage.output_tokens or 0) + (fb.output_tokens or 0),
-            total_tokens=(partial_usage.total_tokens or 0) + (fb.total_tokens or 0),
-        )
+        try:
+            response: Final = fallback_item.response
+            usage: Final = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            fallback_usage: Final = ResponseAPILoggingUtils._coerce_response_api_usage(usage)
+            if fallback_usage is None:
+                return
+            combined_usage: Final = ResponseAPIUsage(
+                input_tokens=(partial_usage.input_tokens or 0) + (fallback_usage.input_tokens or 0),
+                output_tokens=(partial_usage.output_tokens or 0) + (fallback_usage.output_tokens or 0),
+                total_tokens=(partial_usage.total_tokens or 0) + (fallback_usage.total_tokens or 0),
+            )
+            if isinstance(response, dict):
+                response["usage"] = combined_usage.model_dump()
+            else:
+                response.usage = combined_usage
+        except Exception:
+            return
 
     @staticmethod
     def _build_responses_continuation_input(
@@ -2701,7 +2716,10 @@ class Router:
                 async for item in source_iterator:
                     yield item
             except MidStreamFallbackError as e:
-                partial_usage: Final = Router._extract_partial_responses_usage(source_iterator)
+                try:
+                    partial_usage: Final = Router._extract_partial_responses_usage(source_iterator)
+                except Exception:
+                    partial_usage = None
                 try:
                     model_group: Final = cast(str, initial_kwargs.get("model"))
                     fallbacks: Final[list | None] = initial_kwargs.get("fallbacks", self.fallbacks)
@@ -2818,7 +2836,10 @@ class Router:
                 return self
 
             def __next__(self):
-                return next(self._sync_generator)
+                item: Final = next(self._sync_generator)
+                if not self.chunks or self.chunks[-1] is not item:
+                    self.chunks.append(item)
+                return item
 
         router_self: Final = self
 
@@ -3255,7 +3276,12 @@ class Router:
             kwargs.pop(key, None)
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
 
-        model_info = deployment.get("model_info", {}).copy()
+        raw_model_info: Final = deployment.get("model_info", {})
+        model_info = raw_model_info.copy()
+        protocol_context: Final = _build_deployment_protocol_context(raw_model_info)
+        kwargs.pop("_litellm_deployment_protocol_context", None)
+        if protocol_context is not None:
+            kwargs["_litellm_deployment_protocol_context"] = protocol_context
         deployment_litellm_model_name = deployment["litellm_params"]["model"]
         deployment_api_base = deployment["litellm_params"].get("api_base")
         deployment_model_name: Final = deployment["model_name"]
@@ -3271,6 +3297,10 @@ class Router:
             function_name=function_name,
         )
 
+        # Routing telemetry must use this router-authored snapshot rather than
+        # either metadata container. The other metadata container can remain
+        # caller-provided for Chat/Responses compatibility.
+        kwargs.pop("_litellm_routing_stats_metadata", None)
         kwargs.setdefault(metadata_variable_name, {}).update(
             {
                 "deployment": deployment_litellm_model_name,
@@ -3279,6 +3309,48 @@ class Router:
                 "deployment_model_name": deployment_model_name,
             }
         )
+        model_group: Final = kwargs[metadata_variable_name].get("model_group")
+        access_groups: Final = model_info.get("access_groups")
+        model_id: Final = model_info.get("id")
+        if (
+            model_id is not None
+            and isinstance(model_group, str)
+            and isinstance(access_groups, list)
+            and access_groups
+            and isinstance(access_groups[0], str)
+            and access_groups[0]
+        ):
+            kwargs["_litellm_routing_stats_metadata"] = {
+                "model_id": str(model_id),
+                "model_group": model_group,
+                "channel": access_groups[0],
+                "api_base": deployment_api_base,
+            }
+        routing_stats_metadata: Final = kwargs.get("_litellm_routing_stats_metadata")
+        logging_obj = kwargs.get("litellm_logging_obj")
+        if logging_obj is not None:
+            # The proxy creates its logging object before Router selects a
+            # deployment. Keep that callback payload in sync here, rather than
+            # waiting for function_setup(), which is skipped for prebuilt loggers.
+            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
+            if isinstance(logging_litellm_params, dict):
+                logging_litellm_params.pop("routing_stats_metadata", None)
+                logging_litellm_params.pop("routing_stats_attempt_id", None)
+                if isinstance(routing_stats_metadata, dict):
+                    logging_litellm_params["routing_stats_metadata"] = routing_stats_metadata
+
+            model_call_details = getattr(logging_obj, "model_call_details", None)
+            if isinstance(model_call_details, dict):
+                model_call_litellm_params = model_call_details.get("litellm_params")
+                if isinstance(model_call_litellm_params, dict):
+                    model_call_litellm_params.pop("routing_stats_metadata", None)
+                    model_call_litellm_params.pop("routing_stats_attempt_id", None)
+                    if isinstance(routing_stats_metadata, dict):
+                        model_call_litellm_params["routing_stats_metadata"] = routing_stats_metadata
+
+            # This is callback-only state. Do not let it flow through the Chat
+            # provider parameter builder after a prebuilt logger was updated.
+            kwargs.pop("_litellm_routing_stats_metadata", None)
 
         # A retry/fallback reuses this same kwargs dict for the next deployment.
         # Refund and clear any reservation the previous deployment attempt left
@@ -3307,6 +3379,17 @@ class Router:
             kwargs[metadata_variable_name]["tags"] = existing_tags
 
         kwargs["model_info"] = model_info
+        logging_obj = kwargs.get("litellm_logging_obj")
+        if logging_obj is not None:
+            logging_litellm_params = getattr(logging_obj, "litellm_params", None)
+            if isinstance(logging_litellm_params, dict):
+                logging_litellm_params["model_info"] = model_info
+
+            model_call_details = getattr(logging_obj, "model_call_details", None)
+            if isinstance(model_call_details, dict):
+                model_call_litellm_params = model_call_details.get("litellm_params")
+                if isinstance(model_call_litellm_params, dict):
+                    model_call_litellm_params["model_info"] = model_info
 
         if function_name == "_ageneric_api_call_with_fallbacks":
             from litellm.passthrough.timeout_utils import (
@@ -4653,7 +4736,13 @@ class Router:
             kwargs["endpoint"] = kwargs["endpoint"].replace(model, replacement_model_name)
         return kwargs
 
-    async def _ageneric_api_call_with_fallbacks_helper(self, model: str, original_generic_function: Callable, **kwargs):
+    async def _ageneric_api_call_with_fallbacks_helper(
+        self,
+        model: str,
+        original_generic_function: Callable,
+        _litellm_router_call_type: str | None = None,
+        **kwargs,
+    ):
         """
         Helper function to make a generic LLM API call through the router, this allows you to use retries/fallbacks with litellm router
         """
@@ -4662,6 +4751,8 @@ class Router:
         function_name: Final = "_ageneric_api_call_with_fallbacks"
         deployment = None  # rebind-ok: pre-init so the except block can stamp a failure with no deployment picked
         try:
+            if _litellm_router_call_type == "anthropic_messages":
+                kwargs["_litellm_router_call_type"] = _litellm_router_call_type
             parent_otel_span: Final = _get_parent_otel_span_from_kwargs(kwargs)
             try:
                 deployment = await self.async_get_available_deployment(  # rebind-ok: set on success, see pre-init above
@@ -4676,6 +4767,7 @@ class Router:
                     return await original_generic_function(model=model, **kwargs)
                 raise e
 
+            kwargs.pop("_litellm_router_call_type", None)
             self._update_kwargs_with_deployment(deployment=deployment, kwargs=kwargs, function_name=function_name)
 
             data: Final = deployment["litellm_params"].copy()
@@ -5907,6 +5999,7 @@ class Router:
             client: Any | None = None,
             **kwargs,
         ):
+            kwargs.pop("_litellm_router_call_type", None)
             if call_type == "assistants":
                 return await self._pass_through_assistants_endpoint_factory(
                     original_function=original_function,
@@ -5981,6 +6074,7 @@ class Router:
             ):
                 return await self._ageneric_api_call_with_fallbacks(
                     original_function=original_function,
+                    _litellm_router_call_type=call_type,
                     **kwargs,
                 )
             elif call_type in (
@@ -6321,7 +6415,7 @@ class Router:
         original_model_group: Final[str | None] = kwargs.get("model")
         fallback_failure_exception_str = ""
 
-        if disable_fallbacks is True or original_model_group is None:
+        if disable_fallbacks is True or getattr(e, "_litellm_disable_fallbacks", False) or original_model_group is None:
             raise e
 
         input_kwargs: Final = {
@@ -6347,9 +6441,10 @@ class Router:
         # Use wildcard-aware lookup so order-based fallback also works for model
         # groups resolved via pattern routing (e.g. `openai/*` -> `openai/gpt-4.1-mini`).
         all_deployments: Final = self.get_model_list(model_name=original_model_group, team_id=_request_team_id) or []
+        order_fallback_deployments: Final = self._filter_blocked_deployments(all_deployments)
         _order_set: Final[set] = {
             litellm.utils._get_deployment_order(d)
-            for d in all_deployments
+            for d in order_fallback_deployments
             if litellm.utils._get_deployment_order(d) is not None
         }
         order_values: Final[list] = sorted(_order_set)
@@ -7189,6 +7284,21 @@ class Router:
 
         return None
 
+    @staticmethod
+    def _normalize_cooldown_time(cooldown_time: object) -> float | None:
+        if isinstance(cooldown_time, bool) or not isinstance(cooldown_time, (int, float)) or cooldown_time < 0:
+            return None
+        return float(cooldown_time)
+
+    @classmethod
+    def _get_valid_deployment_cooldown_time(cls, deployment: Deployment | dict[str, Any]) -> float | None:
+        if isinstance(deployment, Deployment):
+            return cls._normalize_cooldown_time(getattr(deployment.litellm_params, "cooldown_time", None))
+        deployment_params: Final = deployment.get("litellm_params")
+        if not isinstance(deployment_params, dict):
+            return None
+        return cls._normalize_cooldown_time(deployment_params.get("cooldown_time"))
+
     def deployment_callback_on_failure(
         self,
         kwargs,  # kwargs to completion
@@ -7226,10 +7336,18 @@ class Router:
                 original_exception=exception
             )
 
-            # Determine cooldown time with priority: deployment config > response header > router default
-            deployment_cooldown: Final = _first_present(
-                _model_info if isinstance(_model_info, dict) else None, litellm_params, key="cooldown_time"
+            raw_deployment_id: Final = _model_info.get("id") if isinstance(_model_info, dict) else None
+            deployment_id: Final = str(raw_deployment_id) if raw_deployment_id is not None else None
+            configured_deployment: Final = (
+                self.get_deployment(model_id=deployment_id) if deployment_id is not None else None
             )
+            configured_cooldown: Final = (
+                self._get_valid_deployment_cooldown_time(configured_deployment)
+                if configured_deployment is not None
+                else None
+            )
+            request_cooldown: Final = litellm_params.get("cooldown_time", None)
+            deployment_cooldown: Final = configured_cooldown if configured_cooldown is not None else request_cooldown
 
             header_cooldown = None
             if exception_headers is not None:
@@ -7250,7 +7368,6 @@ class Router:
                 _time_to_cooldown = self.cooldown_time
 
             if isinstance(_model_info, dict):
-                deployment_id: Final[str | None] = _model_info.get("id")
                 if deployment_id is None:
                     return False
                 increment_deployment_failures_for_current_minute(
@@ -7517,12 +7634,15 @@ class Router:
                             target=logging_obj.failure_handler,
                             args=(e, traceback.format_exc()),
                         ).start()  # log response
+                    deployment_cooldown: Final = self._get_valid_deployment_cooldown_time(deployment)
                     _set_cooldown_deployments(
                         litellm_router_instance=self,
                         exception_status=e.status_code,
                         original_exception=e,
                         deployment=deployment["model_info"]["id"],
-                        time_to_cooldown=self.cooldown_time,
+                        time_to_cooldown=(
+                            deployment_cooldown if deployment_cooldown is not None else self.cooldown_time
+                        ),
                     )
                     raise e
                 except Exception as e:

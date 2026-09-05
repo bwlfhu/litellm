@@ -112,6 +112,8 @@ from litellm.proxy.common_utils.callback_utils import (
     strip_callback_config,
 )
 from litellm.proxy.common_utils.realtime_utils import _realtime_request_body
+from litellm.proxy.observability.observability_endpoints import router as observability_router
+from litellm.proxy.observability.routing_stats import initialize_routing_stats
 from litellm.router_utils.add_retry_fallback_headers import (
     get_fallback_errors_from_headers,
     get_hidden_params_dict,
@@ -3526,7 +3528,12 @@ def _write_health_state_to_router_cache(
                 original_exception=original_exception,
                 exception_status=exception_status,
                 deployment=model_id,
-                time_to_cooldown=llm_router.cooldown_time,
+                time_to_cooldown=(
+                    llm_router._get_valid_deployment_cooldown_time(deployment)
+                    if (deployment := llm_router.get_deployment(model_id=model_id)) is not None
+                    and llm_router._get_valid_deployment_cooldown_time(deployment) is not None
+                    else llm_router.cooldown_time
+                ),
             )
 
     except Exception as e:
@@ -8535,6 +8542,8 @@ class ProxyStartupEvent:
         """Initialize logging and alerting on startup"""
         ## COST TRACKING ##
         cost_tracking()
+
+        initialize_routing_stats(redis_cache=redis_usage_cache)
 
         proxy_logging_obj.startup_event(llm_router=llm_router, redis_usage_cache=redis_usage_cache)
 
@@ -17471,6 +17480,7 @@ app.include_router(management_v1_router)
 app.include_router(spend_management_router)
 app.include_router(caching_router)
 app.include_router(analytics_router)
+app.include_router(observability_router)
 app.include_router(callback_management_endpoints_router)
 app.include_router(debugging_endpoints_router)
 app.include_router(rust_control_plane_router)

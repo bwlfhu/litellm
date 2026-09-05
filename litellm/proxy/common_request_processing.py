@@ -3,6 +3,8 @@ import contextlib
 import json
 import logging
 import math
+import os
+import time
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from datetime import datetime
@@ -835,6 +837,30 @@ def _sse_error_payload(exc: BaseException) -> tuple[int, Mapping[str, object]]:
     return error_status, error_obj
 
 
+_STREAM_TIMING_LOG_ENABLED: Final = os.getenv("LITELLM_STREAM_TIMING_LOG", "").lower() in {"1", "true", "yes"}
+
+
+def _log_stream_timing(
+    event: str,
+    started_at: float,
+    request: Request | None = None,
+    headers: Mapping[str, object] | None = None,
+) -> None:
+    if not _STREAM_TIMING_LOG_ENABLED:
+        return
+    request_id: Final = (
+        request.headers.get("x-request-id", "-") if request is not None else (headers or {}).get("x-request-id", "-")
+    )
+    path: Final = request.url.path if request is not None else "-"
+    verbose_proxy_logger.info(
+        "SSE stream timing event=%s elapsed_ms=%.1f path=%s request_id=%s",
+        event,
+        (time.monotonic() - started_at) * 1000,
+        path,
+        request_id,
+    )
+
+
 def _sse_error_frames(error_obj: Mapping[str, object]) -> tuple[str, str]:
     """The two frames an SSE stream ends with once it can no longer raise."""
     return f"data: {json.dumps({'error': error_obj})}\n\n", "data: [DONE]\n\n"
@@ -861,6 +887,7 @@ async def create_response(
     }
     first_chunk_value: str | None = None
     final_status_code = default_status_code
+    stream_started_at: Final = time.monotonic()
 
     try:
         # Handle coroutine that returns a generator
@@ -869,6 +896,7 @@ async def create_response(
 
         # Now get the first chunk from the actual generator
         first_chunk_value = await _buffer_first_chunk_honoring_disconnect(generator, request)
+        _log_stream_timing("first_chunk_ready", stream_started_at, request, streaming_headers)
 
         if first_chunk_value is not None:
             try:
@@ -901,6 +929,7 @@ async def create_response(
                 verbose_proxy_logger.debug("Error parsing first chunk value: %s", e)
 
     except _ClientDisconnectedBeforeFirstChunk:
+        _log_stream_timing("client_disconnected", stream_started_at, request, streaming_headers)
         # Client vanished during the time-to-first-token wait; the upstream
         # stream is already closed. Return a 499 the (now-gone) client never reads.
         return JSONResponse(
@@ -916,6 +945,8 @@ async def create_response(
             headers=headers,
         )
     except StopAsyncIteration:
+        _log_stream_timing("stream_empty", stream_started_at, request, streaming_headers)
+
         # Generator was empty. Default status
         async def empty_gen() -> AsyncGenerator[str, None]:
             if False:
@@ -929,6 +960,7 @@ async def create_response(
         )
     except Exception as e:
         # Unexpected error consuming first chunk.
+        _log_stream_timing("upstream_error_before_first_chunk", stream_started_at, request, streaming_headers)
         verbose_proxy_logger.exception("Error consuming first chunk from generator: %s", e)
 
         error_status, error_obj = _sse_error_payload(e)
@@ -945,19 +977,23 @@ async def create_response(
         )
 
     async def combined_generator() -> AsyncGenerator[str, None]:
-        if not _DD_STREAMING_TRACE_ENABLED:
-            # Fast path: no per-chunk span object / context-manager overhead.
+        try:
+            _log_stream_timing("downstream_first_chunk", stream_started_at, request, streaming_headers)
+            if not _DD_STREAMING_TRACE_ENABLED:
+                # Fast path: no per-chunk span object / context-manager overhead.
+                if first_chunk_value is not None:
+                    yield first_chunk_value
+                async for chunk in generator:
+                    yield chunk
+                return
             if first_chunk_value is not None:
-                yield first_chunk_value
+                with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
+                    yield first_chunk_value
             async for chunk in generator:
-                yield chunk
-            return
-        if first_chunk_value is not None:
-            with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
-                yield first_chunk_value
-        async for chunk in generator:
-            with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
-                yield chunk
+                with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
+                    yield chunk
+        finally:
+            _log_stream_timing("stream_closed", stream_started_at, request, streaming_headers)
 
     return _UpstreamClosingStreamingResponse(
         combined_generator(),

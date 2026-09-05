@@ -665,6 +665,10 @@ class Logging(LiteLLMLoggingBaseClass):
         """
         if not hasattr(self, "litellm_params"):
             return None
+        model_info: Final = self.litellm_params.get("model_info", {}) or {}
+        model_id = model_info.get("id")
+        if model_id is not None:
+            return model_id
         for key in ("litellm_metadata", "metadata"):
             meta = self.litellm_params.get(key, {}) or {}
             info = meta.get("model_info", {}) or {}
@@ -707,9 +711,16 @@ class Logging(LiteLLMLoggingBaseClass):
         if model is not None:
             self.model = model
         self.user = user
+        logging_litellm_params: Final = {
+            key: value for key, value in litellm_params.items() if key != "_litellm_deployment_protocol_context"
+        }
         self.litellm_params = {
-            **self.litellm_params,
-            **scrub_sensitive_keys_in_metadata(litellm_params),
+            **{
+                key: value
+                for key, value in self.litellm_params.items()
+                if key != "_litellm_deployment_protocol_context"
+            },
+            **scrub_sensitive_keys_in_metadata(logging_litellm_params),
         }
         self.litellm_request_debug = litellm_params.get("litellm_request_debug", False)
         self.logger_fn = litellm_params.get("logger_fn", None)
@@ -759,6 +770,12 @@ class Logging(LiteLLMLoggingBaseClass):
         so callers don't need to manually plumb them into litellm_params.
         """
         base_litellm_params: Final[dict[str, Any]] = {}
+
+        existing_model_info: Final = self.litellm_params.get("model_info")
+        if isinstance(existing_model_info, dict):
+            base_litellm_params["model_info"] = existing_model_info
+        if isinstance(kwargs.get("model_info"), dict):
+            base_litellm_params["model_info"] = kwargs["model_info"]
 
         if isinstance(kwargs.get("metadata"), dict):
             base_litellm_params["metadata"] = kwargs["metadata"].copy()
@@ -1602,6 +1619,10 @@ class Logging(LiteLLMLoggingBaseClass):
         custom_pricing: Final = use_custom_pricing_for_model(
             litellm_params=(self.litellm_params if hasattr(self, "litellm_params") else None)
         )
+        custom_llm_provider: Final = get_custom_pricing_provider(
+            litellm_params=(self.litellm_params if hasattr(self, "litellm_params") else None),
+            custom_llm_provider=self.model_call_details.get("custom_llm_provider", None),
+        )
 
         prompt = self._prompt_for_cost_calculation()
 
@@ -1613,7 +1634,7 @@ class Logging(LiteLLMLoggingBaseClass):
                 "response_object": result,
                 "model": litellm_model_name or self.model,
                 "cache_hit": cache_hit,
-                "custom_llm_provider": self.model_call_details.get("custom_llm_provider", None),
+                "custom_llm_provider": custom_llm_provider,
                 "base_model": _get_base_model_from_metadata(model_call_details=self.model_call_details),
                 "call_type": self.call_type,
                 "optional_params": self.optional_params,
@@ -2088,15 +2109,8 @@ class Logging(LiteLLMLoggingBaseClass):
                     )
             elif standard_logging_object is not None:
                 self.model_call_details["standard_logging_object"] = standard_logging_object
-            else:
-                # Streaming reaches here before its cost is known, so the cost
-                # is seeded to None, but only when nothing has already
-                # established one. A stream that assembles into a response
-                # object recomputes the cost right after this; a pass-through
-                # stream cannot (its body is opaque) and carries the cost its
-                # upstream reported in the response headers, which an
-                # unconditional reset would discard.
-                self.model_call_details.setdefault("response_cost", None)
+            elif self.model_call_details.get("response_cost") is None:
+                self.model_call_details["response_cost"] = None
 
             result = self._transform_usage_objects(result=result)
 
@@ -3558,7 +3572,7 @@ class Logging(LiteLLMLoggingBaseClass):
         end_time: datetime.datetime,
         is_async: bool,
         streaming_chunks: list[object],
-    ) -> ModelResponse | TextCompletionResponse | ResponsesAPIResponse | None:
+    ) -> ModelResponse | TextCompletionResponse | ResponsesAPIResponse | dict[str, object] | None:
         if self.stream is not True:
             return None
         if isinstance(result, ModelResponse) or isinstance(result, TextCompletionResponse):
@@ -3567,22 +3581,33 @@ class Logging(LiteLLMLoggingBaseClass):
             result,
             (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent),
         ):
-            ## return unified Usage object
-            if isinstance(result.response.usage, ResponseAPIUsage):
+            if isinstance(result.response, dict):
+                response = dict(result.response)
+            elif isinstance(result.response, BaseModel):
+                response = result.response.model_copy()
+            else:
+                response = copy.copy(result.response)
+            usage: Final = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            normalized_usage: Final = ResponseAPILoggingUtils._coerce_response_api_usage(usage)
+            if normalized_usage is not None:
                 transformed_usage: Final = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-                    result.response.usage
+                    normalized_usage
                 )
-                # Set as dict instead of Usage object so model_dump() serializes it correctly
-                setattr(
-                    result.response,
-                    "usage",
-                    (
-                        transformed_usage.model_dump()
-                        if hasattr(transformed_usage, "model_dump")
-                        else dict(transformed_usage)
-                    ),
+                serialized_usage = (
+                    transformed_usage.model_dump()
+                    if hasattr(transformed_usage, "model_dump")
+                    else dict(transformed_usage)
                 )
-            return result.response
+            elif usage is not None:
+                serialized_usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0).model_dump()
+            else:
+                serialized_usage = None
+            if serialized_usage is not None:
+                if isinstance(response, dict):
+                    response["usage"] = serialized_usage
+                else:
+                    setattr(response, "usage", serialized_usage)
+            return response
         else:
             return None
 
@@ -4829,6 +4854,12 @@ def use_custom_pricing_for_model(litellm_params: dict | None) -> bool:
         if litellm_params.get(key) is not None:
             return True
 
+    model_info: dict = litellm_params.get("model_info", {}) or {}
+    matching_keys = _CUSTOM_PRICING_KEYS & model_info.keys()
+    for key in matching_keys:
+        if model_info.get(key) is not None:
+            return True
+
     # Check model_info from metadata or litellm_metadata (generic_api_call routes
     # like /responses and /messages store model_info under litellm_metadata)
     for metadata_key in ("metadata", "litellm_metadata"):
@@ -4842,6 +4873,25 @@ def use_custom_pricing_for_model(litellm_params: dict | None) -> bool:
                     return True
 
     return False
+
+
+def get_custom_pricing_provider(
+    litellm_params: dict | None,
+    custom_llm_provider: str | None,
+) -> str | None:
+    if litellm_params is None:
+        return custom_llm_provider
+
+    for model_info in (
+        litellm_params.get("model_info", {}) or {},
+        (litellm_params.get("metadata", {}) or {}).get("model_info", {}) or {},
+        (litellm_params.get("litellm_metadata", {}) or {}).get("model_info", {}) or {},
+    ):
+        pricing_provider = model_info.get("litellm_provider") if isinstance(model_info, dict) else None
+        if isinstance(pricing_provider, str):
+            return pricing_provider
+
+    return custom_llm_provider
 
 
 def is_valid_sha256_hash(value: str) -> bool:

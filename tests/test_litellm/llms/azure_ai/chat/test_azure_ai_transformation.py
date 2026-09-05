@@ -115,9 +115,7 @@ def test_azure_ai_grok_stop_parameter_handling():
     # Test supported parameters for Grok models
     for model in ("grok-4-fast", "grok-4.3"):
         grok_params = config.get_supported_openai_params(model)
-        assert (
-            "stop" not in grok_params
-        ), "Grok models should not support stop parameter"
+        assert "stop" not in grok_params, "Grok models should not support stop parameter"
 
     # Test supported parameters for non-Grok models
     gpt_params = config.get_supported_openai_params("gpt-4")
@@ -196,8 +194,7 @@ def test_azure_model_router_response_shows_actual_model():
 
     # Verify that the response contains the actual model used, not the router model
     assert result.model == "azure_ai/gpt-5-nano-2025-08-07", (
-        f"Expected model to be 'azure_ai/gpt-5-nano-2025-08-07' (actual model used), "
-        f"but got '{result.model}'"
+        f"Expected model to be 'azure_ai/gpt-5-nano-2025-08-07' (actual model used), but got '{result.model}'"
     )
 
 
@@ -221,14 +218,10 @@ def test_drop_tool_level_extra_fields_strips_copilot_mcp_server_name():
     mock_response.text = error_text
     mock_response.json.return_value = json.loads(error_text)
     mock_response.status_code = 400
-    e = httpx.HTTPStatusError(
-        message="400", request=MagicMock(), response=mock_response
-    )
+    e = httpx.HTTPStatusError(message="400", request=MagicMock(), response=mock_response)
 
     assert config._error_has_tool_level_extra_fields(error_text) is True
-    assert (
-        config.should_retry_llm_api_inside_llm_translation_on_http_error(e, {}) is True
-    )
+    assert config.should_retry_llm_api_inside_llm_translation_on_http_error(e, {}) is True
 
     request_data = {
         "model": "FW-Kimi-K2.6",
@@ -349,9 +342,7 @@ def test_azure_ai_stripping_does_not_mutate_caller_messages():
         {
             "role": "assistant",
             "content": "I can help.",
-            "thinking_blocks": [
-                {"type": "thinking", "thinking": "Reading the file.", "signature": "sig"}
-            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "Reading the file.", "signature": "sig"}],
             "provider_specific_fields": {"thought_signature": "sig-top"},
             "tool_calls": [
                 {
@@ -383,3 +374,27 @@ def test_azure_ai_stripping_does_not_mutate_caller_messages():
     assert original_assistant["tool_calls"][0]["function"]["provider_specific_fields"] == {
         "thought_signature": "sig-nested"
     }
+
+
+def test_transform_messages_strips_internal_reasoning_fields_with_image():
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Here is the image."},
+                {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "Internal.", "signature": "sig1"}],
+            "reasoning_content": "Internal.",
+            "provider_specific_fields": {"reasoning": "Internal."},
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+    result = AzureAIStudioConfig()._transform_messages(messages=messages, model="test-model")
+
+    assert result[0]["content"] == messages[0]["content"]
+    assert "thinking_blocks" not in result[0]
+    assert "reasoning_content" not in result[0]
+    assert "provider_specific_fields" not in result[0]
+    assert "cache_control" not in result[0]

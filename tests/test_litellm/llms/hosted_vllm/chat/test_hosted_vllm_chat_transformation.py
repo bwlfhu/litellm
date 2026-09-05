@@ -106,9 +106,7 @@ def test_hosted_vllm_chat_transformation_with_audio_url():
 
 def test_hosted_vllm_supports_reasoning_effort():
     config = HostedVLLMChatConfig()
-    supported_params = config.get_supported_openai_params(
-        model="hosted_vllm/gpt-oss-120b"
-    )
+    supported_params = config.get_supported_openai_params(model="hosted_vllm/gpt-oss-120b")
     assert "reasoning_effort" in supported_params
     optional_params = config.map_openai_params(
         non_default_params={"reasoning_effort": "high"},
@@ -129,9 +127,7 @@ def test_hosted_vllm_supports_thinking():
     Related issue: https://github.com/BerriAI/litellm/issues/19761
     """
     config = HostedVLLMChatConfig()
-    supported_params = config.get_supported_openai_params(
-        model="hosted_vllm/GLM-4.6-FP8"
-    )
+    supported_params = config.get_supported_openai_params(model="hosted_vllm/GLM-4.6-FP8")
     assert "thinking" in supported_params
 
     # Test thinking below the low threshold -> "minimal"
@@ -200,6 +196,7 @@ def test_hosted_vllm_thinking_blocks_prepended_to_assistant_content():
                     "signature": "abc123",
                 }
             ],
+            "reasoning_content": "Let me reason about this...",
         },
         {
             "role": "user",
@@ -218,6 +215,7 @@ def test_hosted_vllm_thinking_blocks_prepended_to_assistant_content():
     assert isinstance(assistant_msg["content"], str)
     assert assistant_msg["content"] == "Here is my answer."
     assert "thinking_blocks" not in assistant_msg
+    assert "reasoning_content" not in assistant_msg
 
 
 def test_hosted_vllm_thinking_blocks_with_list_content():

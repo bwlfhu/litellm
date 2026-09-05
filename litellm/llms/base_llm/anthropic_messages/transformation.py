@@ -164,6 +164,9 @@ class BaseAnthropicMessagesConfig(ABC):
 
         return e.response.status_code == 400 and is_anthropic_invalid_thinking_signature_error(e.response.text)
 
+    def should_disable_anthropic_messages_fallbacks_on_http_error(self, e: httpx.HTTPStatusError) -> bool:
+        return False
+
     def transform_anthropic_messages_request_on_http_error(self, e: httpx.HTTPStatusError, request_data: dict) -> dict:
         """
         Mutates request_data in place when retrying after a recoverable HTTP error.

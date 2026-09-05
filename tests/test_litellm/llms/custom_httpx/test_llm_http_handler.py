@@ -10,8 +10,8 @@ import pytest
 import litellm
 from litellm._logging import verbose_logger
 from litellm.integrations.code_interpreter_interception.handler import (
-    CodeInterpreterInterceptionLogger,
     LITELLM_CODE_EXECUTION_TOOL_NAME,
+    CodeInterpreterInterceptionLogger,
 )
 from litellm.llms.base_llm.audio_transcription.transformation import (
     AudioTranscriptionRequestData,
@@ -25,13 +25,32 @@ from litellm.llms.custom_httpx.llm_http_handler import (
     _google_genai_streaming_hidden_params,
     _has_pre_call_deployment_hook,
     _rust_responses_websocket_enabled,
+    _log_anthropic_stream_timing,
 )
+from litellm.router_protocol import _build_deployment_protocol_context
+from litellm.types.integrations.custom_logger import AgenticLoopPlan, AgenticLoopRequestPatch
 from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import TranscriptionResponse
 
 _ACTIVE_KEY = "_code_interpreter_interception_active"
 _SANDBOX_KEY = "_code_interpreter_interception_sandbox_key"
+
+
+def test_anthropic_stream_timing_log_is_opt_in(monkeypatch, caplog):
+    import litellm.llms.custom_httpx.llm_http_handler as handler_module
+
+    monkeypatch.setattr(handler_module, "_STREAM_TIMING_LOG_ENABLED", True)
+    with caplog.at_level("INFO", logger="LiteLLM"):
+        _log_anthropic_stream_timing(
+            event="upstream_headers",
+            started_at=0.0,
+            model="gpt-4o",
+            logging_obj=Mock(litellm_call_id="call-1"),
+            status_code=200,
+        )
+
+    assert "Anthropic stream timing event=upstream_headers" in caplog.text
 
 
 def test_prepare_fake_stream_request():
@@ -446,6 +465,86 @@ async def test_async_anthropic_messages_handler_extra_headers():
 
 
 @pytest.mark.asyncio
+async def test_async_anthropic_messages_handler_logs_provider_dispatch_tool_shape():
+    handler = BaseLLMHTTPHandler()
+    dispatched_tools = [{"name": "search", "input_schema": {"type": "object"}}]
+    mock_config = Mock()
+    mock_config.validate_anthropic_messages_environment = Mock(return_value=({}, "https://api.anthropic.com"))
+    mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
+    mock_config.transform_anthropic_messages_request = Mock(
+        return_value={"model": "claude-test", "messages": [], "tools": dispatched_tools}
+    )
+    mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
+    mock_config.sign_request = Mock(return_value=({}, None))
+    mock_logging_obj = Mock()
+    mock_logging_obj.model_call_details = {}
+    mock_logging_obj.litellm_call_id = "call-2"
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=RuntimeError("stop after dispatch"))
+
+    with patch("litellm.llms.custom_httpx.llm_http_handler.log_tool_request_shape") as shape_log:
+        with pytest.raises(Exception):
+            await handler.async_anthropic_messages_handler(
+                model="claude-test",
+                messages=[{"role": "user", "content": "hello"}],
+                anthropic_messages_provider_config=mock_config,
+                anthropic_messages_optional_request_params={"tools": dispatched_tools},
+                custom_llm_provider="anthropic",
+                litellm_params=GenericLiteLLMParams(),
+                logging_obj=mock_logging_obj,
+                client=mock_client,
+                kwargs={"litellm_call_id": "call-2"},
+            )
+
+    shape_log.assert_called_once()
+    assert shape_log.call_args.kwargs["tools"] == dispatched_tools
+    assert shape_log.call_args.kwargs["phase"] == "provider_dispatch"
+    assert shape_log.call_args.kwargs["call_id"] == "call-2"
+    assert shape_log.call_args.kwargs["warn_when_missing"] is False
+    assert shape_log.call_args.kwargs["log_when_present"] is True
+
+
+def test_completion_logs_extra_body_tool_shape_at_provider_dispatch():
+    handler = BaseLLMHTTPHandler()
+    extra_body_tools = [
+        {
+            "type": "function",
+            "function": {"name": "tool", "parameters": {"type": "function"}},
+        }
+    ]
+    mock_config = Mock()
+    mock_config.should_fake_stream = Mock(return_value=False)
+    mock_config.validate_environment = Mock(return_value={})
+    mock_config.get_complete_url = Mock(return_value="https://api.openai.com/v1/chat/completions")
+    mock_config.transform_request = Mock(return_value={"model": "gpt-test", "messages": []})
+    mock_config.sign_request = Mock(side_effect=RuntimeError("stop after dispatch"))
+    mock_logging_obj = Mock()
+    mock_logging_obj.litellm_call_id = "call-3"
+
+    with patch("litellm.llms.custom_httpx.llm_http_handler.log_tool_request_shape") as shape_log:
+        with pytest.raises(RuntimeError, match="stop after dispatch"):
+            handler.completion(
+                model="gpt-test",
+                messages=[{"role": "user", "content": "hello"}],
+                api_base="https://api.openai.com/v1",
+                custom_llm_provider="openai",
+                model_response=Mock(),
+                encoding=None,
+                logging_obj=mock_logging_obj,
+                optional_params={"extra_body": {"tools": extra_body_tools}},
+                timeout=10,
+                litellm_params={},
+                acompletion=False,
+                provider_config=mock_config,
+            )
+
+    shape_log.assert_called_once()
+    assert shape_log.call_args.kwargs["tools"] == extra_body_tools
+    assert shape_log.call_args.kwargs["phase"] == "provider_dispatch"
+    assert shape_log.call_args.kwargs["call_id"] == "call-3"
+
+
+@pytest.mark.asyncio
 async def test_async_anthropic_messages_handler_streaming_forwards_provider_response_headers():
     """
     Regression test for LIT-3724 (issue 2): streaming /v1/messages responses
@@ -668,9 +767,9 @@ async def test_anthropic_messages_streaming_response_aclose_closes_agentic_upstr
 
 @pytest.mark.asyncio
 async def test_async_anthropic_messages_handler_passes_litellm_metadata():
-    """Ensure litellm_metadata from kwargs is forwarded via update_from_kwargs.
+    """Ensure litellm_metadata from router params is forwarded via update_from_kwargs.
 
-    Routes like /messages store model_info under kwargs['litellm_metadata'].
+    Routes like /messages store model_info under GenericLiteLLMParams.litellm_metadata.
     The handler must forward this so that use_custom_pricing_for_model can
     detect custom pricing. Regression test for #23185.
     """
@@ -707,11 +806,9 @@ async def test_async_anthropic_messages_handler_passes_litellm_metadata():
         "input_cost_per_token": 0.0003,
         "output_cost_per_token": 0.0015,
     }
-    kwargs = {
-        "litellm_metadata": {
-            "model_info": custom_model_info,
-            "deployment": "anthropic/claude-sonnet-4-20250514",
-        },
+    litellm_metadata = {
+        "model_info": custom_model_info,
+        "deployment": "anthropic/claude-sonnet-4-20250514",
     }
 
     try:
@@ -721,24 +818,24 @@ async def test_async_anthropic_messages_handler_passes_litellm_metadata():
             anthropic_messages_provider_config=mock_config,
             anthropic_messages_optional_request_params={},
             custom_llm_provider="anthropic",
-            litellm_params=GenericLiteLLMParams(),
+            litellm_params=GenericLiteLLMParams(litellm_metadata=litellm_metadata),
             logging_obj=mock_logging_obj,
             client=mock_client,
-            kwargs=kwargs,
+            kwargs={},
         )
     except Exception:
         pass
 
     mock_logging_obj.update_from_kwargs.assert_called_once()
     call_kwargs = mock_logging_obj.update_from_kwargs.call_args
-    kwargs_arg = (
-        call_kwargs.kwargs.get("kwargs", call_kwargs[1].get("kwargs", {}))
+    litellm_params_arg = (
+        call_kwargs.kwargs.get("litellm_params", call_kwargs[1].get("litellm_params", {}))
         if call_kwargs.kwargs
-        else call_kwargs[1].get("kwargs", {})
+        else call_kwargs[1].get("litellm_params", {})
     )
 
-    assert "litellm_metadata" in kwargs_arg
-    assert kwargs_arg["litellm_metadata"]["model_info"] == custom_model_info
+    assert litellm_params_arg["litellm_metadata"] == litellm_metadata
+    assert "model_info" not in litellm_params_arg
 
 
 @pytest.mark.asyncio
@@ -1100,9 +1197,7 @@ def test_sync_delete_responses_sets_json_content_type():
         ({}, True, None, None),
     ],
 )
-def test_resolve_anthropic_messages_timeout(
-    monkeypatch, litellm_params_kwargs, stream, global_timeout, expected
-):
+def test_resolve_anthropic_messages_timeout(monkeypatch, litellm_params_kwargs, stream, global_timeout, expected):
     from litellm.constants import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
     if global_timeout is None:
@@ -1118,9 +1213,7 @@ def test_resolve_anthropic_messages_timeout(
         )
     else:
         monkeypatch.setattr("litellm.request_timeout", global_timeout, raising=False)
-        monkeypatch.setattr(
-            "litellm.request_timeout_explicitly_set", True, raising=False
-        )
+        monkeypatch.setattr("litellm.request_timeout_explicitly_set", True, raising=False)
 
     resolved = BaseLLMHTTPHandler._resolve_anthropic_messages_timeout(
         litellm_params=GenericLiteLLMParams(**litellm_params_kwargs),
@@ -1145,9 +1238,7 @@ async def test_async_anthropic_messages_handler_forwards_request_timeout(monkeyp
         return_value=({"x-api-key": "k"}, "https://api.anthropic.com")
     )
     mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
-    mock_config.transform_anthropic_messages_request = Mock(
-        return_value={"model": "claude", "messages": []}
-    )
+    mock_config.transform_anthropic_messages_request = Mock(return_value={"model": "claude", "messages": []})
     mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
     mock_config.sign_request = Mock(return_value=({"x-api-key": "k"}, None))
     mock_config.max_retry_on_anthropic_messages_http_error = 1
@@ -1163,20 +1254,66 @@ async def test_async_anthropic_messages_handler_forwards_request_timeout(monkeyp
     logging_obj.model_call_details = {}
     logging_obj.dynamic_success_callbacks = []
 
-    result = await handler.async_anthropic_messages_handler(
-        model="claude",
-        messages=[{"role": "user", "content": "hi"}],
-        anthropic_messages_provider_config=mock_config,
-        anthropic_messages_optional_request_params={},
-        custom_llm_provider="anthropic",
-        litellm_params=GenericLiteLLMParams(request_timeout=0.3),
-        logging_obj=logging_obj,
-        client=mock_client,
-        kwargs={},
-    )
+    with patch("litellm.llms.custom_httpx.llm_http_handler.log_anthropic_response_shape") as response_shape_log:
+        result = await handler.async_anthropic_messages_handler(
+            model="claude",
+            messages=[{"role": "user", "content": "hi"}],
+            anthropic_messages_provider_config=mock_config,
+            anthropic_messages_optional_request_params={},
+            custom_llm_provider="anthropic",
+            litellm_params=GenericLiteLLMParams(request_timeout=0.3),
+            logging_obj=logging_obj,
+            client=mock_client,
+            kwargs={},
+        )
 
     assert result is expected_response
     assert mock_client.post.await_args.kwargs["timeout"] == 0.3
+    response_shape_log.assert_called_once()
+    assert response_shape_log.call_args.kwargs["content"] == []
+    assert response_shape_log.call_args.kwargs["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_async_anthropic_messages_handler_logs_rust_provider_response(monkeypatch):
+    monkeypatch.setattr(litellm, "callbacks", [])
+    handler = BaseLLMHTTPHandler()
+    mock_config = Mock()
+    mock_config.validate_anthropic_messages_environment = Mock(
+        return_value=({"x-api-key": "k"}, "https://api.anthropic.com")
+    )
+    mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
+    mock_config.transform_anthropic_messages_request = Mock(return_value={"model": "claude", "messages": []})
+    mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
+    mock_config.sign_request = Mock(return_value=({"x-api-key": "k"}, None))
+    rust_response = {"id": "msg_rust", "content": [{"type": "tool_use"}], "stop_reason": "tool_use"}
+    logging_obj = Mock()
+    logging_obj.model_call_details = {}
+    logging_obj.dynamic_success_callbacks = []
+    logging_obj.litellm_call_id = "call-rust"
+
+    with (
+        patch.object(handler, "_maybe_rust_anthropic_messages", AsyncMock(return_value=rust_response)),
+        patch.object(handler, "_finalize_anthropic_messages_response", AsyncMock(return_value=rust_response)),
+        patch("litellm.llms.custom_httpx.llm_http_handler.log_anthropic_response_shape") as response_shape_log,
+    ):
+        result = await handler.async_anthropic_messages_handler(
+            model="claude",
+            messages=[{"role": "user", "content": "hi"}],
+            anthropic_messages_provider_config=mock_config,
+            anthropic_messages_optional_request_params={},
+            custom_llm_provider="anthropic",
+            litellm_params=GenericLiteLLMParams(),
+            logging_obj=logging_obj,
+            client=AsyncMock(spec=AsyncHTTPHandler),
+            kwargs={"litellm_call_id": "call-rust"},
+        )
+
+    assert result is rust_response
+    response_shape_log.assert_called_once()
+    assert response_shape_log.call_args.kwargs["content"] == [{"type": "tool_use"}]
+    assert response_shape_log.call_args.kwargs["call_id"] == "call-rust"
+    assert response_shape_log.call_args.kwargs["stream"] is False
 
 
 @pytest.mark.asyncio
@@ -1193,9 +1330,7 @@ async def test_async_anthropic_messages_handler_forwards_stream_timeout(monkeypa
         return_value=({"x-api-key": "k"}, "https://api.anthropic.com")
     )
     mock_config.should_filter_anthropic_beta_headers = Mock(return_value=False)
-    mock_config.transform_anthropic_messages_request = Mock(
-        return_value={"model": "claude", "messages": []}
-    )
+    mock_config.transform_anthropic_messages_request = Mock(return_value={"model": "claude", "messages": []})
     mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
     mock_config.sign_request = Mock(return_value=({"x-api-key": "k"}, None))
     mock_config.max_retry_on_anthropic_messages_http_error = 1
@@ -1386,6 +1521,7 @@ def _make_responses_handler_call(signed_body):
     signing provider (e.g. Bedrock Mantle).
     """
     from unittest.mock import MagicMock
+
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
     from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
     from litellm.types.router import GenericLiteLLMParams
@@ -1441,6 +1577,7 @@ def test_responses_handler_signs_after_fake_stream_prep_strips_stream():
     We snapshot request_data at sign time and assert "stream" is already gone.
     """
     from unittest.mock import MagicMock
+
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
     from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
     from litellm.types.llms.openai import ResponsesAPIResponse
@@ -1504,6 +1641,7 @@ def _make_compact_handler_call(signed_body, is_async):
     signing provider (e.g. Bedrock Mantle SigV4 / bearer).
     """
     from unittest.mock import MagicMock
+
     from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
     from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
     from litellm.types.router import GenericLiteLLMParams
@@ -1598,14 +1736,20 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
 
     mock_config = Mock()
     mock_config.validate_anthropic_messages_environment = Mock(
-        return_value=({"x-api-key": "sk-test"}, "https://api.anthropic.com")
+        return_value=({"x-api-key": "sk-test"}, "https://resolved.example.test/base")
     )
     mock_config.transform_anthropic_messages_request = Mock(
         return_value={"model": "claude-haiku", "messages": [], "max_tokens": 16}
     )
     mock_config.sign_request = Mock(return_value=({}, None))
 
-    fake_raw_response = {"id": "msg_1", "type": "message", "role": "assistant", "content": [], "stop_reason": "end_turn"}
+    fake_raw_response = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "stop_reason": "end_turn",
+    }
     mock_config.transform_anthropic_messages_response = Mock(return_value=fake_raw_response)
 
     mock_logging_obj = Mock()
@@ -1616,6 +1760,13 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
 
     captured_kwargs: dict = {}
     sentinel_response = object()
+    protocol_context = _build_deployment_protocol_context(
+        {
+            "deepseek_anthropic_messages_path": "v1/messages",
+            "deepseek_anthropic_missing_reasoning": "placeholder",
+        }
+    )
+    assert protocol_context is not None
 
     async def fake_agentic_hooks(**call_kwargs):
         captured_kwargs.update(call_kwargs)
@@ -1625,10 +1776,17 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
     mock_httpx_response.status_code = 200
 
     with (
-        patch.object(handler, "_async_post_anthropic_messages_with_http_error_retry", new=AsyncMock(return_value=mock_httpx_response)),
+        patch.object(
+            handler,
+            "_async_post_anthropic_messages_with_http_error_retry",
+            new=AsyncMock(return_value=mock_httpx_response),
+        ),
         patch.object(handler, "_call_agentic_completion_hooks", side_effect=fake_agentic_hooks),
         patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client"),
-        patch("litellm.litellm_core_utils.get_provider_specific_headers.ProviderSpecificHeaderUtils.get_provider_specific_headers", return_value=None),
+        patch(
+            "litellm.litellm_core_utils.get_provider_specific_headers.ProviderSpecificHeaderUtils.get_provider_specific_headers",
+            return_value=None,
+        ),
     ):
         result = await handler.async_anthropic_messages_handler(
             model="claude-haiku",
@@ -1639,7 +1797,9 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
             litellm_params=GenericLiteLLMParams(api_key="sk-real-anthropic-key"),
             logging_obj=mock_logging_obj,
             api_key="sk-real-anthropic-key",
+            api_base="https://tenant.example.test/base",
             stream=False,
+            deployment_protocol_context=protocol_context,
         )
 
     assert result is sentinel_response
@@ -1649,6 +1809,148 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
         "api_key must be injected into kwargs passed to _call_agentic_completion_hooks "
         "so follow-up calls in agentic hooks (e.g. websearch) can authenticate"
     )
+    assert forwarded["api_base"] == "https://resolved.example.test/base"
+    assert forwarded["_litellm_deployment_protocol_context"] is protocol_context
+    assert "_litellm_deployment_protocol_context" not in mock_logging_obj.update_from_kwargs.call_args.kwargs["kwargs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("patch_model", ["anthropic/deepseek-v4-pro", "deepseek-v4-pro"])
+async def test_anthropic_agentic_followup_preserves_trusted_deployment_protocol_context(patch_model: str):
+    handler = BaseLLMHTTPHandler()
+    protocol_context = _build_deployment_protocol_context(
+        {
+            "deepseek_anthropic_messages_path": "v1/messages",
+            "deepseek_anthropic_tool_thinking": "disabled",
+        }
+    )
+    assert protocol_context is not None
+    followup = AsyncMock(return_value={"content": []})
+    plan = AgenticLoopPlan(
+        run_agentic_loop=True,
+        request_patch=AgenticLoopRequestPatch(
+            model=patch_model,
+            messages=[{"role": "user", "content": "tool result"}],
+            kwargs={
+                "_litellm_deployment_protocol_context": {"protocol": "untrusted"},
+                "custom_llm_provider": "deepseek",
+                "api_key": "sk-old-deployment",
+                "api_base": "https://tenant.example.test/base",
+            },
+        ),
+    )
+    logging_obj = Mock()
+    logging_obj.model_call_details = {
+        "agentic_loop_params": {
+            "model": "anthropic/deepseek-v4-pro",
+            "custom_llm_provider": "anthropic",
+        }
+    }
+
+    with patch("litellm.anthropic_interface.messages.acreate", new=followup):
+        await handler._execute_anthropic_agentic_plan(
+            plan=plan,
+            model="deepseek-v4-pro",
+            messages=[],
+            anthropic_messages_optional_request_params={"max_tokens": 100},
+            logging_obj=logging_obj,
+            kwargs={
+                "_litellm_deployment_protocol_context": protocol_context,
+                "custom_llm_provider": "deepseek",
+                "api_key": "sk-old-deployment",
+                "api_base": "https://tenant.example.test/base",
+            },
+            depth=0,
+            max_loops=3,
+            fingerprints=[],
+            fingerprint="tool-call",
+        )
+
+    assert followup.await_args.kwargs["model"] == "anthropic/deepseek-v4-pro"
+    assert followup.await_args.kwargs["custom_llm_provider"] == "anthropic"
+    assert followup.await_args.kwargs["api_base"] == "https://tenant.example.test/base"
+    assert followup.await_args.kwargs["api_key"] == "sk-old-deployment"
+    assert followup.await_args.kwargs["_litellm_deployment_protocol_context"] is protocol_context
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch_model", "patch_provider", "patch_api_base"),
+    [
+        ("anthropic/claude-sonnet-4-20250514", "deepseek", "https://old-deployment.example.test/base"),
+        ("openai/gpt-5.6-sol", "deepseek", "https://old-deployment.example.test/base"),
+        (None, "openai", "https://old-deployment.example.test/base"),
+        (None, "anthropic", "https://old-deployment.example.test/base"),
+        (None, "deepseek", "https://new-deployment.example.test/base"),
+    ],
+)
+async def test_anthropic_agentic_followup_clears_deployment_context_on_target_switch(
+    patch_model, patch_provider, patch_api_base
+):
+    handler = BaseLLMHTTPHandler()
+    protocol_context = _build_deployment_protocol_context(
+        {
+            "deepseek_anthropic_messages_path": "v1/messages",
+            "deepseek_anthropic_tool_thinking": "disabled",
+        }
+    )
+    assert protocol_context is not None
+    followup = AsyncMock(return_value={"content": []})
+    patch_kwargs = {
+        "custom_llm_provider": patch_provider,
+        "api_key": "sk-old-deployment",
+        "api_base": patch_api_base,
+    }
+    plan = AgenticLoopPlan(
+        run_agentic_loop=True,
+        request_patch=AgenticLoopRequestPatch(
+            model=patch_model,
+            messages=[{"role": "user", "content": "tool result"}],
+            kwargs=patch_kwargs,
+        ),
+    )
+    logging_obj = Mock()
+    logging_obj.model_call_details = {
+        "agentic_loop_params": {
+            "model": "anthropic/deepseek-v4-pro",
+            "custom_llm_provider": "anthropic",
+        }
+    }
+
+    with patch("litellm.anthropic_interface.messages.acreate", new=followup):
+        await handler._execute_anthropic_agentic_plan(
+            plan=plan,
+            model="deepseek-v4-pro",
+            messages=[],
+            anthropic_messages_optional_request_params={"max_tokens": 100},
+            logging_obj=logging_obj,
+            kwargs={
+                "_litellm_deployment_protocol_context": protocol_context,
+                "custom_llm_provider": "deepseek",
+                "api_key": "sk-old-deployment",
+                "api_base": "https://old-deployment.example.test/base",
+            },
+            depth=0,
+            max_loops=3,
+            fingerprints=[],
+            fingerprint="tool-call",
+        )
+
+    assert "_litellm_deployment_protocol_context" not in followup.await_args.kwargs
+    if patch_api_base == "https://new-deployment.example.test/base":
+        assert followup.await_args.kwargs["api_base"] == patch_api_base
+    else:
+        assert "api_base" not in followup.await_args.kwargs
+    assert "api_key" not in followup.await_args.kwargs
+    if patch_model is not None:
+        assert followup.await_args.kwargs["model"] == patch_model
+        assert "custom_llm_provider" not in followup.await_args.kwargs
+    elif patch_provider in {"openai", "anthropic"}:
+        assert followup.await_args.kwargs["model"] == "anthropic/deepseek-v4-pro"
+        assert followup.await_args.kwargs["custom_llm_provider"] == patch_provider
+    else:
+        assert followup.await_args.kwargs["model"] == "anthropic/deepseek-v4-pro"
+        assert followup.await_args.kwargs["custom_llm_provider"] == "anthropic"
 
 
 class _FakeWSExceptions:
@@ -1870,7 +2172,9 @@ def test_audio_transcriptions_sends_dict_data_as_json_body():
     form-encodes it and silently ignores json=; JSON-body providers (e.g.
     Google Speech-to-Text) need an application/json body."""
     captured = {}
-    client = HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(_capture_json_transcription_request(captured))))
+    client = HTTPHandler(
+        client=httpx.Client(transport=httpx.MockTransport(_capture_json_transcription_request(captured)))
+    )
 
     response = BaseLLMHTTPHandler().audio_transcriptions(
         client=client,
@@ -2106,9 +2410,7 @@ async def test_anthropic_invalid_thinking_signature_retry_resigns_bedrock_reques
     ok_response = httpx.Response(200, json={"id": "msg_1"}, request=httpx.Request("POST", request_url))
 
     class FakeAsyncClient:
-        async def post(
-            self, url, headers, data, stream=False, logging_obj=None, timeout=None
-        ):
+        async def post(self, url, headers, data, stream=False, logging_obj=None, timeout=None):
             posts.append({"headers": dict(headers), "data": data})
             return invalid_signature_response if len(posts) == 1 else ok_response
 

@@ -200,27 +200,29 @@ class _CombinedChunkSplitter:
         return {"reasoning_content": thinking_text}
 
     @staticmethod
-    def _split(chunk: "ModelResponseStream") -> "list[ModelResponseStream]":
-        """Return ``[chunk]``, or ``[content_chunk, finish_chunk]`` if combined."""
-        if not _CombinedChunkSplitter._is_combined(chunk):
-            return [chunk]
+    def _split(chunk: Any) -> list[Any]:
+        """Split wire-incompatible combinations into ordered logical chunks."""
+        finish_chunk: Any | None = None
+        if _CombinedChunkSplitter._is_combined(chunk):
+            # Content chunk: keep the delta payload, clear the finish_reason.
+            content_chunk = copy.deepcopy(chunk)
+            content_chunk.choices[0].finish_reason = None
+            _CombinedChunkSplitter._clear_usage(content_chunk)
 
-        # Content chunk: keep the delta payload, clear the finish_reason.
-        content_chunk: Final = copy.deepcopy(chunk)
-        content_chunk.choices[0].finish_reason = None
-        _CombinedChunkSplitter._clear_usage(content_chunk)
+            # Finish chunk: keep finish_reason (and usage), clear the delta payload.
+            finish_chunk = copy.deepcopy(chunk)
+            finish_delta: Final = finish_chunk.choices[0].delta
+            finish_delta.content = None
+            if hasattr(finish_delta, "tool_calls"):
+                finish_delta.tool_calls = None
+            if hasattr(finish_delta, "reasoning_content"):
+                finish_delta.reasoning_content = None
+            if hasattr(finish_delta, "thinking_blocks"):
+                finish_delta.thinking_blocks = None
+        else:
+            content_chunk = chunk
 
-        # Finish chunk: keep finish_reason (and usage), clear the delta payload.
-        finish_chunk: Final = copy.deepcopy(chunk)
-        finish_delta: Final = finish_chunk.choices[0].delta
-        finish_delta.content = None
-        if hasattr(finish_delta, "tool_calls"):
-            finish_delta.tool_calls = None
-        if hasattr(finish_delta, "reasoning_content"):
-            finish_delta.reasoning_content = None
-        if hasattr(finish_delta, "thinking_blocks"):
-            finish_delta.thinking_blocks = None
-        return [content_chunk, finish_chunk]
+        return [content_chunk, *([finish_chunk] if finish_chunk is not None else [])]
 
     def __iter__(self) -> "Iterator[ModelResponseStream]":
         return self
@@ -287,6 +289,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         applied_edits: list[AppliedEdit] | None = None,
         compaction_block: CompactionBlock | None = None,
         iterations_usage: list[UsageIteration] | None = None,
+        thinking_disabled: bool = False,
     ):
         # Wrap the upstream stream so chunks that carry both content and a
         # finish_reason (fake-streamed providers) are split into two — see
@@ -300,6 +303,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         # Synthesized compaction block from compact_20260112 polyfill (streaming).
         self.compaction_block = compaction_block
         self.iterations_usage = iterations_usage
+        self.thinking_disabled: bool = thinking_disabled
         self.sent_compaction_block: bool = False
         # Per-phase flags so the compaction block's start/delta/stop events
         # are emitted (and the public state machine is advanced) in
@@ -321,6 +325,53 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
             type="text",
             text="",
         )
+
+    def _queue_initial_content_block(self, first_chunk: "ModelResponseStream") -> None:
+        from .transformation import LiteLLMAnthropicMessagesAdapter
+
+        adapter: Final = LiteLLMAnthropicMessagesAdapter()
+        self.sent_content_block_start = True
+        self.sent_content_block_finish = False
+
+        block_type, content_block_start = adapter._translate_streaming_openai_chunk_to_anthropic_content_block(
+            choices=first_chunk.choices,
+            thinking_disabled=self.thinking_disabled,
+        )
+        if content_block_start["type"] == "tool_use":
+            tool_block: Final = content_block_start
+            if tool_block.get("name"):
+                truncated_name = tool_block["name"]
+                tool_block["name"] = self.tool_name_mapping.get(truncated_name, truncated_name)
+
+        self.current_content_block_type = block_type
+        self.current_content_block_start = content_block_start
+        self.chunk_queue.append(
+            {
+                "type": "content_block_start",
+                "index": self.current_content_block_index,
+                "content_block": content_block_start,
+            }
+        )
+        processed_chunk: Final = adapter.translate_streaming_openai_response_to_anthropic(
+            response=first_chunk,
+            current_content_block_index=self.current_content_block_index,
+            applied_edits=(self.applied_edits if first_chunk.choices[0].finish_reason is not None else None),
+            thinking_disabled=self.thinking_disabled,
+        )
+        if processed_chunk.get("type") == "message_delta":
+            self.chunk_queue.append(
+                {
+                    "type": "content_block_stop",
+                    "index": self.current_content_block_index,
+                }
+            )
+            self.sent_content_block_finish = True
+            if processed_chunk.get("delta", {}).get("stop_reason") is not None:
+                self.holding_stop_reason_chunk = processed_chunk
+            else:
+                self.chunk_queue.append(self._augment_message_delta_usage(processed_chunk))
+        elif self._delta_has_content(processed_chunk):
+            self.chunk_queue.append(processed_chunk)
 
     def _merge_usage_into_held_stop_reason_chunk(self, chunk: Any) -> MessageBlockDelta:
         """Merge usage data from ``chunk`` into the held ``message_delta`` chunk.
@@ -566,6 +617,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                     response=chunk,
                     current_content_block_index=self.current_content_block_index,
                     applied_edits=(self.applied_edits if is_final_chunk and not will_merge_into_held else None),
+                    thinking_disabled=self.thinking_disabled,
                 )
 
                 # Check if this is a usage chunk and we have a held stop_reason chunk
@@ -800,6 +852,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                     response=chunk,
                     current_content_block_index=self.current_content_block_index,
                     applied_edits=(self.applied_edits if is_final_chunk and not will_merge_into_held else None),
+                    thinking_disabled=self.thinking_disabled,
                 )
 
                 # Check if this is a usage chunk and we have a held stop_reason chunk
@@ -1027,8 +1080,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
             return False
         return bool(delta.get(_delta_payload_field(delta_type)))
 
-    @staticmethod
-    def _is_blank_delta(chunk: "ModelResponseStream") -> bool:
+    def _is_blank_delta(self, chunk: "ModelResponseStream") -> bool:
         choice: Final = chunk.choices[0]
         if choice.finish_reason is not None:
             return False
@@ -1037,9 +1089,9 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
             return False
         if getattr(delta, "content", None):
             return False
-        if getattr(delta, "reasoning_content", None):
+        if not self.thinking_disabled and getattr(delta, "reasoning_content", None):
             return False
-        if getattr(delta, "thinking_blocks", None):
+        if not self.thinking_disabled and getattr(delta, "thinking_blocks", None):
             return False
         return True
 
@@ -1064,7 +1116,8 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
             block_type,
             content_block_start,
         ) = LiteLLMAnthropicMessagesAdapter()._translate_streaming_openai_chunk_to_anthropic_content_block(
-            choices=chunk.choices
+            choices=chunk.choices,
+            thinking_disabled=self.thinking_disabled,
         )
 
         # Restore original tool name if it was truncated for OpenAI's 64-char limit

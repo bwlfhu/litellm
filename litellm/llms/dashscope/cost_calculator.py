@@ -8,7 +8,7 @@ See https://help.aliyun.com/zh/model-studio/billing-for-model-studio
 """
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 from litellm.litellm_core_utils.llm_cost_calc.tiered_pricing import select_tier_for_input, tier_rate
 from litellm.litellm_core_utils.llm_cost_calc.utils import (
@@ -55,6 +55,26 @@ def _flat_rate(model_info: ModelInfo, cost_key: str, fallback_cost_key: str) -> 
     if value is None:
         return float(model_info.get(fallback_cost_key) or 0.0)
     return float(value)
+
+
+_THINKING_RATE_KEYS: Final = (
+    ("input_cost_per_token", "input_cost_per_token_thinking"),
+    ("cache_read_input_token_cost", "cache_read_input_token_cost_thinking"),
+    ("output_cost_per_token", "output_cost_per_token_thinking"),
+)
+
+
+def _with_thinking_rates(model_info: ModelInfo, breakdown: TokenBreakdown) -> ModelInfo:
+    if breakdown.reasoning_tokens == 0:
+        return model_info
+    overrides: Final = {
+        base_key: model_info.get(thinking_key)
+        for base_key, thinking_key in _THINKING_RATE_KEYS
+        if model_info.get(thinking_key) is not None
+    }
+    if not overrides:
+        return model_info
+    return cast("ModelInfo", {**model_info, **overrides})
 
 
 def _calculate_prompt_cost(
@@ -123,8 +143,9 @@ def cost_per_token(model: str, usage: Usage) -> tuple[float, float]:
     Returns:
         Tuple[float, float] - (prompt_cost_in_usd, completion_cost_in_usd)
     """
-    model_info: Final = get_model_info(model=model, custom_llm_provider="dashscope")
+    base_model_info: Final = get_model_info(model=model, custom_llm_provider="dashscope")
     breakdown: Final = _extract_token_breakdown(usage)
+    model_info: Final = _with_thinking_rates(model_info=base_model_info, breakdown=breakdown)
     raw_tiers: Final = model_info.get("tiered_pricing")
     tiered_pricing: Final = raw_tiers if isinstance(raw_tiers, list) else None
     tier: Final = (

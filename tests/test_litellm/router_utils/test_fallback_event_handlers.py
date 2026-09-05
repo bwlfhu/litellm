@@ -103,6 +103,54 @@ class RecordingRouter:
         return StreamingWrapper()
 
 
+async def _ageneric_api_call_with_fallbacks_helper():
+    raise AssertionError("only used for its __name__")
+
+
+async def acompletion():
+    raise AssertionError("only used for its __name__")
+
+
+@pytest.mark.asyncio
+async def test_run_async_fallback_keeps_generic_api_bookkeeping_out_of_provider_metadata():
+    router = RecordingRouter()
+    provider_metadata = {"trace_id": "trace-1"}
+
+    await run_async_fallback(
+        litellm_router=router,
+        fallback_model_group=["fallback-model"],
+        original_model_group="primary-model",
+        original_exception=RuntimeError("upstream limited request"),
+        max_fallbacks=3,
+        fallback_depth=0,
+        metadata=provider_metadata,
+        litellm_metadata=None,
+        original_function=_ageneric_api_call_with_fallbacks_helper,
+    )
+
+    assert router.received_kwargs["metadata"] == {"trace_id": "trace-1"}
+    assert router.received_kwargs["litellm_metadata"] == {"model_group": "fallback-model"}
+
+
+@pytest.mark.asyncio
+async def test_run_async_fallback_preserves_completion_metadata_channel():
+    router = RecordingRouter()
+
+    await run_async_fallback(
+        litellm_router=router,
+        fallback_model_group=["fallback-model"],
+        original_model_group="primary-model",
+        original_exception=RuntimeError("upstream limited request"),
+        max_fallbacks=3,
+        fallback_depth=0,
+        metadata=None,
+        original_function=acompletion,
+    )
+
+    assert router.received_kwargs["metadata"] == {"model_group": "fallback-model"}
+    assert "litellm_metadata" not in router.received_kwargs
+
+
 @pytest.mark.asyncio
 async def test_run_async_fallback_forwards_include_fallback_errors_to_nested_call():
     """A nested fallback (multi-hop) must keep collecting errors, so the opt-in
@@ -484,9 +532,7 @@ async def test_run_async_fallback_keeps_a_request_override_distinct_from_the_bar
     with pytest.raises(RuntimeError, match="fallback model also failed"):
         await run_async_fallback(
             litellm_router=router,
-            fallback_model_group=[
-                {"model": "already-attempted", "messages": [{"role": "user", "content": "shorter"}]}
-            ],
+            fallback_model_group=[{"model": "already-attempted", "messages": [{"role": "user", "content": "shorter"}]}],
             original_model_group="primary-model",
             original_exception=RuntimeError("original failed"),
             max_fallbacks=3,

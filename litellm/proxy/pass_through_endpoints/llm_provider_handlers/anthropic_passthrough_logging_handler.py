@@ -11,7 +11,10 @@ from litellm._logging import verbose_proxy_logger
 from litellm.constants import ANTHROPIC_BATCHES_ROUTE
 from litellm.litellm_core_utils.core_helpers import map_finish_reason
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
-from litellm.litellm_core_utils.litellm_logging import use_custom_pricing_for_model
+from litellm.litellm_core_utils.litellm_logging import (
+    get_custom_pricing_provider,
+    use_custom_pricing_for_model,
+)
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
     get_content_from_model_response,
 )
@@ -38,6 +41,7 @@ from litellm.types.utils import (
     ModelResponse,
     TextCompletionResponse,
 )
+from litellm.utils import is_tool_diagnostics_enabled, log_anthropic_response_shape
 
 if TYPE_CHECKING:
     from litellm.types.passthrough_endpoints.pass_through_endpoints import EndpointType
@@ -266,15 +270,17 @@ class AnthropicPassthroughLoggingHandler:
 
             model = AnthropicPassthroughLoggingHandler._resolve_costing_model(model, logging_obj)
 
-            # Prepend custom_llm_provider to model if not already present
-            model_for_cost = model
-            if custom_llm_provider and not model.startswith(f"{custom_llm_provider}/"):
-                model_for_cost = f"{custom_llm_provider}/{model}"
-
             router_model_id: Final = logging_obj.get_router_model_id()
             custom_pricing: Final = use_custom_pricing_for_model(
                 litellm_params=(logging_obj.litellm_params if hasattr(logging_obj, "litellm_params") else None)
             )
+            costing_provider: Final = get_custom_pricing_provider(
+                litellm_params=(logging_obj.litellm_params if hasattr(logging_obj, "litellm_params") else None),
+                custom_llm_provider=custom_llm_provider,
+            )
+            model_for_cost = model
+            if costing_provider and not model.startswith(f"{costing_provider}/"):
+                model_for_cost = f"{costing_provider}/{model}"
 
             response_cost: Final = (
                 0.0
@@ -282,12 +288,15 @@ class AnthropicPassthroughLoggingHandler:
                 else litellm.completion_cost(
                     completion_response=litellm_model_response,
                     model=model_for_cost,
-                    custom_llm_provider=custom_llm_provider,
+                    custom_llm_provider=costing_provider,
                     custom_pricing=custom_pricing,
                     router_model_id=router_model_id,
                 )
             )
 
+            hidden_params: Final = getattr(litellm_model_response, "_hidden_params", None)
+            if isinstance(hidden_params, dict):
+                hidden_params["response_cost"] = response_cost
             kwargs["response_cost"] = response_cost
             kwargs["model"] = model
             # the pass-through success path reads spend from
@@ -355,6 +364,21 @@ class AnthropicPassthroughLoggingHandler:
             if chunk_model:
                 model = chunk_model
 
+        if is_tool_diagnostics_enabled():
+            response_content, response_stop_reason = (
+                AnthropicPassthroughLoggingHandler._extract_response_shape_from_sse(all_chunks)
+            )
+            response_call_id: Final = getattr(litellm_logging_obj, "litellm_call_id", None)
+            response_provider: Final = litellm_logging_obj.model_call_details.get("custom_llm_provider")
+            log_anthropic_response_shape(
+                content=response_content,
+                stop_reason=response_stop_reason,
+                model=model if isinstance(model, str) else None,
+                custom_llm_provider=response_provider if isinstance(response_provider, str) else None,
+                call_id=response_call_id if isinstance(response_call_id, str) else None,
+                stream=True,
+            )
+
         try:
             complete_streaming_response = AnthropicPassthroughLoggingHandler._build_complete_streaming_response(
                 all_chunks=all_chunks,
@@ -417,6 +441,65 @@ class AnthropicPassthroughLoggingHandler:
             "result": complete_streaming_response,
             "kwargs": kwargs,
         }
+
+    @staticmethod
+    def _extract_response_shape_from_sse(
+        all_chunks: Sequence[str | bytes],
+    ) -> tuple[tuple[dict[str, str], ...], str | None]:
+        relevant_events: Final = tuple(
+            data
+            for chunk in all_chunks
+            for event in AnthropicPassthroughLoggingHandler._split_sse_chunk_into_events(chunk)
+            if '"content_block_start"' in event or '"message_delta"' in event
+            for data in (AnthropicPassthroughLoggingHandler._extract_response_shape_sse_data(event),)
+            if data is not None
+        )
+        content: Final = tuple(
+            {"type": block_type}
+            for event in relevant_events
+            for content_block in (event.get("content_block"),)
+            if event.get("type") == "content_block_start" and isinstance(content_block, dict)
+            for block_type in (
+                cast(  # cast-ok: guarded SSE content-block dict
+                    dict[str, object], content_block
+                ).get("type"),
+            )
+            if isinstance(block_type, str)
+        )
+        stop_reasons: Final = tuple(
+            stop_reason
+            for event in relevant_events
+            for delta in (event.get("delta"),)
+            if event.get("type") == "message_delta" and isinstance(delta, dict)
+            for stop_reason in (
+                cast(dict[str, object], delta).get(  # cast-ok: guarded SSE message-delta dict
+                    "stop_reason"
+                ),
+            )
+            if isinstance(stop_reason, str)
+        )
+        return content, stop_reasons[-1] if stop_reasons else None
+
+    @staticmethod
+    def _extract_response_shape_sse_data(event_str: str) -> dict[str, object] | None:
+        """Parse one SSE object for redacted response-shape diagnostics."""
+        for line in event_str.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("data:"):
+                continue
+            payload = stripped[len("data:") :].strip()
+            if not payload or payload == "[DONE]":
+                return None
+            try:
+                decoded = cast(object, json.loads(payload))  # cast-ok: JSON is validated below before field access
+            except (ValueError, TypeError):
+                return None
+            return (
+                cast(dict[str, object], decoded)  # cast-ok: guarded JSON object from an untyped SSE payload
+                if isinstance(decoded, dict)
+                else None
+            )
+        return None
 
     @staticmethod
     def _split_sse_chunk_into_events(chunk: str | bytes) -> list[str]:

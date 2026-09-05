@@ -8737,6 +8737,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/observability/model-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Model Status
+         * @description Return active model exceptions stored in the Router's Redis cache.
+         */
+        get: operations["get_model_status_observability_model_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/observability/routing-stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Routing Stats
+         * @description Return current deployment routing aggregates from coordination Redis.
+         */
+        get: operations["get_routing_stats_observability_routing_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ocr": {
         parameters: {
             query?: never;
@@ -27481,6 +27521,8 @@ export interface components {
             cache_read_input_token_cost_flex?: number | null;
             /** Cache Read Input Token Cost Priority */
             cache_read_input_token_cost_priority?: number | null;
+            /** Cache Read Input Token Cost Thinking */
+            cache_read_input_token_cost_thinking?: number | null;
             /** Cache Read Input Token Cost Ultrafast */
             cache_read_input_token_cost_ultrafast?: number | null;
             /** Citation Cost Per Token */
@@ -27547,6 +27589,8 @@ export interface components {
             input_cost_per_token_flex?: number | null;
             /** Input Cost Per Token Priority */
             input_cost_per_token_priority?: number | null;
+            /** Input Cost Per Token Thinking */
+            input_cost_per_token_thinking?: number | null;
             /** Input Cost Per Token Ultrafast */
             input_cost_per_token_ultrafast?: number | null;
             /** Input Cost Per Video Per Second */
@@ -27646,6 +27690,8 @@ export interface components {
             output_cost_per_token_flex?: number | null;
             /** Output Cost Per Token Priority */
             output_cost_per_token_priority?: number | null;
+            /** Output Cost Per Token Thinking */
+            output_cost_per_token_thinking?: number | null;
             /** Output Cost Per Token Ultrafast */
             output_cost_per_token_ultrafast?: number | null;
             /** Output Cost Per Video Per Second */
@@ -36690,6 +36736,8 @@ export interface components {
             cache_read_input_token_cost_flex?: number | null;
             /** Cache Read Input Token Cost Priority */
             cache_read_input_token_cost_priority?: number | null;
+            /** Cache Read Input Token Cost Thinking */
+            cache_read_input_token_cost_thinking?: number | null;
             /** Cache Read Input Token Cost Ultrafast */
             cache_read_input_token_cost_ultrafast?: number | null;
             /** Citation Cost Per Token */
@@ -36756,6 +36804,8 @@ export interface components {
             input_cost_per_token_flex?: number | null;
             /** Input Cost Per Token Priority */
             input_cost_per_token_priority?: number | null;
+            /** Input Cost Per Token Thinking */
+            input_cost_per_token_thinking?: number | null;
             /** Input Cost Per Token Ultrafast */
             input_cost_per_token_ultrafast?: number | null;
             /** Input Cost Per Video Per Second */
@@ -36855,6 +36905,8 @@ export interface components {
             output_cost_per_token_flex?: number | null;
             /** Output Cost Per Token Priority */
             output_cost_per_token_priority?: number | null;
+            /** Output Cost Per Token Thinking */
+            output_cost_per_token_thinking?: number | null;
             /** Output Cost Per Token Ultrafast */
             output_cost_per_token_ultrafast?: number | null;
             /** Output Cost Per Video Per Second */
@@ -48172,6 +48224,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_model_status_observability_model_status_get: {
+        parameters: {
+            query?: {
+                model?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_routing_stats_observability_routing_stats_get: {
+        parameters: {
+            query?: {
+                window?: string;
+                channel?: string | null;
+                model_group?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

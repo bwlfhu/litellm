@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: casdoor
+  namespace: identity
+  labels:
+    app.kubernetes.io/name: casdoor
+    app.kubernetes.io/part-of: identity
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["sso.allcam.org"]
+      secretName: casdoor-tls
+  rules:
+    - host: sso.allcam.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: casdoor
+                port:
+                  name: http

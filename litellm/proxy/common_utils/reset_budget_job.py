@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -437,6 +438,50 @@ class ResetBudgetJob:
         await ResetBudgetJob._invalidate_user_api_key_cache_entry(GLOBAL_PROXY_SPEND_CACHE_KEY)
 
     @staticmethod
+    async def _get_key_spend_counter_generation(counter_key: str) -> str | None:
+        from litellm.proxy.proxy_server import spend_counter_cache
+
+        if spend_counter_cache.redis_cache is None:
+            return None
+        try:
+            result: Final = spend_counter_cache.redis_cache.async_get_spend_counter_generation(key=counter_key)
+            if inspect.isawaitable(result):
+                return await result
+            return "__legacy__"
+        except Exception as exc:  # noqa: BLE001  # Redis clients expose backend-specific failures
+            verbose_proxy_logger.warning("Unable to snapshot spend counter generation %s: %s", counter_key, exc)
+            return None
+
+    @staticmethod
+    async def _reset_key_spend_counter(
+        counter_key: str, previous_spend: float, expected_generation: str | None
+    ) -> None:
+        from litellm.proxy.proxy_server import spend_counter_cache
+
+        if spend_counter_cache.redis_cache is None:
+            spend_counter_cache.in_memory_cache.delete_cache(key=counter_key)
+            return
+        try:
+            if expected_generation == "__legacy__":
+                remaining_spend: Final = await spend_counter_cache.redis_cache.async_subtract_floor_zero(
+                    key=counter_key, value=previous_spend, ttl=60
+                )
+            elif expected_generation is None:
+                spend_counter_cache.in_memory_cache.delete_cache(key=counter_key)
+                return
+            else:
+                remaining_spend = await spend_counter_cache.redis_cache.async_subtract_floor_zero(
+                    key=counter_key, value=previous_spend, expected_generation=expected_generation, ttl=60
+                )
+        except Exception as exc:  # noqa: BLE001  # Redis clients expose backend-specific failures
+            verbose_proxy_logger.warning("Unable to reconcile spend counter %s: %s", counter_key, exc)
+            return
+        if remaining_spend is None:
+            spend_counter_cache.in_memory_cache.delete_cache(key=counter_key)
+            return
+        spend_counter_cache.in_memory_cache.set_cache(key=counter_key, value=remaining_spend, ttl=60)
+
+    @staticmethod
     async def _invalidate_user_api_key_cache_entry(cache_key: str) -> None:
         """Drop a stale management-cache entry so the next read fetches from DB.
 
@@ -798,6 +843,16 @@ class ResetBudgetJob:
             updated_keys: Final[list[LiteLLM_VerificationToken]] = []
             failed_keys: Final = []
             if keys_to_reset is not None and len(keys_to_reset) > 0:
+                counter_snapshots: Final = MappingProxyType(
+                    {
+                        key.token: (
+                            float(key.spend or 0.0),
+                            await self._get_key_spend_counter_generation(counter_key=f"spend:key:{key.token}"),
+                        )
+                        for key in keys_to_reset
+                        if key.token is not None
+                    }
+                )
                 for key in keys_to_reset:
                     try:
                         updated_key = await ResetBudgetJob._reset_budget_for_key(
@@ -820,7 +875,12 @@ class ResetBudgetJob:
                     for k in updated_keys:
                         token = getattr(k, "token", None)
                         if token:
-                            await self._invalidate_spend_counter(f"spend:key:{token}")
+                            await self._reset_key_spend_counter(
+                                counter_key=f"spend:key:{token}",
+                                previous_spend=counter_snapshots[token][0],
+                                expected_generation=counter_snapshots[token][1],
+                            )
+                            await self._invalidate_user_api_key_cache_entry(token)
 
             end_time = time.time()
             outcome: Final = _ChunkOutcome(

@@ -486,8 +486,7 @@ class TestTranslateMessagesToResponsesInput:
             }
         ]
 
-    def test_assistant_thinking_block_becomes_output_text(self):
-        """Assistant thinking block text is included as output_text."""
+    def test_assistant_thinking_block_becomes_reasoning_item(self):
         messages = [
             {
                 "role": "assistant",
@@ -495,7 +494,69 @@ class TestTranslateMessagesToResponsesInput:
             }
         ]
         result = _translate_messages(messages)
-        assert result[0]["content"] == [{"type": "output_text", "text": "Let me reason step by step."}]
+        assert result == [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Let me reason step by step."}],
+            }
+        ]
+
+    def test_consecutive_thinking_blocks_become_one_reasoning_item(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "First part."},
+                    {"type": "thinking", "thinking": "Second part."},
+                ],
+            }
+        ]
+
+        result = _translate_messages(messages)
+
+        assert result == [
+            {
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "First part."},
+                    {"type": "summary_text", "text": "Second part."},
+                ],
+            }
+        ]
+
+    def test_tool_call_splits_reasoning_items(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Before the call."},
+                    {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Denver"}},
+                    {"type": "thinking", "thinking": "After the call."},
+                ],
+            }
+        ]
+
+        result = _translate_messages(messages)
+
+        assert [item["type"] for item in result] == ["reasoning", "function_call", "reasoning"]
+        assert result[0]["summary"] == [{"type": "summary_text", "text": "Before the call."}]
+        assert result[2]["summary"] == [{"type": "summary_text", "text": "After the call."}]
+
+    def test_thinking_and_text_stay_separate(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "The user wants Denver."},
+                    {"type": "text", "text": "Denver is the best pick."},
+                ],
+            }
+        ]
+
+        result = _translate_messages(messages)
+
+        assert [item["type"] for item in result] == ["reasoning", "message"]
+        assert result[1]["content"] == [{"type": "output_text", "text": "Denver is the best pick."}]
 
     def test_assistant_empty_thinking_block_skipped(self):
         """Assistant thinking block with empty thinking text is skipped."""
@@ -1170,6 +1231,7 @@ class TestTranslateResponse:
         assert len(result["content"]) == 1
         assert result["content"][0]["type"] == "thinking"
         assert "Step 1" in result["content"][0]["thinking"]
+        assert result["content"][0]["signature"] is None
 
     def test_empty_reasoning_summary_skipped(self):
         """Reasoning item with empty text summary is not added to content."""
@@ -1177,6 +1239,21 @@ class TestTranslateResponse:
         response = _make_mock_response(output=[reasoning])
         result: Any = _ADAPTER.translate_response(response)
         assert result["content"] == []
+
+    def test_dict_reasoning_item_becomes_unsigned_thinking_block(self):
+        response = _make_mock_response(
+            output=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_dict_1",
+                    "summary": [{"type": "summary_text", "text": "Weighing the options."}],
+                }
+            ]
+        )
+
+        result: Any = _ADAPTER.translate_response(response)
+
+        assert result["content"] == [{"type": "thinking", "thinking": "Weighing the options.", "signature": None}]
 
     def test_usage_mapped_correctly(self):
         """Input/output tokens from ResponseAPIUsage are mapped to AnthropicUsage."""
@@ -1308,9 +1385,7 @@ class TestToolResultImages:
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_01", "content": tool_result_content}
-                ],
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": tool_result_content}],
             },
         ]
 
@@ -1473,7 +1548,9 @@ class TestPromptCacheBreakpointToResponses:
         ]
 
     def test_system_without_breakpoint_still_becomes_instructions(self):
-        request = _make_request(system=[{"type": "text", "text": "Be concise."}, {"type": "text", "text": "Be helpful."}])
+        request = _make_request(
+            system=[{"type": "text", "text": "Be concise."}, {"type": "text", "text": "Be helpful."}]
+        )
         kwargs = _ADAPTER.translate_request(request)
         assert kwargs["instructions"] == "Be concise.\nBe helpful."
         assert kwargs["input"] == [

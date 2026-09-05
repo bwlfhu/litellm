@@ -10,6 +10,7 @@ from typing import Optional
 
 import pytest
 
+import litellm
 from litellm import Router
 from litellm.utils import _get_order_filtered_deployments
 
@@ -81,6 +82,50 @@ class TestGetOrderFilteredDeployments:
 # ---------------------------------------------------------------------------
 # Integration tests for order-based fallback in Router
 # ---------------------------------------------------------------------------
+
+
+def _deepseek_anthropic_fallback_model_list() -> list[dict]:
+    return [
+        {
+            "model_name": "primary",
+            "litellm_params": {
+                "model": "anthropic/deepseek-v4-pro",
+                "api_key": "test",
+                "order": 1,
+            },
+            "model_info": {
+                "id": "deepseek-anthropic",
+                "reasoning_protocol": "deepseek_anthropic",
+            },
+        },
+        {
+            "model_name": "primary",
+            "litellm_params": {
+                "model": "deepseek-v4-openai",
+                "custom_llm_provider": "custom_openai",
+                "api_key": "test",
+                "order": 2,
+            },
+            "model_info": {"id": "custom-openai"},
+        },
+        {
+            "model_name": "primary",
+            "litellm_params": {
+                "model": "anthropic/claude-order-3",
+                "api_key": "test",
+                "order": 3,
+            },
+            "model_info": {"id": "claude-order-3"},
+        },
+        {
+            "model_name": "external",
+            "litellm_params": {
+                "model": "openai/gpt-external",
+                "api_key": "test",
+            },
+            "model_info": {"id": "gpt-external"},
+        },
+    ]
 
 
 def test_router_order_without_pre_call_checks():
@@ -331,6 +376,153 @@ async def test_router_order_fallback_with_non_standard_fallbacks():
     assert response._hidden_params["model_id"] == "fallback"
 
 
+def test_anthropic_messages_keeps_non_protocol_deployments_eligible():
+    router = Router(model_list=_deepseek_anthropic_fallback_model_list())
+
+    try:
+        _, deployments = router._common_checks_available_deployment(
+            model="primary",
+            request_kwargs={"_litellm_router_call_type": "anthropic_messages"},
+        )
+    finally:
+        router.discard()
+
+    assert isinstance(deployments, list)
+    assert {deployment["model_info"]["id"] for deployment in deployments} == {
+        "deepseek-anthropic",
+        "custom-openai",
+        "claude-order-3",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_type",
+    [litellm.InternalServerError, litellm.RateLimitError, litellm.APIConnectionError],
+    ids=["5xx", "429", "network"],
+)
+async def test_anthropic_messages_order_fallback_crosses_protocol_boundary(failure_type):
+    calls: list[tuple[str, str | None, str | None]] = []
+
+    async def provider(**kwargs):
+        protocol_context = kwargs.get("_litellm_deployment_protocol_context")
+        calls.append(
+            (
+                kwargs["model"],
+                kwargs.get("custom_llm_provider"),
+                getattr(protocol_context, "protocol", None),
+            )
+        )
+        if kwargs["model"] == "anthropic/deepseek-v4-pro":
+            raise failure_type(message="primary failed", model=kwargs["model"], llm_provider="anthropic")
+        return {"selected_model": kwargs["model"]}
+
+    router = Router(model_list=_deepseek_anthropic_fallback_model_list(), num_retries=0)
+
+    try:
+        response = await router._ageneric_api_call_with_fallbacks(
+            model="primary",
+            original_function=provider,
+            _litellm_router_call_type="anthropic_messages",
+            messages=[],
+        )
+    finally:
+        router.discard()
+
+    assert response["selected_model"] == "deepseek-v4-openai"
+    assert calls == [
+        ("anthropic/deepseek-v4-pro", "anthropic", "deepseek_anthropic"),
+        ("deepseek-v4-openai", "custom_openai", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_order_and_external_fallbacks_clear_protocol_context():
+    calls: list[tuple[str, str | None]] = []
+
+    async def provider(**kwargs):
+        protocol_context = kwargs.get("_litellm_deployment_protocol_context")
+        calls.append((kwargs["model"], getattr(protocol_context, "protocol", None)))
+        if kwargs["model"] == "anthropic/deepseek-v4-pro":
+            raise litellm.InternalServerError(
+                message="primary failed",
+                model=kwargs["model"],
+                llm_provider="anthropic",
+            )
+        if kwargs["model"] == "deepseek-v4-openai":
+            raise litellm.RateLimitError(
+                message="order 2 failed",
+                model=kwargs["model"],
+                llm_provider="custom_openai",
+            )
+        if kwargs["model"] == "anthropic/claude-order-3":
+            raise litellm.APIConnectionError(
+                message="order 3 failed",
+                model=kwargs["model"],
+                llm_provider="anthropic",
+            )
+        return {"selected_model": kwargs["model"]}
+
+    router = Router(
+        model_list=_deepseek_anthropic_fallback_model_list(),
+        fallbacks=[{"primary": ["external"]}],
+        num_retries=0,
+    )
+
+    try:
+        response = await router._ageneric_api_call_with_fallbacks(
+            model="primary",
+            original_function=provider,
+            _litellm_router_call_type="anthropic_messages",
+            messages=[],
+        )
+    finally:
+        router.discard()
+
+    assert response["selected_model"] == "openai/gpt-external"
+    assert calls == [
+        ("anthropic/deepseek-v4-pro", "deepseek_anthropic"),
+        ("deepseek-v4-openai", None),
+        ("anthropic/claude-order-3", None),
+        ("openai/gpt-external", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_local_error_disables_order_and_external_fallbacks():
+    calls: list[str] = []
+    local_error = litellm.BadRequestError(
+        message="invalid local reasoning history",
+        model="anthropic/deepseek-v4-pro",
+        llm_provider="anthropic",
+    )
+    setattr(local_error, "_litellm_disable_fallbacks", True)
+
+    async def provider(**kwargs):
+        calls.append(kwargs["model"])
+        raise local_error
+
+    router = Router(
+        model_list=_deepseek_anthropic_fallback_model_list(),
+        fallbacks=[{"primary": ["external"]}],
+        num_retries=0,
+    )
+
+    try:
+        with pytest.raises(litellm.BadRequestError) as error:
+            await router._ageneric_api_call_with_fallbacks(
+                model="primary",
+                original_function=provider,
+                _litellm_router_call_type="anthropic_messages",
+                messages=[],
+            )
+    finally:
+        router.discard()
+
+    assert error.value is local_error
+    assert calls == ["anthropic/deepseek-v4-pro"]
+
+
 @pytest.mark.asyncio
 async def test_router_order_fallback_with_wildcard_model_group():
     """Wildcard model groups should also advance across order levels."""
@@ -373,29 +565,14 @@ def test_check_non_standard_fallback_format():
     )
 
     # Standard formats
-    assert (
-        _check_non_standard_fallback_format([{"gpt-3.5-turbo": ["claude-3-haiku"]}])
-        == False
-    )
+    assert _check_non_standard_fallback_format([{"gpt-3.5-turbo": ["claude-3-haiku"]}]) == False
     assert _check_non_standard_fallback_format([{"model": ["qwen-backup"]}]) == False
-    assert (
-        _check_non_standard_fallback_format(
-            [{"model": ["qwen-backup"], "region": ["us-east-1"]}]
-        )
-        == False
-    )
+    assert _check_non_standard_fallback_format([{"model": ["qwen-backup"], "region": ["us-east-1"]}]) == False
 
     # Non-standard formats
     assert _check_non_standard_fallback_format([{"model": "qwen-backup"}]) == True
     assert (
-        _check_non_standard_fallback_format(
-            [{"model": "qwen-backup", "messages": [{"role": "user", "content": "hi"}]}]
-        )
+        _check_non_standard_fallback_format([{"model": "qwen-backup", "messages": [{"role": "user", "content": "hi"}]}])
         == True
     )
-    assert (
-        _check_non_standard_fallback_format(
-            [{"model": ["qwen-backup"], "api_key": "some-key"}]
-        )
-        == True
-    )
+    assert _check_non_standard_fallback_format([{"model": ["qwen-backup"], "api_key": "some-key"}]) == True

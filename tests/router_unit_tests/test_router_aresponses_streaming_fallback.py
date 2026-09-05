@@ -46,9 +46,7 @@ def _make_router() -> Router:
     )
 
 
-def _make_completed_event(
-    input_tokens: int, output_tokens: int, total_tokens: int
-) -> ResponseCompletedEvent:
+def _make_completed_event(input_tokens: int, output_tokens: int, total_tokens: int) -> ResponseCompletedEvent:
     response = ResponsesAPIResponse.model_construct(
         usage=ResponseAPIUsage(
             input_tokens=input_tokens,
@@ -87,32 +85,61 @@ def test_extract_partial_responses_usage_no_completed_response():
     assert usage is None
 
 
-def test_extract_partial_responses_usage_bridge_iterator_no_completed_response():
-    """
-    Regression for #35411: the bridge iterator
-    (LiteLLMCompletionStreamingIterator) overrides __init__ without calling
-    super().__init__(), so completed_response was never set until the stream
-    reached RESPONSE_COMPLETED. On a mid-stream provider error (before
-    completion) the fallback recovery path read source_iterator.completed_response
-    and raised AttributeError, masking the real provider error and bypassing
-    fallbacks. The attribute must always exist and default to None.
-    """
+def test_extract_partial_responses_usage_dict_response():
+    completed = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            "status": "completed",
+        },
+    )
+    source = MagicMock()
+    source.completed_response = completed
+
+    usage = Router._extract_partial_responses_usage(source)
+
+    assert usage == ResponseAPIUsage(input_tokens=5, output_tokens=3, total_tokens=8)
+
+
+def test_extract_partial_responses_usage_invalid_dict_returns_none():
+    completed = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={"usage": {"input_tokens": "invalid"}},
+    )
+    source = MagicMock()
+    source.completed_response = completed
+
+    assert Router._extract_partial_responses_usage(source) is None
+
+
+def test_extract_partial_responses_usage_invalid_total_calculation_returns_none():
+    completed = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={"usage": {"input_tokens": {}, "output_tokens": 1}},
+    )
+    source = MagicMock()
+    source.completed_response = completed
+
+    assert Router._extract_partial_responses_usage(source) is None
+
+
+def test_real_bridge_iterator_exposes_fallback_state_before_first_chunk():
     from litellm.responses.litellm_completion_transformation.streaming_iterator import (
         LiteLLMCompletionStreamingIterator,
     )
 
     wrapper = MagicMock()
     wrapper.logging_obj = MagicMock()
+    wrapper._hidden_params = {"model_id": "deployment-123"}
     iterator = LiteLLMCompletionStreamingIterator(
-        model="anthropic/claude-sonnet-4-5",
+        model="anthropic/claude-sonnet",
         litellm_custom_stream_wrapper=wrapper,
         request_input="hi",
         responses_api_request={},
     )
 
     assert iterator.completed_response is None
-    # No chat chunks collected yet and no completed_response → must return
-    # None instead of raising AttributeError.
+    assert iterator._hidden_params == {"model_id": "deployment-123"}
     assert Router._extract_partial_responses_usage(iterator) is None
 
 
@@ -133,6 +160,27 @@ def test_combine_responses_fallback_usage_sums_completed_event():
     assert combined.total_tokens == 26
 
 
+def test_combine_responses_fallback_usage_supports_dict_response():
+    fallback_event = ResponseCompletedEvent.model_construct(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response={
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+        },
+    )
+    partial = ResponseAPIUsage(input_tokens=11, output_tokens=7, total_tokens=18)
+
+    Router._combine_responses_fallback_usage(fallback_event, partial)
+
+    assert fallback_event.response["usage"] == {
+        "input_tokens": 16,
+        "input_tokens_details": None,
+        "output_tokens": 10,
+        "output_tokens_details": None,
+        "total_tokens": 26,
+        "cost": None,
+    }
+
+
 def test_combine_responses_fallback_usage_passthrough_for_unknown_event():
     """Events that are not completed/failed/incomplete are not mutated."""
     other = MagicMock()  # not a ResponseCompletedEvent etc. → isinstance false
@@ -145,9 +193,7 @@ def test_combine_responses_fallback_usage_passthrough_for_unknown_event():
 
 
 def test_build_responses_continuation_input_from_string():
-    out = Router._build_responses_continuation_input(
-        "Hello world", "partial assistant text"
-    )
+    out = Router._build_responses_continuation_input("Hello world", "partial assistant text")
     assert len(out) == 3
     assert out[0]["role"] == "user"
     assert out[0]["content"][0]["text"] == "Hello world"
@@ -227,9 +273,7 @@ async def test_aresponses_streaming_iterator_passthrough():
     router = _make_router()
     source = _FakeSource()
 
-    wrapper = await router._aresponses_streaming_iterator(
-        source, initial_kwargs={"model": "primary"}
-    )
+    wrapper = await router._aresponses_streaming_iterator(source, initial_kwargs={"model": "primary"})
     assert isinstance(wrapper, BaseResponsesAPIStreamingIterator)
 
     collected = [ev async for ev in wrapper]
@@ -276,15 +320,18 @@ async def test_aresponses_with_streaming_fallbacks_wraps_streaming_iterator():
     async def fake_original(**_kwargs):
         return streaming_iter
 
-    with patch.object(
-        router,
-        "_ageneric_api_call_with_fallbacks",
-        new=AsyncMock(return_value=streaming_iter),
-    ), patch.object(
-        router,
-        "_aresponses_streaming_iterator",
-        new=AsyncMock(return_value=wrapped),
-    ) as mock_wrap:
+    with (
+        patch.object(
+            router,
+            "_ageneric_api_call_with_fallbacks",
+            new=AsyncMock(return_value=streaming_iter),
+        ),
+        patch.object(
+            router,
+            "_aresponses_streaming_iterator",
+            new=AsyncMock(return_value=wrapped),
+        ) as mock_wrap,
+    ):
         out = await router._aresponses_with_streaming_fallbacks(
             original_function=fake_original,
             model="primary",

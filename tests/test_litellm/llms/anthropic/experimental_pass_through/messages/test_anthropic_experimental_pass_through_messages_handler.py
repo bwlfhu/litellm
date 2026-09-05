@@ -214,6 +214,41 @@ async def test_anthropic_messages_sanitizes_tool_use_ids_before_dispatch():
     assert msgs[0]["content"][0]["id"] == "functions.Bash:0"
 
 
+@pytest.mark.asyncio
+async def test_anthropic_messages_logs_normalized_tool_shape_after_hooks():
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    rewritten_tools = [{"name": "rewritten", "input_schema": {"type": "object"}}]
+    fake_loop = MagicMock()
+    fake_loop.run_in_executor = lambda _e, func: _async_return(func())
+
+    with (
+        patch.object(
+            handler,
+            "_execute_pre_request_hooks",
+            new=AsyncMock(return_value={"tools": rewritten_tools, "stream": False}),
+        ),
+        patch.object(handler, "anthropic_messages_handler", return_value="stub"),
+        patch.object(handler, "log_tool_request_shape") as shape_log,
+        patch("asyncio.get_event_loop", return_value=fake_loop),
+    ):
+        await handler.anthropic_messages(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "hello"}],
+            model="anthropic/claude-sonnet-4-5-20250929",
+            custom_llm_provider="anthropic",
+            tools=[{"name": "original", "input_schema": {"type": "object"}}],
+            litellm_call_id="call-1",
+        )
+
+    shape_log.assert_called_once()
+    assert shape_log.call_args.kwargs["tools"] == rewritten_tools
+    assert shape_log.call_args.kwargs["phase"] == "normalized"
+    assert shape_log.call_args.kwargs["call_id"] == "call-1"
+    assert shape_log.call_args.kwargs["warn_when_missing"] is False
+    assert shape_log.call_args.kwargs["log_when_present"] is True
+
+
 async def _async_return(value):
     return value
 
@@ -290,21 +325,15 @@ async def test_bedrock_converse_budget_tokens_preserved():
         mock_acompletion.assert_called_once()
 
         call_kwargs = mock_acompletion.call_args.kwargs
-        print(
-            "acompletion call kwargs: ", json.dumps(call_kwargs, indent=4, default=str)
-        )
+        print("acompletion call kwargs: ", json.dumps(call_kwargs, indent=4, default=str))
 
         # Verify thinking parameter is passed through with budget_tokens preserved
         thinking_param = call_kwargs.get("thinking")
-        assert (
-            thinking_param is not None
-        ), "thinking parameter should be passed to acompletion"
-        assert (
-            thinking_param.get("type") == "enabled"
-        ), "thinking.type should be 'enabled'"
-        assert (
-            thinking_param.get("budget_tokens") == 1024
-        ), f"thinking.budget_tokens should be 1024, but got {thinking_param.get('budget_tokens')}"
+        assert thinking_param is not None, "thinking parameter should be passed to acompletion"
+        assert thinking_param.get("type") == "enabled", "thinking.type should be 'enabled'"
+        assert thinking_param.get("budget_tokens") == 1024, (
+            f"thinking.budget_tokens should be 1024, but got {thinking_param.get('budget_tokens')}"
+        )
 
 
 def test_openai_model_with_thinking_converts_to_reasoning():
@@ -336,23 +365,18 @@ def test_openai_model_with_thinking_converts_to_reasoning():
         call_kwargs = mock_responses.call_args.kwargs
 
         # Verify reasoning is set (converted from thinking)
-        assert (
-            "reasoning" in call_kwargs
-        ), "reasoning should be passed to litellm.responses"
+        assert "reasoning" in call_kwargs, "reasoning should be passed to litellm.responses"
 
         # budget_tokens=1024 -> effort="low" (at the LOW budget threshold)
         # reasoning_auto_summary is False by default, so no summary key
         expected_reasoning = {"effort": "low"}
         assert call_kwargs["reasoning"] == expected_reasoning, (
-            f"reasoning should be {expected_reasoning} for budget_tokens=1024, "
-            f"got {call_kwargs.get('reasoning')}"
+            f"reasoning should be {expected_reasoning} for budget_tokens=1024, got {call_kwargs.get('reasoning')}"
         )
         assert "summary" not in call_kwargs["reasoning"]
 
         # Verify thinking is NOT passed directly to the Responses API
-        assert (
-            "thinking" not in call_kwargs
-        ), "thinking should NOT be passed directly to litellm.responses"
+        assert "thinking" not in call_kwargs, "thinking should NOT be passed directly to litellm.responses"
 
 
 class TestThinkingParameterTransformation:
@@ -405,9 +429,7 @@ class TestThinkingParameterTransformation:
                 thinking=thinking,
                 model="openai/gpt-5.2",
             )
-            assert result == {
-                "reasoning_effort": {"effort": "high", "summary": "detailed"}
-            }
+            assert result == {"reasoning_effort": {"effort": "high", "summary": "detailed"}}
         finally:
             litellm.reasoning_auto_summary = original
 
@@ -605,9 +627,9 @@ class TestThinkingSummaryPreservation:
             mock_responses.assert_called_once()
             call_kwargs = mock_responses.call_args.kwargs
             reasoning = call_kwargs["reasoning"]
-            assert (
-                reasoning["summary"] == "concise"
-            ), f"Expected summary='concise', got summary='{reasoning.get('summary')}'"
+            assert reasoning["summary"] == "concise", (
+                f"Expected summary='concise', got summary='{reasoning.get('summary')}'"
+            )
 
     def test_responses_adapter_preserves_summary(self):
         """translate_thinking_to_reasoning should include summary when user provides it."""
@@ -616,9 +638,7 @@ class TestThinkingSummaryPreservation:
         )
 
         thinking = {"type": "enabled", "budget_tokens": 5000, "summary": "concise"}
-        result = LiteLLMAnthropicToResponsesAPIAdapter.translate_thinking_to_reasoning(
-            thinking
-        )
+        result = LiteLLMAnthropicToResponsesAPIAdapter.translate_thinking_to_reasoning(thinking)
         assert result == {"effort": "high", "summary": "concise"}
 
     def test_responses_adapter_no_summary_by_default(self):
@@ -632,11 +652,7 @@ class TestThinkingSummaryPreservation:
         try:
             litellm.reasoning_auto_summary = False
             thinking = {"type": "enabled", "budget_tokens": 5000}
-            result = (
-                LiteLLMAnthropicToResponsesAPIAdapter.translate_thinking_to_reasoning(
-                    thinking
-                )
-            )
+            result = LiteLLMAnthropicToResponsesAPIAdapter.translate_thinking_to_reasoning(thinking)
             assert result == {"effort": "high"}
             assert result is not None and "summary" not in result
         finally:
@@ -653,9 +669,7 @@ class TestThinkingSummaryPreservation:
             thinking=thinking,
             model="openai/gpt-5.2",
         )
-        assert result == {
-            "reasoning_effort": {"effort": "high", "summary": "concise"}
-        }
+        assert result == {"reasoning_effort": {"effort": "high", "summary": "concise"}}
 
     def test_translate_thinking_for_model_disabled_stays_plain_string_when_auto_summary_enabled(self):
         """Disabled thinking must stay a plain string even when reasoning_auto_summary is on."""
@@ -801,9 +815,7 @@ def test_presanitized_flag_not_leaked_to_provider_params():
 
     def fake_base_handler(*args, **kwargs):
         captured.update(kwargs)
-        captured["optional"] = kwargs.get(
-            "anthropic_messages_optional_request_params", {}
-        )
+        captured["optional"] = kwargs.get("anthropic_messages_optional_request_params", {})
         return "stub"
 
     with patch.object(
@@ -981,9 +993,7 @@ def test_first_party_claude_4_8_plus_cost_map_entries_carry_mid_conversation_sys
 
     import litellm
 
-    cost_map_path = os.path.join(
-        os.path.dirname(litellm.__file__), "model_prices_and_context_window_backup.json"
-    )
+    cost_map_path = os.path.join(os.path.dirname(litellm.__file__), "model_prices_and_context_window_backup.json")
     with open(cost_map_path) as f:
         cost_map = json.load(f)
     rules = cost_map["fallback_generalizations"]["rules"]
@@ -1022,9 +1032,7 @@ def test_first_party_claude_4_8_plus_cost_map_entries_carry_mid_conversation_sys
         ("perplexity/sonar", "sonar", "https://api.perplexity.ai/chat/completions"),
     ],
 )
-async def test_messages_strips_provider_prefix_exactly_once(
-    requested_model, expected_wire_model, expected_url
-):
+async def test_messages_strips_provider_prefix_exactly_once(requested_model, expected_wire_model, expected_url):
     """
     BerriAI/litellm#37716: only the leading provider segment may be stripped on the way upstream.
 

@@ -151,6 +151,7 @@ from litellm.utils import (
     get_requester_metadata,
     get_secret,
     get_standard_openai_params,
+    log_tool_request_shape,
     mock_completion_streaming_obj,
     pre_process_non_default_params,
     read_config_args,
@@ -483,6 +484,16 @@ async def acompletion(
     """
     fallbacks = kwargs.get("fallbacks", None)
     mock_timeout = kwargs.get("mock_timeout", None)
+    tool_shape_provider: Final = kwargs.get("custom_llm_provider")  # pyright: ignore[reportUnknownVariableType,reportUnknownMemberType]  # legacy kwargs boundary
+
+    log_tool_request_shape(
+        tools=tools,  # pyright: ignore[reportUnknownArgumentType]  # legacy completion tool type
+        tool_choice=tool_choice,  # pyright: ignore[reportUnknownArgumentType]  # legacy completion choice type
+        endpoint="/v1/chat/completions",
+        model=model,
+        custom_llm_provider=tool_shape_provider if isinstance(tool_shape_provider, str) else None,
+        phase="received",
+    )
 
     if mock_timeout is True:
         await _handle_mock_timeout_async(mock_timeout, timeout, model)
@@ -4999,13 +5010,31 @@ def completion(
         - If 'mock_response' is provided, a mock completion response is returned for testing or debugging.
     """
     ### VALIDATE Request ###
+    tool_shape_provider: Final = kwargs.get("custom_llm_provider")  # pyright: ignore[reportUnknownVariableType,reportUnknownMemberType]  # legacy kwargs boundary
     if model is None:
         raise ValueError("model param not passed in.")
+    if kwargs.get("acompletion", False) is not True:
+        log_tool_request_shape(
+            tools=tools,  # pyright: ignore[reportUnknownArgumentType]  # legacy completion tool type
+            tool_choice=tool_choice,  # pyright: ignore[reportUnknownArgumentType]  # legacy completion choice type
+            endpoint="/v1/chat/completions",
+            model=model,
+            custom_llm_provider=tool_shape_provider if isinstance(tool_shape_provider, str) else None,
+            phase="received",
+        )
     # validate messages
     messages = validate_and_fix_openai_messages(messages=messages)
     tools = validate_and_fix_openai_tools(tools=tools)
     # validate tool_choice
     tool_choice = validate_chat_completion_tool_choice(tool_choice=tool_choice)
+    log_tool_request_shape(
+        tools=tools,  # pyright: ignore[reportUnknownArgumentType]  # legacy completion tool type
+        tool_choice=tool_choice,  # pyright: ignore[reportUnknownArgumentType]  # legacy completion choice type
+        endpoint="/v1/chat/completions",
+        model=model,
+        custom_llm_provider=tool_shape_provider if isinstance(tool_shape_provider, str) else None,
+        phase="normalized",
+    )
     # validate optional params
     stop = validate_openai_optional_params(stop=stop)
     thinking = validate_and_fix_thinking_param(thinking=thinking)
@@ -5450,6 +5479,7 @@ def completion(
             max_retries=max_retries,
             timeout=timeout,
             litellm_request_debug=kwargs.get("litellm_request_debug", False),
+            _litellm_deployment_protocol_context=kwargs.get("_litellm_deployment_protocol_context"),
             tpm=kwargs.get("tpm"),
             rpm=kwargs.get("rpm"),
             use_xai_oauth=kwargs.get("use_xai_oauth", False),

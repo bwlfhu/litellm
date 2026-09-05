@@ -20,10 +20,15 @@ def test_use_chat_completions_api_is_a_known_litellm_param():
 
 
 def test_use_chat_completions_api_not_forwarded_as_provider_param():
-    forwarded = get_non_default_completion_params(
-        {"use_chat_completions_api": True, "temperature": 0.5}
-    )
+    forwarded = get_non_default_completion_params({"use_chat_completions_api": True, "temperature": 0.5})
     assert "use_chat_completions_api" not in forwarded
+
+
+def test_routing_stats_snapshot_is_not_forwarded_as_provider_param():
+    snapshot = {"model_id": "deployment-1", "api_base": "https://provider.example/v1?key=secret"}
+    assert "_litellm_routing_stats_metadata" in all_litellm_params
+    forwarded = get_non_default_completion_params({"_litellm_routing_stats_metadata": snapshot})
+    assert "_litellm_routing_stats_metadata" not in forwarded
 
 
 def test_completion_does_not_leak_flag_into_provider_request_body():
@@ -52,9 +57,7 @@ def test_completion_does_not_leak_flag_into_provider_request_body():
     mock_raw_response.parse.return_value = mock_response
 
     mock_client = MagicMock()
-    mock_client.chat.completions.with_raw_response.create.return_value = (
-        mock_raw_response
-    )
+    mock_client.chat.completions.with_raw_response.create.return_value = mock_raw_response
 
     litellm.completion(
         model="openai/gpt-4o-mini",
@@ -64,8 +67,6 @@ def test_completion_does_not_leak_flag_into_provider_request_body():
         client=mock_client,
     )
 
-    create_kwargs = (
-        mock_client.chat.completions.with_raw_response.create.call_args.kwargs
-    )
+    create_kwargs = mock_client.chat.completions.with_raw_response.create.call_args.kwargs
     assert "use_chat_completions_api" not in create_kwargs
     assert "use_chat_completions_api" not in (create_kwargs.get("extra_body") or {})
