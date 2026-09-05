@@ -95,7 +95,7 @@ Evidence names refer to restricted local artifacts or recorded test runs. Databa
 | migration-regressions.log/.xml | Initial broad run: 2686 passed, 17 failed, 12 skipped. Historical failures were investigated; this is not an all-green result |
 | review-tag-regressions.log/.xml | Historical broad run: 3145 passed, 8 failed, 12 skipped. Credential and fixture failures were investigated; superseded by unified source acceptance below |
 | review-unified-acceptance.log/.xml/manifest.json | 3392 passed, 3 skipped, 0 failed in 275.80 seconds. Three live OpenAI cases were explicitly excluded; three DB/Redis integration skips have separate budget-suite evidence. No skipped/excluded case is counted as passed |
-| budget-review.log/.xml and focused budget followups | Initial 200 passed, 89 warnings in 42.32 seconds. Nine later actual PostgreSQL/Redis helper tests passed, including delayed repair/admission and both cold-seed variants. Full budget regression rerun after these fixes is still running at this checkpoint |
+| budget-review.log/.xml and focused budget followups | Final 307 passed, 91 warnings in 79.17 seconds. Includes actual PostgreSQL/Redis helper tests, delayed repair/admission and both cold-seed variants |
 | Focused accounting, SSE/timing and diagnostics runs | 107, 70 and 302 passed at earlier checkpoints; later relevant fixes require revalidation |
 | Observability/Redis regression run | 80 passed, including real unavailable Redis -> model-status 503, missing-key success and OpenAPI response fields |
 | Static-review regressions | 605 passed, 1 warning across observability, DeepSeek Messages, Anthropic adapters, Responses adapters and shared prompt conversion |
