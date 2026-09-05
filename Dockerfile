@@ -44,13 +44,6 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
 
-ENV HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY} \
-    http_proxy=${HTTP_PROXY} \
-    https_proxy=${HTTPS_PROXY} \
-    NO_PROXY=${NO_PROXY} \
-    no_proxy=${NO_PROXY}
-
 WORKDIR /app
 USER root
 
@@ -111,7 +104,7 @@ RUN uv sync --frozen --no-default-groups --no-editable \
     --extra saml \
     --python python3.13
 
-RUN HOME=/opt/prisma XDG_CACHE_HOME=/opt/prisma/.cache PRISMA_BINARY_CACHE_DIR=/opt/prisma/binaries \
+RUN HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" NO_PROXY="${NO_PROXY}" HOME=/opt/prisma XDG_CACHE_HOME=/opt/prisma/.cache PRISMA_BINARY_CACHE_DIR=/opt/prisma/binaries \
     npm_config_cache=/root/.npm \
     prisma generate --schema=./schema.prisma
 
