@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -50,6 +49,7 @@ from litellm.repositories.unit_of_work import (
     spend_reset_unit_of_work,
 )
 from litellm.repositories.verification_token_repository import (
+    KeyBudgetReset,
     VerificationTokenRepository,
 )
 from litellm.types.services import ServiceTypes
@@ -443,14 +443,7 @@ class ResetBudgetJob:
 
         if spend_counter_cache.redis_cache is None:
             return None
-        try:
-            result: Final = spend_counter_cache.redis_cache.async_get_spend_counter_generation(key=counter_key)
-            if inspect.isawaitable(result):
-                return await result
-            return "__legacy__"
-        except Exception as exc:  # noqa: BLE001  # Redis clients expose backend-specific failures
-            verbose_proxy_logger.warning("Unable to snapshot spend counter generation %s: %s", counter_key, exc)
-            return None
+        return await spend_counter_cache.redis_cache.async_get_spend_counter_generation(key=counter_key)
 
     @staticmethod
     async def _reset_key_spend_counter(
@@ -462,22 +455,22 @@ class ResetBudgetJob:
             spend_counter_cache.in_memory_cache.delete_cache(key=counter_key)
             return
         try:
-            if expected_generation == "__legacy__":
-                remaining_spend: Final = await spend_counter_cache.redis_cache.async_subtract_floor_zero(
-                    key=counter_key, value=previous_spend, ttl=60
-                )
-            elif expected_generation is None:
-                spend_counter_cache.in_memory_cache.delete_cache(key=counter_key)
-                return
-            else:
-                remaining_spend = await spend_counter_cache.redis_cache.async_subtract_floor_zero(
+            remaining_spend: Final = (
+                await spend_counter_cache.redis_cache.async_subtract_floor_zero(
                     key=counter_key, value=previous_spend, expected_generation=expected_generation, ttl=60
                 )
+                if expected_generation is not None else None
+            )
+            if remaining_spend is None:
+                seeded: Final = await spend_counter_cache.redis_cache.async_set_cache(
+                    key=counter_key, value=0.0, nx=True, ttl=60
+                )
+                if not seeded:
+                    await spend_counter_cache.redis_cache.async_get_spend_counter_generation(key=counter_key)
+                spend_counter_cache.in_memory_cache.delete_cache(key=counter_key)
+                return
         except Exception as exc:  # noqa: BLE001  # Redis clients expose backend-specific failures
             verbose_proxy_logger.warning("Unable to reconcile spend counter %s: %s", counter_key, exc)
-            return
-        if remaining_spend is None:
-            spend_counter_cache.in_memory_cache.delete_cache(key=counter_key)
             return
         spend_counter_cache.in_memory_cache.set_cache(key=counter_key, value=remaining_spend, ttl=60)
 
@@ -732,28 +725,11 @@ class ResetBudgetJob:
         )
         return [LiteLLM_EndUserTable.model_validate(row.dict()) for row in rows]
 
-    async def _write_key_reset_updates(self, updated_keys: list[LiteLLM_VerificationToken]) -> None:
-        """
-        Write per-row {spend, budget_reset_at} updates for keys.
-
-        Avoids the batched full-model update path, which trips
-        prisma.errors.DataError on any row carrying object_permission_id or
-        budget_limits (see #27730). Both fields are rejected by Prisma's
-        update input type for LiteLLM_VerificationToken, and the failure
-        aborts the entire batch — silently leaving spend over the cap and
-        budget_reset_at unchanged forever.
-        """
-        await self._with_db_write_retry(
-            lambda: self._write_key_reset_updates_once(updated_keys),
+    async def _write_key_reset_updates(self, resets: tuple[KeyBudgetReset, ...]) -> frozenset[str]:
+        return await self._with_db_write_retry(
+            lambda: VerificationTokenRepository(self.prisma_client).reset_budgets(resets),
             reason="reset_budget_write_keys_failure",
         )
-
-    async def _write_key_reset_updates_once(self, updated_keys: list[LiteLLM_VerificationToken]) -> None:
-        async with spend_reset_unit_of_work(self.prisma_client.db.batch_) as uow:
-            for k in updated_keys:
-                if k.token is None:
-                    continue
-                uow.keys.queue_spend_reset(token=k.token, budget_reset_at=k.budget_reset_at)
 
     async def _write_user_reset_updates(self, updated_users: list[LiteLLM_UserTable]) -> None:
         """
@@ -846,7 +822,8 @@ class ResetBudgetJob:
                 counter_snapshots: Final = MappingProxyType(
                     {
                         key.token: (
-                            float(key.spend or 0.0),
+                            float(getattr(key, "spend", 0.0) or 0.0),
+                            key.budget_reset_at,
                             await self._get_key_spend_counter_generation(counter_key=f"spend:key:{key.token}"),
                         )
                         for key in keys_to_reset
@@ -871,14 +848,25 @@ class ResetBudgetJob:
                 verbose_proxy_logger.debug("Updated keys %s", _LazyJson(updated_keys))
 
                 if updated_keys:
-                    await self._write_key_reset_updates(updated_keys=updated_keys)
+                    committed_tokens: Final = await self._write_key_reset_updates(
+                        resets=tuple(
+                            KeyBudgetReset(
+                                token=key.token,
+                                previous_spend=counter_snapshots[key.token][0],
+                                previous_reset_at=counter_snapshots[key.token][1],
+                                next_reset_at=key.budget_reset_at,
+                            )
+                            for key in updated_keys
+                            if key.token is not None
+                        )
+                    )
                     for k in updated_keys:
                         token = getattr(k, "token", None)
-                        if token:
+                        if token and token in committed_tokens:
                             await self._reset_key_spend_counter(
                                 counter_key=f"spend:key:{token}",
                                 previous_spend=counter_snapshots[token][0],
-                                expected_generation=counter_snapshots[token][1],
+                                expected_generation=counter_snapshots[token][2],
                             )
                             await self._invalidate_user_api_key_cache_entry(token)
 

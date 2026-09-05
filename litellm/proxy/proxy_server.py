@@ -2458,8 +2458,8 @@ async def get_current_spend(
         if authoritative is not None:
             verified = True
             if authoritative > current:
-                await _repair_stale_spend_counter(counter_key=counter_key, db_spend=authoritative)
-                return authoritative
+                repaired: Final = await _repair_stale_spend_counter(counter_key=counter_key, db_spend=authoritative)
+                return repaired if repaired is not None else authoritative
         elif fallback_spend > current:
             # end-user / tag counters have no DB row; fallback_spend is the
             # authoritative recorded value loaded in auth.
@@ -2475,7 +2475,7 @@ async def get_current_spend(
     return current
 
 
-async def _repair_stale_spend_counter(counter_key: str, db_spend: float) -> None:
+async def _repair_stale_spend_counter(counter_key: str, db_spend: float) -> float | None:
     """Raise a counter that has fallen below the authoritative DB spend (e.g.
     Redis restarted and reloaded an older snapshot) so every worker reads the
     corrected value directly instead of re-deriving it per request, and so a
@@ -2488,6 +2488,30 @@ async def _repair_stale_spend_counter(counter_key: str, db_spend: float) -> None
     in-memory copy is guarded by a read-compare-write with no await in between,
     so it is atomic within the worker.
     """
+    if (
+        counter_key.startswith("spend:key:")
+        and not SpendCounterReseed._is_key_or_team_window_counter(counter_key)
+        and spend_counter_cache.redis_cache is not None
+    ):
+        try:
+            generation: Final = await spend_counter_cache.redis_cache.async_get_spend_counter_generation(
+                key=counter_key, prepare_reset=False
+            )
+            fresh_spend: Final = await SpendCounterReseed.from_db(prisma_client=prisma_client, counter_key=counter_key)
+            if fresh_spend is None:
+                return None
+            repaired: Final = await spend_counter_cache.redis_cache.async_set_max(
+                key=counter_key, value=fresh_spend, expected_generation=generation or ""
+            )
+            if repaired is not None:
+                spend_counter_cache.in_memory_cache.set_cache(key=counter_key, value=repaired)
+                return repaired
+            current_counter: Final = await spend_counter_cache.redis_cache.async_get_cache(key=counter_key)
+            return float(current_counter) if current_counter is not None else None
+        except Exception:
+            verbose_proxy_logger.debug("Unable to repair key spend counter %s", counter_key, exc_info=True)
+            return None
+
     cached: Final = spend_counter_cache.in_memory_cache.get_cache(key=counter_key)
     needs_update = True
     if cached is not None:
@@ -2506,6 +2530,7 @@ async def _repair_stale_spend_counter(counter_key: str, db_spend: float) -> None
                 counter_key,
                 exc_info=True,
             )
+    return None
 
 
 async def reseed_spend_counter_from_db(counter_key: str) -> None:

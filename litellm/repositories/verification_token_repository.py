@@ -4,8 +4,11 @@ VerificationToken repository for database operations on LiteLLM_VerificationToke
 
 import json
 from collections.abc import Mapping
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Final
+
+from pydantic import BaseModel, TypeAdapter
 
 from litellm.models.verification_token import (
     LiteLLM_VerificationToken,
@@ -36,6 +39,26 @@ _JSON_ENCODED_TOKEN_FIELDS: Final = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class KeyBudgetReset:
+    token: str
+    previous_spend: float
+    previous_reset_at: datetime | None
+    next_reset_at: datetime | None
+
+
+class _ResetTokenResult(BaseModel):
+    token: str
+
+
+def _budget_reset_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return (
+        value.isoformat() if value.tzinfo is None else value.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+    )
+
+
 class VerificationTokenRepository(BaseRepository[LiteLLM_VerificationToken]):
     """Repository for verification token (API key) database operations."""
 
@@ -55,6 +78,35 @@ class VerificationTokenRepository(BaseRepository[LiteLLM_VerificationToken]):
     @property
     def model_class(self) -> type[LiteLLM_VerificationToken]:
         return LiteLLM_VerificationToken
+
+    async def reset_budgets(self, resets: tuple[KeyBudgetReset, ...]) -> frozenset[str]:
+        if not resets:
+            return frozenset()
+        payload: Final = json.dumps(
+            tuple(
+                {
+                    "token": reset.token,
+                    "previous_spend": reset.previous_spend,
+                    "previous_reset_at": _budget_reset_timestamp(reset.previous_reset_at),
+                    "next_reset_at": _budget_reset_timestamp(reset.next_reset_at),
+                }
+                for reset in resets
+            )
+        )
+        result: Final = await self.prisma_client.db.query_raw(
+            """UPDATE "LiteLLM_VerificationToken" AS current
+               SET spend = GREATEST(COALESCE(current.spend, 0) - pending.previous_spend, 0),
+                   budget_reset_at = pending.next_reset_at
+               FROM jsonb_to_recordset($1::jsonb) AS pending(
+                   token text, previous_spend double precision,
+                   previous_reset_at timestamp, next_reset_at timestamp)
+               WHERE current.token = pending.token
+                 AND current.budget_reset_at IS NOT DISTINCT FROM pending.previous_reset_at
+               RETURNING current.token""",
+            payload,
+        )
+        rows: Final = TypeAdapter(tuple[_ResetTokenResult, ...]).validate_python(result)
+        return frozenset(row.token for row in rows)
 
     def _to_model(self, record: DbRecord | None) -> LiteLLM_VerificationToken | None:
         """Convert a database record to a VerificationToken model."""

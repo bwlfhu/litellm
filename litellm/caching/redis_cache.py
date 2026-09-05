@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import timedelta
+from itertools import count
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
@@ -40,6 +41,18 @@ from litellm.types.caching import (
 from litellm.types.services import ServiceTypes
 
 from .base_cache import BaseCache
+
+_SPEND_COUNTER_MARK_PENDING_LUA: Final = (
+    "local function mark_pending(new_generation) "
+    "if redis.call('EXISTS', KEYS[1]) == 0 then return false end "
+    "local generation = redis.call('GET', KEYS[2]) or new_generation "
+    "if string.sub(generation, -6) ~= ':reset' then generation = generation .. ':reset' end "
+    "redis.call('SET', KEYS[2], generation) "
+    "local remaining = redis.call('PTTL', KEYS[1]) "
+    "if remaining < 0 or remaining > 60000 then "
+    "remaining = 60000 redis.call('PEXPIRE', KEYS[1], remaining) end "
+    "redis.call('PEXPIRE', KEYS[2], remaining) return generation end "
+)
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -1025,6 +1038,7 @@ class RedisCache(BaseCache):
         key: str,
         value: float,
         ttl: int | None = None,
+        expected_generation: str | None = None,
     ) -> float | None:
         """Atomically set ``key`` to ``value`` only when ``value`` is greater
         than the stored value (or the key is unset), refreshing the TTL.
@@ -1039,7 +1053,9 @@ class RedisCache(BaseCache):
         _used_ttl: Final = self.get_ttl(ttl=ttl)
         key = self.check_and_fix_namespace(key=key)
         if self._is_key_spend_counter(key):
-            return await self._async_write_spend_counter(key=key, value=value, operation="max", ttl=_used_ttl)
+            return await self._async_write_spend_counter(
+                key=key, value=value, operation="max", ttl=_used_ttl, expected_generation=expected_generation
+            )
         lua: Final = (
             "local cur = redis.call('GET', KEYS[1]) "
             "if cur == false or tonumber(cur) < tonumber(ARGV[1]) then "
@@ -1062,8 +1078,21 @@ class RedisCache(BaseCache):
         return key.startswith(self.check_and_fix_namespace(key="spend:key:"))
 
     @staticmethod
+    @functools.lru_cache(maxsize=4096)
     def _spend_counter_generation_key(key: str) -> str:
-        return f"{key}:generation:{{{key}}}"
+        from redis.cluster import key_slot
+
+        marker: Final = f"{key}:generation:{{{key}}}"
+        slot: Final = key_slot(key.encode())
+        if key_slot(marker.encode()) == slot:
+            return marker
+        # Empty hash tags make Redis hash the entire key, including any appended tag.
+        return next(
+            candidate
+            for suffix in count()
+            for candidate in (f"{key}:generation:{suffix}",)
+            if key_slot(candidate.encode()) == slot
+        )
 
     async def _async_write_spend_counter(
         self,
@@ -1073,10 +1102,14 @@ class RedisCache(BaseCache):
         ttl: int | None,
         nx: bool = False,
         refresh_ttl: bool = False,
+        expected_generation: str | None = None,
     ) -> float | None:
         client: Final = self.init_async_client()
         lua: Final = (
+            "if ARGV[8] == '1' and (redis.call('GET', KEYS[2]) or '') ~= ARGV[7] then return false end "
             "local cur = redis.call('GET', KEYS[1]) "
+            "local previous_ttl = redis.call('PTTL', KEYS[1]) "
+            "local pending = string.sub(redis.call('GET', KEYS[2]) or '', -6) == ':reset' "
             "if ARGV[1] == 'set' and ARGV[4] == '1' and cur then return false end "
             "local replace = ARGV[1] == 'set' or "
             "(ARGV[1] == 'max' and (not cur or tonumber(cur) < tonumber(ARGV[2]))) "
@@ -1084,7 +1117,9 @@ class RedisCache(BaseCache):
             "elseif ARGV[1] == 'increment' then redis.call('INCRBYFLOAT', KEYS[1], ARGV[2]) end "
             "if ARGV[1] == 'set' or not cur or redis.call('EXISTS', KEYS[2]) == 0 then "
             "redis.call('SET', KEYS[2], ARGV[6]) end "
-            "if tonumber(ARGV[3]) > 0 and (replace or "
+            "if cur and pending and ARGV[1] ~= 'set' then "
+            "redis.call('PEXPIRE', KEYS[1], math.max(previous_ttl, 1)) "
+            "elseif tonumber(ARGV[3]) > 0 and (replace or "
             "(ARGV[1] == 'increment' and (ARGV[5] == '1' or redis.call('PTTL', KEYS[1]) == -1))) then "
             "redis.call('EXPIRE', KEYS[1], ARGV[3]) end "
             "local remaining = redis.call('PTTL', KEYS[1]) "
@@ -1105,21 +1140,21 @@ class RedisCache(BaseCache):
                 "1" if nx else "0",
                 "1" if refresh_ttl else "0",
                 str(uuid.uuid4()),
+                expected_generation or "",
+                "1" if expected_generation is not None else "0",
             ),
         )
         return float(result) if result is not None else None
 
     @_redis_circuit_breaker_guard
-    async def async_get_spend_counter_generation(self, key: str) -> str | None:
+    async def async_get_spend_counter_generation(self, key: str, prepare_reset: bool = True) -> str | None:
+        """Snapshot a reset generation and bound its lifetime while DB work is pending."""
         client: Final = self.init_async_client()
         namespaced_key: Final = self.check_and_fix_namespace(key=key)
         lua: Final = (
-            "if redis.call('EXISTS', KEYS[1]) == 0 then return false end "
-            "if redis.call('EXISTS', KEYS[2]) == 0 then "
-            "redis.call('SET', KEYS[2], ARGV[1]) "
-            "local remaining = redis.call('PTTL', KEYS[1]) "
-            "if remaining >= 0 then redis.call('PEXPIRE', KEYS[2], remaining) end end "
-            "return redis.call('GET', KEYS[2])"
+            _SPEND_COUNTER_MARK_PENDING_LUA + "return mark_pending(ARGV[1])"
+            if prepare_reset
+            else "if redis.call('EXISTS', KEYS[1]) == 0 then return false end return redis.call('GET', KEYS[2])"
         )
         result: Final = cast(  # cast-ok: Redis eval returns the Lua scalar or nil
             "str | bytes | None",
@@ -1134,25 +1169,14 @@ class RedisCache(BaseCache):
         self,
         key: str,
         value: float,
-        expected_generation: str | None = None,
+        expected_generation: str,
         ttl: int | None = None,
     ) -> float | None:
         _redis_client: Final = self.init_async_client()
         _used_ttl: Final = self.get_ttl(ttl=ttl)
         namespaced_key: Final = self.check_and_fix_namespace(key=key)
-        if expected_generation is None:
-            lua_legacy: Final = (
-                "local cur = tonumber(redis.call('GET', KEYS[1]) or '0') "
-                "local next = cur - tonumber(ARGV[1]) "
-                "if next < 0 then next = 0 end "
-                "redis.call('SET', KEYS[1], next) "
-                "if tonumber(ARGV[2]) > 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end "
-                "return tostring(next)"
-            )
-            result_legacy: Final = await _redis_client.eval(lua_legacy, 1, namespaced_key, str(value), str(int(_used_ttl or 0)))
-            return float(result_legacy.decode() if isinstance(result_legacy, bytes) else result_legacy)
-        lua: Final = (
-            "if redis.call('GET', KEYS[2]) ~= ARGV[3] then return false end "
+        lua: Final = _SPEND_COUNTER_MARK_PENDING_LUA + (
+            "if redis.call('GET', KEYS[2]) ~= ARGV[3] then mark_pending(ARGV[4]) return false end "
             "local cur = redis.call('GET', KEYS[1]) "
             "if not cur then return false end "
             "local next = tonumber(cur) - tonumber(ARGV[1]) "

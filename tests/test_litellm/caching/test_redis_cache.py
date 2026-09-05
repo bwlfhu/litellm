@@ -1,9 +1,169 @@
 import asyncio
+import os
+import uuid
+from collections.abc import AsyncGenerator
+from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from litellm.caching.redis_cache import RedisCache
+
+
+@pytest_asyncio.fixture
+async def budget_counter_redis() -> AsyncGenerator[RedisCache, None]:
+    host: Final = os.environ.get("LITELLM_TEST_REDIS_HOST")
+    if host is None:
+        pytest.skip("Set LITELLM_TEST_REDIS_HOST to an isolated Redis for Lua integration tests")
+    namespace: Final = f"budget-generation-test-{uuid.uuid4().hex}"
+    cache: Final = RedisCache(
+        host=host,
+        port=int(os.environ.get("LITELLM_TEST_REDIS_PORT", "6379")),
+        password=os.environ.get("LITELLM_TEST_REDIS_PASSWORD"),
+        namespace=namespace,
+    )
+    client: Final = cache.init_async_client()
+    try:
+        yield cache
+    finally:
+        async for key in client.scan_iter(match=f"{namespace}:*"):
+            await client.delete(key)
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "spend:key:test",
+        "budget:spend:key:test",
+        "{budget}:spend:key:test",
+        "budget:{}:spend:key:test",
+        "budget:{:spend:key:test",
+        "budget:{x}:{}:spend:key:test",
+    ),
+)
+def test_spend_counter_generation_marker_shares_cluster_slot(key: str) -> None:
+    from redis.cluster import key_slot
+
+    assert key_slot(key.encode()) == key_slot(RedisCache._spend_counter_generation_key(key).encode())
+
+
+@pytest.mark.asyncio
+async def test_spend_counter_generation_preserves_concurrent_increments_and_deduplicates_reset(
+    budget_counter_redis: RedisCache,
+) -> None:
+    cache: Final = budget_counter_redis
+    key: Final = "spend:key:concurrent"
+    await cache.async_set_cache(key=key, value=100.0, ttl=60)
+    generation: Final = await cache.async_get_spend_counter_generation(key)
+    assert generation is not None
+    await cache.async_increment(key=key, value=7.5, refresh_ttl=True)
+    results: Final = await asyncio.gather(
+        cache.async_subtract_floor_zero(key=key, value=100.0, expected_generation=generation, ttl=60),
+        cache.async_increment(key=key, value=2.5, refresh_ttl=True),
+        cache.async_subtract_floor_zero(key=key, value=100.0, expected_generation=generation, ttl=60),
+    )
+    assert (results[0] is None) != (results[2] is None)
+    assert await cache.async_get_cache(key=key) == 10.0
+    assert await cache.async_get_spend_counter_generation(key) != generation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_spend", (7.5, 150.0))
+@pytest.mark.parametrize("replacement", ("expiry", "delete", "overwrite", "missing-marker"))
+async def test_spend_counter_generation_preserves_reseeded_new_window(
+    budget_counter_redis: RedisCache,
+    replacement: str,
+    replacement_spend: float,
+) -> None:
+    cache: Final = budget_counter_redis
+    client: Final = cache.init_async_client()
+    key: Final = "spend:key:reseed"
+    namespaced: Final = cache.check_and_fix_namespace(key)
+    marker: Final = cache._spend_counter_generation_key(namespaced)
+    await cache.async_set_cache(key=key, value=100.0, ttl=60)
+    generation: Final = await cache.async_get_spend_counter_generation(key)
+    assert generation is not None
+    if replacement == "expiry":
+        await client.pexpire(namespaced, 1)
+        await client.pexpire(marker, 1)
+        await asyncio.sleep(0.02)
+        assert await client.get(namespaced) is None
+        await cache.async_set_cache(key=key, value=replacement_spend, nx=True, ttl=60)
+    elif replacement == "delete":
+        await cache.async_delete_cache(key=key)
+        assert await client.get(marker) is None
+        await cache.async_increment(key=key, value=replacement_spend, refresh_ttl=True)
+    elif replacement == "missing-marker":
+        await client.delete(marker)
+        await cache.async_set_max(key=key, value=replacement_spend, ttl=60)
+    else:
+        await cache.async_set_cache(key=key, value=replacement_spend, ttl=60)
+    before: Final = await cache.async_get_cache(key=key)
+    assert await cache.async_subtract_floor_zero(key=key, value=100.0, expected_generation=generation, ttl=60) is None
+    assert await cache.async_get_cache(key=key) == before
+
+
+@pytest.mark.asyncio
+async def test_spend_counter_generation_ttl_tracks_counter_and_nx_does_not_replace_generation(
+    budget_counter_redis: RedisCache,
+) -> None:
+    cache: Final = budget_counter_redis
+    client: Final = cache.init_async_client()
+    key: Final = "spend:key:ttl"
+    namespaced: Final = cache.check_and_fix_namespace(key)
+    marker: Final = cache._spend_counter_generation_key(namespaced)
+    await cache.async_set_cache(key=key, value=100.0, ttl=2)
+    generation: Final = await cache.async_get_spend_counter_generation(key)
+    assert generation is not None
+    assert await cache.async_set_cache(key=key, value=0.0, nx=True, ttl=1) is False
+    assert await cache.async_get_spend_counter_generation(key) == generation
+    assert await client.ttl(namespaced) > 1
+    await cache.async_increment(key=key, value=7.5, ttl=60, refresh_ttl=True)
+    counter_ttl: Final = await client.pttl(namespaced)
+    marker_ttl: Final = await client.pttl(marker)
+    assert 0 < marker_ttl <= 2000
+    assert abs(counter_ttl - marker_ttl) <= 10
+    assert await cache.async_set_max(key=key, value=108.0, ttl=3) == 108.0
+    assert await cache.async_get_spend_counter_generation(key) == generation
+    assert await client.ttl(marker) == await client.ttl(namespaced)
+    assert await cache.async_subtract_floor_zero(key=key, value=100.0, expected_generation=generation, ttl=4) == 8.0
+    assert await client.ttl(marker) == await client.ttl(namespaced)
+
+
+@pytest.mark.asyncio
+async def test_spend_counter_pending_reset_eventually_expires_despite_active_writers(
+    budget_counter_redis: RedisCache,
+) -> None:
+    cache: Final = budget_counter_redis
+    client: Final = cache.init_async_client()
+    key: Final = "spend:key:failed-reconcile"
+    namespaced: Final = cache.check_and_fix_namespace(key)
+    marker: Final = cache._spend_counter_generation_key(namespaced)
+    await cache.async_set_cache(key=key, value=100.0, ttl=1)
+    assert await cache.async_get_spend_counter_generation(key) is not None
+    await asyncio.sleep(0.05)
+    await cache.async_increment(key=key, value=7.5, ttl=60, refresh_ttl=True)
+    await cache.async_set_max(key=key, value=108.0, ttl=60)
+    assert 0 < await client.pttl(namespaced) < 1000
+    await asyncio.sleep(1.0)
+    assert await client.get(namespaced) is None
+    assert await client.get(marker) is None
+
+
+@pytest.mark.asyncio
+async def test_spend_counter_generation_snapshot_missing_counter_does_not_create_zero(
+    budget_counter_redis: RedisCache,
+) -> None:
+    cache: Final = budget_counter_redis
+    key: Final = "spend:key:missing"
+    assert await cache.async_get_spend_counter_generation(key) is None
+    assert (
+        await cache.async_subtract_floor_zero(key=key, value=100.0, expected_generation="expired-generation", ttl=60)
+        is None
+    )
+    assert await cache.async_get_cache(key=key) is None
 
 
 @pytest.fixture
@@ -107,11 +267,20 @@ async def test_redis_cache_async_subtract_floor_zero_is_atomic_and_namespaced(mo
     mock_redis_instance.eval.return_value = b"2.5"
 
     with patch.object(redis_cache, "init_async_client", return_value=mock_redis_instance):
-        result = await redis_cache.async_subtract_floor_zero(key="spend:key:k", value=100.0, ttl=60)
+        result = await redis_cache.async_subtract_floor_zero(
+            key="spend:key:k", value=100.0, expected_generation="old-generation", ttl=60
+        )
 
     assert result == 2.5
     args = mock_redis_instance.eval.await_args.args
-    assert args[1:] == (1, "budget:spend:key:k", "100.0", "60")
+    assert args[1:-1] == (
+        2,
+        "budget:spend:key:k",
+        "budget:spend:key:k:generation:{budget:spend:key:k}",
+        "100.0",
+        "60",
+        "old-generation",
+    )
 
 
 @pytest.mark.parametrize("namespace", [None, "litellm"])

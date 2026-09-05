@@ -56,7 +56,8 @@ def _make_spend_counter_cache(
         )
         cache.redis_cache.async_delete_cache = AsyncMock()
         cache.redis_cache.async_set_cache = AsyncMock()
-        cache.redis_cache.async_set_max = AsyncMock()
+        cache.redis_cache.async_set_max = AsyncMock(return_value=None)
+        cache.redis_cache.async_get_spend_counter_generation = AsyncMock(return_value="counter-generation")
     else:
         cache.redis_cache = None
     cache.async_increment_cache = AsyncMock(return_value=redis_increment_value)
@@ -120,6 +121,7 @@ async def test_get_current_spend_floors_stale_low_counter_against_db(monkeypatch
     whose authoritative DB spend is already over budget. With max_budget set,
     get_current_spend re-checks the DB and returns the higher recorded spend."""
     fake_cache = _make_spend_counter_cache(redis_get_value=2.0)
+    fake_cache.redis_cache.async_set_max.return_value = 12.0
     monkeypatch.setattr(ps, "spend_counter_cache", fake_cache)
     from_db = AsyncMock(return_value=12.0)
     monkeypatch.setattr(ps.SpendCounterReseed, "from_db", from_db)
@@ -131,12 +133,15 @@ async def test_get_current_spend_floors_stale_low_counter_against_db(monkeypatch
     )
 
     assert result == 12.0
-    assert from_db.await_count == 1
+    assert from_db.await_count == 2
     # the stale counter is repaired up to the authoritative DB value via a
     # monotonic set-max so other workers read the corrected total, and a
     # concurrent increment cannot be clobbered
     fake_cache.redis_cache.async_set_max.assert_awaited_once_with(
-        key="spend:key:abc", value=12.0
+        key="spend:key:abc", value=12.0, expected_generation="counter-generation"
+    )
+    fake_cache.redis_cache.async_get_spend_counter_generation.assert_awaited_once_with(
+        key="spend:key:abc", prepare_reset=False
     )
 
 
