@@ -40,6 +40,8 @@ FROM $LITELLM_BUILD_IMAGE AS builder
 ARG NPM_REGISTRY
 ARG UV_INDEX_URL
 ARG APK_REPOSITORY
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
 
 WORKDIR /app
 USER root
@@ -64,7 +66,9 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_PYTHON_DOWNLOADS=0 \
     UV_INDEX_URL=${UV_INDEX_URL} \
     npm_config_registry=${NPM_REGISTRY} \
-    PATH="/app/.venv/bin:${PATH}"
+    PATH="/app/.venv/bin:${PATH}" \
+    HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY}
 
 # Copy dependency metadata first for layer caching
 COPY pyproject.toml uv.lock ./
