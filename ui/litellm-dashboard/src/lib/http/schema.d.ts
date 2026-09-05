@@ -24527,6 +24527,19 @@ export interface components {
              */
             pattern_type: "prebuilt" | "regex";
         };
+        /** CooldownStatus */
+        CooldownStatus: {
+            /** Message */
+            message: string | null;
+            /** Remaining Seconds */
+            remaining_seconds: number;
+            /** Started At */
+            started_at: string | null;
+            /** Status Code */
+            status_code: number | null;
+            /** Until */
+            until: string | null;
+        };
         /**
          * CoordinationRedisNode
          * @description A single startup node of a cluster-mode Redis used for proxy coordination.
@@ -26174,6 +26187,13 @@ export interface components {
              * @description Token for Vault token-based authentication
              */
             vault_token?: string | null;
+        };
+        /** HealthStatus */
+        HealthStatus: {
+            /** Checked At */
+            checked_at: string | null;
+            /** Reason */
+            reason: string | null;
         };
         /** Hyperparameters */
         Hyperparameters: {
@@ -29633,6 +29653,33 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ModelStatusItem */
+        ModelStatusItem: {
+            cooldown: components["schemas"]["CooldownStatus"] | null;
+            /** Deployment Id */
+            deployment_id: string;
+            health: components["schemas"]["HealthStatus"] | null;
+            /** Model Group */
+            model_group: string;
+            /** States */
+            states: ("cooldown" | "health_unhealthy")[];
+        };
+        /** ModelStatusResponse */
+        ModelStatusResponse: {
+            /** As Of */
+            as_of: string;
+            /** Items */
+            items: components["schemas"]["ModelStatusItem"][];
+            /** Returned */
+            returned: number;
+            /** Router Deployments */
+            router_deployments: number;
+            /**
+             * Source
+             * @constant
+             */
+            source: "redis";
+        };
         /**
          * MutualTLSSecurityScheme
          * @description Defines a security scheme using mTLS authentication.
@@ -32866,6 +32913,53 @@ export interface components {
             routing_strategy_args?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** RoutingStatsItem */
+        RoutingStatsItem: {
+            /** Active Requests */
+            active_requests: number;
+            /** Api Base */
+            api_base: string;
+            /** Channel */
+            channel: string;
+            /** Failure */
+            failure: number;
+            /** Last Seen */
+            last_seen: string;
+            /** Latency Avg Ms */
+            latency_avg_ms: number | null;
+            /** Latency Max Ms */
+            latency_max_ms: number | null;
+            /** Latency Overflow Count */
+            latency_overflow_count: number;
+            /** Latency P50 Ms */
+            latency_p50_ms: number | null;
+            /** Latency P95 Ms */
+            latency_p95_ms: number | null;
+            /** Model Group */
+            model_group: string;
+            /** Model Id */
+            model_id: string;
+            /** Requests */
+            requests: number;
+            /** Success */
+            success: number;
+            /** Upstream Attempts */
+            upstream_attempts: number;
+            /** Upstream Failure */
+            upstream_failure: number;
+        };
+        /** RoutingStatsResponse */
+        RoutingStatsResponse: {
+            /** As Of */
+            as_of: string;
+            /** Items */
+            items: components["schemas"]["RoutingStatsItem"][];
+            /**
+             * Window
+             * @enum {string}
+             */
+            window: "1m" | "5m" | "15m";
         };
         /**
          * Run
@@ -48245,7 +48339,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ModelStatusResponse"];
                 };
             };
             /** @description Validation Error */
@@ -48262,7 +48356,7 @@ export interface operations {
     get_routing_stats_observability_routing_stats_get: {
         parameters: {
             query?: {
-                window?: string;
+                window?: "1m" | "5m" | "15m";
                 channel?: string | null;
                 model_group?: string | null;
             };
@@ -48278,7 +48372,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RoutingStatsResponse"];
                 };
             };
             /** @description Validation Error */

@@ -597,7 +597,7 @@ class LiteLLMAnthropicMessagesAdapter:
                     assistant_message["tool_calls"] = tool_calls
                 if len(thinking_blocks) > 0:
                     assistant_message["thinking_blocks"] = thinking_blocks
-                reasoning_content: Final = reasoning_content_from_thinking_blocks(thinking_blocks)
+                reasoning_content = reasoning_content_from_thinking_blocks(thinking_blocks)
                 if reasoning_content:
                     assistant_message["reasoning_content"] = reasoning_content
                 new_messages.append(assistant_message)
@@ -792,7 +792,7 @@ class LiteLLMAnthropicMessagesAdapter:
                 input_schema = dict(tool["input_schema"] or {})
                 if tool_type in {"function", "custom"} and input_schema.get("type") == tool_type:
                     input_schema["type"] = "object"
-                function_chunk["parameters"] = input_schema  # type: ignore
+                function_chunk["parameters"] = input_schema
             if "description" in tool:
                 function_chunk["description"] = tool["description"]
             if "strict" in tool:

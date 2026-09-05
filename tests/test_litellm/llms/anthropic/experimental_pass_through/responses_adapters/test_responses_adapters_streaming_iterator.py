@@ -245,26 +245,6 @@ class TestProcessEventTextDeltaWithoutOutputItemAdded:
             ("content_block_delta", 0),
         ]
 
-
-def test_reasoning_item_opens_unsigned_thinking_block():
-    chunks = _process_all(
-        [
-            {
-                "type": "response.output_item.added",
-                "item": {"type": "reasoning", "id": "rs_1"},
-            },
-            {
-                "type": "response.reasoning_summary_text.delta",
-                "item_id": "rs_1",
-                "delta": "Weighing options",
-            },
-        ]
-    )
-
-    assert chunks[0]["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
-    assert chunks[1]["delta"] == {"type": "thinking_delta", "thinking": "Weighing options"}
-    assert not [chunk for chunk in chunks if chunk.get("delta", {}).get("type") == "signature_delta"]
-
     def test_process_event_unregistered_item_id_opens_new_text_block(self):
         chunks = _process_all(
             [
@@ -294,6 +274,26 @@ def test_reasoning_item_opens_unsigned_thinking_block():
             ("content_block_start", 0),
             ("content_block_delta", 0),
         ]
+
+
+def test_reasoning_item_opens_unsigned_thinking_block():
+    chunks = _process_all(
+        [
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "delta": "Weighing options",
+            },
+        ]
+    )
+
+    assert chunks[0]["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
+    assert chunks[1]["delta"] == {"type": "thinking_delta", "thinking": "Weighing options"}
+    assert not [chunk for chunk in chunks if chunk.get("delta", {}).get("type") == "signature_delta"]
 
 
 class TestResponseCompletedUsage:

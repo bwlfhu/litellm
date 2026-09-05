@@ -129,11 +129,12 @@ def test_print_deployment(model_list):
         "model_name": "gpt-5-mini",
         "litellm_params": {
             "model": "gpt-5-mini",
-            "api_key": os.getenv("OPENAI_API_KEY"),
+            "api_key": "sk-test-masking-key",
         },
     }
     printed_deployment = router.print_deployment(deployment)
-    assert 10 * "*" in printed_deployment["litellm_params"]["api_key"]
+    assert printed_deployment["litellm_params"]["api_key"] == "sk**********"
+    assert deployment["litellm_params"]["api_key"] == "sk-test-masking-key"
 
 
 def test_print_deployment_with_redact_enabled(model_list):
@@ -427,9 +428,7 @@ def test_update_kwargs_syncs_routing_stats_to_prebuilt_logging_object(
     logging_obj.model_call_details["litellm_params"]["routing_stats_attempt_id"] = "finished-attempt"
     next_deployment = deployment.model_dump()
     next_deployment["model_info"]["access_groups"] = []
-    router._update_kwargs_with_deployment(
-        deployment=next_deployment, kwargs=kwargs, function_name=router_function_name
-    )
+    router._update_kwargs_with_deployment(deployment=next_deployment, kwargs=kwargs, function_name=router_function_name)
 
     assert RoutingStatsLogger._metadata(logging_obj.model_call_details) is None
     assert "routing_stats_metadata" not in logging_obj.litellm_params
@@ -675,7 +674,8 @@ def test_deployment_callback_respects_cooldown_time(model_list):
         assert mock_set.call_args.kwargs["time_to_cooldown"] == 0
 
 
-def test_deployment_callback_recovers_cooldown_from_deployment_config():
+@pytest.mark.asyncio
+async def test_deployment_callback_recovers_cooldown_from_deployment_config():
     import time
 
     router = Router(
@@ -687,18 +687,21 @@ def test_deployment_callback_recovers_cooldown_from_deployment_config():
             }
         ],
         cooldown_time=30,
+        allowed_fails_policy=litellm.AllowedFailsPolicy(RateLimitErrorAllowedFails=0),
     )
     exception = litellm.RateLimitError(message="rate limited", llm_provider="openai", model="gpt-5-mini")
 
-    with patch("litellm.router._set_cooldown_deployments") as mock_set:
-        router.deployment_callback_on_failure(
-            kwargs={"exception": exception, "litellm_params": {"model_info": {"id": 100}}},
-            completion_response=None,
-            start_time=time.time(),
-            end_time=time.time(),
-        )
+    router.deployment_callback_on_failure(
+        kwargs={"exception": exception, "litellm_params": {"model_info": {"id": 100}}},
+        completion_response=None,
+        start_time=time.time(),
+        end_time=time.time(),
+    )
 
-    assert mock_set.call_args.kwargs["time_to_cooldown"] == 60
+    cooldowns = router.cooldown_cache.get_active_cooldowns(model_ids=["100"], parent_otel_span=None)
+    assert len(cooldowns) == 1
+    assert cooldowns[0][0] == "100"
+    assert cooldowns[0][1]["cooldown_time"] == 60
 
 
 def test_log_retry(model_list):

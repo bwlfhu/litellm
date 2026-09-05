@@ -376,7 +376,7 @@ def test_completion_entry_logs_tool_shape_without_changing_request():
     import litellm
 
     with patch("litellm.main.log_tool_request_shape") as log:
-        litellm.completion(
+        response = litellm.completion(
             model="openai/gpt-4o-mini",
             messages=[{"role": "user", "content": "hello"}],
             tools=[],
@@ -388,6 +388,7 @@ def test_completion_entry_logs_tool_shape_without_changing_request():
     assert [call.kwargs["phase"] for call in log.call_args_list] == ["received", "normalized"]
     assert all(call.kwargs["tools"] == [] for call in log.call_args_list)
     assert all(call.kwargs["custom_llm_provider"] == "openai" for call in log.call_args_list)
+    assert response.choices[0].message.content == "ok"
 
 
 def test_responses_entry_logs_tool_shape_without_changing_request():

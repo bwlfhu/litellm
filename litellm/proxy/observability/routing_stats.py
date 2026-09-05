@@ -109,7 +109,7 @@ def _sanitize_api_base(api_base: object) -> str:
 class RoutingStatsStore:
     """Writes and reads minute-bucketed deployment attempt statistics."""
 
-    def __init__(self, redis_cache: RedisCache):
+    def __init__(self, redis_cache: RedisCache) -> None:
         self.redis_cache = redis_cache
 
     def _async_client(self) -> RoutingStatsRedis:
@@ -407,7 +407,7 @@ class RoutingStatsStore:
 class RoutingStatsLogger(CustomLogger):
     """Callback that sends deployment-attempt telemetry to Redis in background tasks."""
 
-    def __init__(self, redis_cache: RedisCache):
+    def __init__(self, redis_cache: RedisCache) -> None:
         super().__init__(turn_off_message_logging=True)  # pyright: ignore[reportUnknownMemberType]
         self._store = RoutingStatsStore(redis_cache=redis_cache)
 
@@ -514,7 +514,7 @@ class RoutingStatsLogger(CustomLogger):
             coroutine.close()
 
 
-_routing_stats_logger: Final[RoutingStatsLogger | None] = None
+_routing_stats_logger: RoutingStatsLogger | None = None  # rebind-ok: initialized once when proxy startup supplies Redis
 
 
 def initialize_routing_stats(redis_cache: RedisCache | None) -> None:

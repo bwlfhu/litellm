@@ -332,13 +332,13 @@ async def _sanitize_deepseek_messages_stream(
         await aclose_if_supported(completion_stream)
 
 
-def _without_reasoning_content_fields(message: Mapping[str, object]) -> Mapping[str, object]:
+def _without_reasoning_content_fields(message: Mapping[str, object]) -> dict[str, object]:
     return {  # mutable-ok: provider messages require concrete JSON objects
         key: deepcopy(value) for key, value in message.items() if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS
     }
 
 
-def _sanitize_non_assistant_deepseek_message(message: Mapping[str, object]) -> Mapping[str, object]:
+def _sanitize_non_assistant_deepseek_message(message: Mapping[str, object]) -> dict[str, object]:
     transformed_message: Final = _without_reasoning_content_fields(message)
     content: Final = transformed_message.get("content")
     if not isinstance(content, list):
@@ -616,7 +616,9 @@ def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], 
             block_type
             for message in messages
             for field in ("content", "thinking_blocks")
-            for block, depth in _content_blocks(message.get(field) if isinstance(message.get(field), list) else [])
+            for content in (message.get(field),)
+            if isinstance(content, list)
+            for block, depth in _content_blocks(content)
             if isinstance(block, Mapping)
             for block_type in (block.get("type"),)
             if isinstance(block_type, str)
@@ -1136,7 +1138,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     ) -> None:
         self._messages_path = messages_path
         self._tool_thinking = tool_thinking
-        self._missing_reasoning = missing_reasoning
+        self._missing_reasoning: Literal["placeholder"] | None = missing_reasoning
 
     @property
     def custom_llm_provider(self) -> str | None:

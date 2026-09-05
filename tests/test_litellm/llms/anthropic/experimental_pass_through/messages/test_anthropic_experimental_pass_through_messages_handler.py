@@ -232,7 +232,7 @@ async def test_anthropic_messages_logs_normalized_tool_shape_after_hooks():
         patch.object(handler, "log_tool_request_shape") as shape_log,
         patch("asyncio.get_event_loop", return_value=fake_loop),
     ):
-        await handler.anthropic_messages(
+        response = await handler.anthropic_messages(
             max_tokens=100,
             messages=[{"role": "user", "content": "hello"}],
             model="anthropic/claude-sonnet-4-5-20250929",
@@ -247,6 +247,7 @@ async def test_anthropic_messages_logs_normalized_tool_shape_after_hooks():
     assert shape_log.call_args.kwargs["call_id"] == "call-1"
     assert shape_log.call_args.kwargs["warn_when_missing"] is False
     assert shape_log.call_args.kwargs["log_when_present"] is True
+    assert response == "stub"
 
 
 async def _async_return(value):

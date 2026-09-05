@@ -2717,7 +2717,7 @@ class Router:
                     yield item
             except MidStreamFallbackError as e:
                 try:
-                    partial_usage: Final = Router._extract_partial_responses_usage(source_iterator)
+                    partial_usage = Router._extract_partial_responses_usage(source_iterator)
                 except Exception:
                     partial_usage = None
                 try:
@@ -7293,7 +7293,22 @@ class Router:
     @classmethod
     def _get_valid_deployment_cooldown_time(cls, deployment: Deployment | dict[str, Any]) -> float | None:
         if isinstance(deployment, Deployment):
-            return cls._normalize_cooldown_time(getattr(deployment.litellm_params, "cooldown_time", None))
+            model_info_cooldown: Final = cls._normalize_cooldown_time(
+                getattr(deployment.model_info, "cooldown_time", None)
+            )
+            return (
+                model_info_cooldown
+                if model_info_cooldown is not None
+                else cls._normalize_cooldown_time(getattr(deployment.litellm_params, "cooldown_time", None))
+            )
+        deployment_info: Final = deployment.get("model_info")
+        info_cooldown: Final = (
+            cls._normalize_cooldown_time(deployment_info.get("cooldown_time"))
+            if isinstance(deployment_info, dict)
+            else None
+        )
+        if info_cooldown is not None:
+            return info_cooldown
         deployment_params: Final = deployment.get("litellm_params")
         if not isinstance(deployment_params, dict):
             return None
@@ -7634,7 +7649,7 @@ class Router:
                             target=logging_obj.failure_handler,
                             args=(e, traceback.format_exc()),
                         ).start()  # log response
-                    deployment_cooldown: Final = self._get_valid_deployment_cooldown_time(deployment)
+                    deployment_cooldown = self._get_valid_deployment_cooldown_time(deployment)
                     _set_cooldown_deployments(
                         litellm_router_instance=self,
                         exception_status=e.status_code,

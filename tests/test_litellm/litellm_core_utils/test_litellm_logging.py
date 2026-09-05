@@ -1289,15 +1289,19 @@ def test_success_handler_skips_sync_callbacks_for_async_requests(logging_obj, as
     from litellm.integrations.custom_logger import CustomLogger
 
     class DummyLogger(CustomLogger):
-        pass
+        events = ()
+
+        def log_success_event(self, kwargs, response_obj, start_time, end_time):
+            self.events += (("success", response_obj),)
+
+        def log_stream_event(self, kwargs, response_obj, start_time, end_time):
+            self.events += (("stream", response_obj),)
 
     logging_obj.stream = False  # simulate non-streaming request where sync callbacks would normally run
     logging_obj.model_call_details["litellm_params"] = {async_flag: True}
     logging_obj.litellm_params = logging_obj.model_call_details["litellm_params"]
 
     dummy_logger = DummyLogger()
-    dummy_logger.log_success_event = MagicMock()
-    dummy_logger.log_stream_event = MagicMock()
 
     model_response = ModelResponse(
         id="resp-123",
@@ -1319,8 +1323,7 @@ def test_success_handler_skips_sync_callbacks_for_async_requests(logging_obj, as
     ):
         logging_obj.success_handler(result=model_response)
 
-    dummy_logger.log_success_event.assert_not_called()
-    dummy_logger.log_stream_event.assert_not_called()
+    assert dummy_logger.events == ()
 
 
 @pytest.mark.parametrize("call_type", ["completion", "responses"])
@@ -3804,7 +3807,10 @@ def test_failure_handler_runs_sync_callbacks_for_non_pass_through_requests(loggi
     from litellm.integrations.custom_logger import CustomLogger
 
     class DummyLogger(CustomLogger):
-        pass
+        failures = ()
+
+        def log_failure_event(self, kwargs, response_obj, start_time, end_time):
+            self.failures += ((kwargs["exception"], response_obj),)
 
     logging_obj.call_type = call_type
     logging_obj.stream = False
@@ -3812,7 +3818,7 @@ def test_failure_handler_runs_sync_callbacks_for_non_pass_through_requests(loggi
     logging_obj.litellm_params = {}
 
     dummy_logger = DummyLogger()
-    dummy_logger.log_failure_event = MagicMock()
+    error = RuntimeError("test error")
 
     with patch.object(
         logging_obj,
@@ -3820,11 +3826,12 @@ def test_failure_handler_runs_sync_callbacks_for_non_pass_through_requests(loggi
         return_value=[dummy_logger],
     ):
         logging_obj.failure_handler(
-            exception=Exception("test error"),
+            exception=error,
             traceback_exception="",
         )
 
-    dummy_logger.log_failure_event.assert_called_once()
+    assert len(dummy_logger.failures) == 1
+    assert dummy_logger.failures[0][0] is error
 
 
 @pytest.mark.asyncio

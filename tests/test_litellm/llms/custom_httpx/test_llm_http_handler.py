@@ -476,6 +476,8 @@ async def test_async_anthropic_messages_handler_logs_provider_dispatch_tool_shap
     )
     mock_config.get_complete_url = Mock(return_value="https://api.anthropic.com/v1/messages")
     mock_config.sign_request = Mock(return_value=({}, None))
+    mock_config.get_error_class = Mock(return_value=RuntimeError("stop after dispatch"))
+    mock_config.max_retry_on_anthropic_messages_http_error = 1
     mock_logging_obj = Mock()
     mock_logging_obj.model_call_details = {}
     mock_logging_obj.litellm_call_id = "call-2"
@@ -483,7 +485,7 @@ async def test_async_anthropic_messages_handler_logs_provider_dispatch_tool_shap
     mock_client.post = AsyncMock(side_effect=RuntimeError("stop after dispatch"))
 
     with patch("litellm.llms.custom_httpx.llm_http_handler.log_tool_request_shape") as shape_log:
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError, match="stop after dispatch"):
             await handler.async_anthropic_messages_handler(
                 model="claude-test",
                 messages=[{"role": "user", "content": "hello"}],

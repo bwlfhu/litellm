@@ -2393,8 +2393,8 @@ def test_deepseek_rejects_unsupported_nested_tool_result_content(surface):
         }
     ]
 
-    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
-        if surface == "messages":
+    if surface == "messages":
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
             DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
                 model="deepseek-v4-pro",
                 messages=messages,
@@ -2402,7 +2402,8 @@ def test_deepseek_rejects_unsupported_nested_tool_result_content(surface):
                 litellm_params=GenericLiteLLMParams(),
                 headers={},
             )
-        else:
+    else:
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
             prepare_deepseek_chat_history(messages)
 
 
@@ -2414,6 +2415,8 @@ def test_deepseek_content_validation_has_bounded_nesting():
     )
 
     _validate_deepseek_content_blocks([{"role": "user", "content": [nested_block]}])
+    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
+        _validate_deepseek_content_blocks([{"role": "user", "content": [{"type": "image"}]}])
 
 
 @pytest.mark.parametrize("role", ["user", "tool"])
@@ -2421,8 +2424,8 @@ def test_deepseek_content_validation_has_bounded_nesting():
 def test_deepseek_rejects_redacted_thinking_outside_assistant_history(role, surface):
     messages = [{"role": role, "content": [{"type": "redacted_thinking", "data": "encrypted"}]}]
 
-    with pytest.raises(litellm.utils.UnsupportedParamsError, match="redacted_thinking"):
-        if surface == "messages":
+    if surface == "messages":
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="redacted_thinking"):
             DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
                 model="deepseek-v4-pro",
                 messages=messages,
@@ -2430,7 +2433,8 @@ def test_deepseek_rejects_redacted_thinking_outside_assistant_history(role, surf
                 litellm_params=GenericLiteLLMParams(),
                 headers={},
             )
-        else:
+    else:
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="redacted_thinking"):
             prepare_deepseek_chat_history(messages)
 
 
@@ -2449,8 +2453,8 @@ def test_deepseek_rejects_nested_redacted_thinking(surface):
         }
     ]
 
-    with pytest.raises(litellm.utils.UnsupportedParamsError, match="redacted_thinking"):
-        if surface == "messages":
+    if surface == "messages":
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="redacted_thinking"):
             DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
                 model="deepseek-v4-pro",
                 messages=messages,
@@ -2458,7 +2462,8 @@ def test_deepseek_rejects_nested_redacted_thinking(surface):
                 litellm_params=GenericLiteLLMParams(),
                 headers={},
             )
-        else:
+    else:
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="redacted_thinking"):
             prepare_deepseek_chat_history(messages)
 
 
@@ -4167,7 +4172,7 @@ async def test_deepseek_signature_error_does_not_retry_while_claude_keeps_retryi
 
     deepseek_client = AsyncMock(spec=AsyncHTTPHandler)
     deepseek_client.post = AsyncMock(return_value=signature_error)
-    with pytest.raises(Exception) as error:
+    with pytest.raises(BaseLLMException, match="Invalid signature") as error:
         await handler.async_anthropic_messages_handler(
             model="deepseek-v4-pro",
             messages=[{"role": "user", "content": "Hello"}],
@@ -4255,7 +4260,7 @@ async def test_router_does_not_fallback_after_deepseek_signature_error():
 
     try:
         with patch("litellm.llms.custom_httpx.llm_http_handler.get_async_httpx_client", return_value=http_client):
-            with pytest.raises(Exception) as error:
+            with pytest.raises(BaseLLMException, match="Invalid signature") as error:
                 await router.aanthropic_messages(
                     model="primary",
                     max_tokens=100,

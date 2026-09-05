@@ -4864,7 +4864,7 @@ def use_custom_pricing_for_model(litellm_params: dict | None) -> bool:
     # like /responses and /messages store model_info under litellm_metadata)
     for metadata_key in ("metadata", "litellm_metadata"):
         metadata: dict = litellm_params.get(metadata_key, {}) or {}
-        model_info: dict = metadata.get("model_info", {}) or {}
+        model_info = metadata.get("model_info", {}) or {}
 
         if model_info:
             matching_keys = _CUSTOM_PRICING_KEYS & model_info.keys()

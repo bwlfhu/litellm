@@ -317,7 +317,8 @@ class TestWriteHealthStateIntegration:
         ("configured_cooldown", "expected_cooldown"),
         [(0, 0), (60, 60), (None, 30), (-1, 30)],
     )
-    def test_health_check_uses_deployment_cooldown(self, configured_cooldown, expected_cooldown):
+    @pytest.mark.asyncio
+    async def test_health_check_uses_deployment_cooldown(self, configured_cooldown, expected_cooldown):
         import litellm.proxy.proxy_server as proxy_module
         from litellm.proxy.proxy_server import _write_health_state_to_router_cache
 
@@ -333,14 +334,18 @@ class TestWriteHealthStateIntegration:
         timeout_exc = litellm.Timeout(message="Health check timeout", model="", llm_provider="")
 
         with patch.object(proxy_module, "llm_router", router):
-            with patch("litellm.router_utils.cooldown_handlers._set_cooldown_deployments") as mock_cooldown:
-                _write_health_state_to_router_cache(
-                    healthy_endpoints=[{"model_id": "deploy-2"}],
-                    unhealthy_endpoints=[{"model_id": "deploy-1"}],
-                    exceptions_by_model_id={"deploy-1": timeout_exc},
-                )
+            _write_health_state_to_router_cache(
+                healthy_endpoints=[{"model_id": "deploy-2"}],
+                unhealthy_endpoints=[{"model_id": "deploy-1"}],
+                exceptions_by_model_id={"deploy-1": timeout_exc},
+            )
 
-        assert mock_cooldown.call_args.kwargs["time_to_cooldown"] == expected_cooldown
+        cooldowns = router.cooldown_cache.get_active_cooldowns(model_ids=["deploy-1"], parent_otel_span=None)
+        if expected_cooldown == 0:
+            assert cooldowns == []
+        else:
+            assert len(cooldowns) == 1
+            assert cooldowns[0][1]["cooldown_time"] == expected_cooldown
 
     def test_unhealthy_endpoint_without_exception_skips_cooldown(self):
         """Unhealthy endpoints without an exception key should not trigger cooldown."""

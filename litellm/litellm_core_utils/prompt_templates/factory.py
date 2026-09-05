@@ -2681,8 +2681,8 @@ def anthropic_messages_pt(
                         and (
                             (
                                 _item.get("type") == "thinking"
-                                and isinstance(_item.get("thinking"), str)
-                                and bool(_item["thinking"].strip())
+                                and isinstance(_thinking_text := _item.get("thinking"), str)
+                                and bool(_thinking_text.strip())
                                 and (preserve_unsigned_thinking_blocks or not _is_unsignable_thinking_block(_item))
                             )
                             or (not preserve_unsigned_thinking_blocks and _item.get("type") == "redacted_thinking")

@@ -109,7 +109,7 @@ class TestAnthropicLoggingHandlerModelFallback:
         mock_build_response.return_value = MagicMock()
         mock_create_payload.return_value = {"test": "payload"}
 
-        AnthropicPassthroughLoggingHandler._handle_logging_anthropic_collected_chunks(
+        result = AnthropicPassthroughLoggingHandler._handle_logging_anthropic_collected_chunks(
             litellm_logging_obj=logging_obj,
             passthrough_success_handler_obj=self._create_mock_passthrough_handler(),
             url_route="/anthropic/v1/messages",
@@ -121,6 +121,8 @@ class TestAnthropicLoggingHandlerModelFallback:
         )
 
         extract_response_shape.assert_not_called()
+        assert result["kwargs"] == {"test": "payload"}
+        assert result["result"] is mock_build_response.return_value
 
     def test_model_fallback_logic_isolated(self):
         """Test just the model fallback logic in isolation"""
@@ -1016,14 +1018,18 @@ class TestAnthropicBatchPassthroughCostTracking:
         assert result["kwargs"]["response_cost"] == 0.0
 
     @patch("litellm.proxy.proxy_server.proxy_logging_obj")
-    def test_store_batch_managed_object_success(self, mock_proxy_logging_obj, mock_logging_obj):
+    @pytest.mark.asyncio
+    async def test_store_batch_managed_object_success(self, mock_proxy_logging_obj, mock_logging_obj):
         """Test storing batch managed object"""
         from litellm.types.utils import LiteLLMBatch
 
-        # Setup mocks
-        mock_managed_files_hook = MagicMock()
-        mock_managed_files_hook.store_unified_object_id = AsyncMock()
-        mock_proxy_logging_obj.get_proxy_hook.return_value = mock_managed_files_hook
+        stored = asyncio.get_running_loop().create_future()
+
+        class ManagedFilesHook:
+            async def store_unified_object_id(self, **kwargs):
+                stored.set_result(kwargs)
+
+        mock_proxy_logging_obj.get_proxy_hook.return_value = ManagedFilesHook()
 
         batch_object = LiteLLMBatch(
             id="msgbatch_123",
@@ -1036,18 +1042,21 @@ class TestAnthropicBatchPassthroughCostTracking:
             request_counts={"total": 1, "completed": 0, "failed": 0},
         )
 
-        with patch("asyncio.create_task"):
-            AnthropicPassthroughLoggingHandler._store_batch_managed_object(
-                unified_object_id="test-unified-id",
-                batch_object=batch_object,
-                model_object_id="msgbatch_123",
-                logging_obj=mock_logging_obj,
-                is_batch_create=True,
-                user_id="test-user",
-            )
+        AnthropicPassthroughLoggingHandler._store_batch_managed_object(
+            unified_object_id="test-unified-id",
+            batch_object=batch_object,
+            model_object_id="msgbatch_123",
+            logging_obj=mock_logging_obj,
+            is_batch_create=True,
+            litellm_params={"metadata": {"user_api_key_user_id": "test-user"}},
+        )
 
-            # Verify managed files hook was called
-            mock_proxy_logging_obj.get_proxy_hook.assert_called_once_with("managed_files")
+        payload = await asyncio.wait_for(stored, timeout=1)
+        assert payload["unified_object_id"] == "test-unified-id"
+        assert payload["model_object_id"] == "msgbatch_123"
+        assert payload["file_object"] is batch_object
+        assert payload["user_api_key_dict"].user_id == "test-user"
+        assert payload["persist_attribution"] is True
 
 
 class TestBuildCompleteStreamingResponseRobustness:
@@ -2204,6 +2213,34 @@ class TestAnthropicResponseCostRecordedOnResponse:
         assert response._hidden_params["response_cost"] == 0.125
         assert logging_obj.model_call_details["response_cost"] == 0.125
         assert kwargs["response_cost"] == 0.125
+
+    def test_create_payload_records_calculated_response_cost(self):
+        from litellm.types.utils import ModelResponse
+
+        logging_obj = MagicMock()
+        logging_obj.model_call_details = {}
+        logging_obj.get_router_model_id.return_value = None
+        logging_obj.litellm_params = {}
+        logging_obj.litellm_call_id = "test-calculated-cost"
+        response = ModelResponse(
+            id="test-id",
+            model="claude-sonnet-4-6",
+            choices=[{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "hello"}}],
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+        kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+            litellm_model_response=response,
+            model="claude-sonnet-4-6",
+            kwargs={},
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            logging_obj=logging_obj,
+        )
+
+        assert kwargs["response_cost"] == pytest.approx(0.000105)
+        assert logging_obj.model_call_details["response_cost"] == kwargs["response_cost"]
+        assert response._hidden_params["response_cost"] == kwargs["response_cost"]
 
 
 class TestAnthropicPassthroughFastMode:

@@ -5,7 +5,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Final, Literal, Protocol
+from typing import Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -77,10 +77,6 @@ _ROUTING_STATS_ITEMS: Final = TypeAdapter(tuple[RoutingStatsItem, ...])
 _MAPPING_ADAPTER: Final = TypeAdapter(Mapping[str, object])
 _OBJECTS_ADAPTER: Final = TypeAdapter(tuple[object, ...])
 _EMPTY_MAPPING: Final[Mapping[str, object]] = MappingProxyType({})
-
-
-class _RedisStatusCache(Protocol):
-    async def async_batch_get_cache_strict(self, key_list: tuple[str, ...]) -> Mapping[str, object]: ...
 
 
 def _as_mapping(value: object) -> Mapping[str, object] | None:
@@ -232,7 +228,7 @@ def _build_model_status_item(
 
 @router.get(
     "/observability/routing-stats",
-    tags=("observability",),
+    tags=["observability"],  # mutable-ok: FastAPI's route registration API requires a list
 )
 async def get_routing_stats(
     window: Literal["1m", "5m", "15m"] = Query(default="5m"),
@@ -267,7 +263,7 @@ async def get_routing_stats(
 
 @router.get(
     "/observability/model-status",
-    tags=("observability",),
+    tags=["observability"],  # mutable-ok: FastAPI's route registration API requires a list
 )
 async def get_model_status(
     model: str | None = Query(default=None, min_length=1),

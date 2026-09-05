@@ -2003,7 +2003,7 @@ class BaseLLMHTTPHandler:
         litellm_params_dict: Final = dict(litellm_params)
         optional_params_dict: Final = dict(litellm_params)
         for attempt_idx in range(max_attempts):
-            started_at: Final = time.monotonic()
+            started_at = time.monotonic()
             try:
                 response = await async_httpx_client.post(
                     url=request_url,

@@ -285,14 +285,14 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
                         }
                     )
                 elif isinstance(content, list):
-                    blocks: Final = tuple(block for block in content if isinstance(block, dict))
+                    blocks = tuple(block for block in content if isinstance(block, dict))
                     input_items.extend(
                         item
                         for _, grouped in groupby(enumerate(blocks), key=self._assistant_block_group_key)
                         if (item := self._assistant_group_to_input_item(tuple(block for _, block in grouped)))
                         is not None
                     )
-                    asst_parts: Final = [
+                    asst_parts = [
                         {"type": "output_text", "text": block.get("text", "")}
                         for block in blocks
                         if block.get("type") == "text"
