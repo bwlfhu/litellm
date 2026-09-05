@@ -57,7 +57,8 @@ USER root
 COPY --from=uvbin /uv /usr/local/bin/uv
 COPY --from=uvbin /uvx /usr/local/bin/uvx
 
-RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
+RUN http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" no_proxy="${NO_PROXY}" \
+    apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
     bash \
     gcc \
     python-3.13 \
