@@ -2143,22 +2143,22 @@ def test_deepseek_anthropic_messages_rejects_redacted_tool_history_in_placeholde
     [
         ("auto", {"type": "auto"}, {"type": "enabled"}),
         ("none", {"type": "none"}, {"type": "enabled"}),
-        ("required", {"type": "any"}, {"type": "enabled"}),
+        ("required", {"type": "auto"}, {"type": "enabled"}),
         (
             {"type": "required", "disable_parallel_tool_use": True},
-            {"type": "any", "disable_parallel_tool_use": True},
+            {"type": "auto"},
             {"type": "enabled"},
         ),
-        ({"type": "any"}, {"type": "any"}, {"type": "enabled"}),
-        ({"type": "tool", "name": "get_weather"}, {"type": "tool", "name": "get_weather"}, {"type": "enabled"}),
+        ({"type": "any"}, {"type": "auto"}, {"type": "enabled"}),
+        ({"type": "tool", "name": "get_weather"}, {"type": "auto"}, {"type": "enabled"}),
         (
             {"type": "function", "function": {"name": "get_weather"}},
-            {"type": "tool", "name": "get_weather"},
+            {"type": "auto"},
             {"type": "enabled"},
         ),
     ],
 )
-def test_deepseek_anthropic_messages_preserves_tool_choice_semantics(
+def test_deepseek_anthropic_messages_normalizes_tool_choice_for_thinking(
     tool_choice, expected_tool_choice, expected_thinking
 ):
     request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
@@ -2178,7 +2178,7 @@ def test_deepseek_anthropic_messages_preserves_tool_choice_semantics(
     assert request["thinking"] == expected_thinking
 
 
-def test_deepseek_anthropic_tool_thinking_policy_preserves_forced_choice_without_disabling_thinking():
+def test_deepseek_anthropic_tool_thinking_policy_normalizes_forced_choice_without_disabling_thinking():
     request = DeepSeekAnthropicMessagesConfig(tool_thinking="disabled").transform_anthropic_messages_request(
         model="deepseek-v4-pro",
         messages=[{"role": "user", "content": "Use the weather tool."}],
@@ -2192,8 +2192,26 @@ def test_deepseek_anthropic_tool_thinking_policy_preserves_forced_choice_without
         headers={},
     )
 
-    assert request["tool_choice"] == {"type": "tool", "name": "get_weather"}
+    assert request["tool_choice"] == {"type": "auto"}
     assert request["thinking"] == {"type": "enabled"}
+
+
+def test_deepseek_anthropic_messages_preserves_forced_tool_choice_when_thinking_is_disabled():
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the weather tool."}],
+        anthropic_messages_optional_request_params={
+            "max_tokens": 100,
+            "thinking": {"type": "disabled"},
+            "tool_choice": {"type": "tool", "name": "get_weather"},
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+        },
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["tool_choice"] == {"type": "tool", "name": "get_weather"}
+    assert request["thinking"] == {"type": "disabled"}
 
 
 def test_deepseek_anthropic_messages_strips_adaptive_reasoning_controls():
