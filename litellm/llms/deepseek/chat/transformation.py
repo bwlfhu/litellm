@@ -376,6 +376,28 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         return is_thinking_always_on(model=model, custom_llm_provider="deepseek")
 
     @staticmethod
+    def _normalize_tool_choice_for_thinking(optional_params: dict, thinking_mode_active: bool) -> dict:
+        if not thinking_mode_active:
+            return optional_params
+        tool_choice: Final = optional_params.get("tool_choice")
+        if tool_choice is None:
+            return optional_params
+        if tool_choice in ("auto", "none"):
+            return optional_params
+        if isinstance(tool_choice, Mapping):
+            choice_type: Final = tool_choice.get("type")
+            if choice_type in ("auto", "none"):
+                return optional_params
+            if choice_type in ("required", "function", "tool", "any") or (
+                choice_type is None and ("name" in tool_choice or "function" in tool_choice)
+            ):
+                return {**optional_params, "tool_choice": "auto"}
+            return optional_params
+        if tool_choice == "required":
+            return {**optional_params, "tool_choice": "auto"}
+        return optional_params
+
+    @staticmethod
     def _drop_unsupported_tools(optional_params: dict) -> dict:
         """
         DeepSeek's /chat/completions only accepts tools of type "function".
@@ -461,6 +483,10 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         """
         optional_params = self._drop_unsupported_tools(optional_params)
         thinking_mode_active: Final = self._thinking_mode_active(model=model, optional_params=optional_params)
+        optional_params = self._normalize_tool_choice_for_thinking(
+            optional_params=optional_params,
+            thinking_mode_active=thinking_mode_active,
+        )
         messages = self._fill_reasoning_content(
             messages,
             model=model,
@@ -489,6 +515,10 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         """
         optional_params = self._drop_unsupported_tools(optional_params)
         thinking_mode_active: Final = self._thinking_mode_active(model=model, optional_params=optional_params)
+        optional_params = self._normalize_tool_choice_for_thinking(
+            optional_params=optional_params,
+            thinking_mode_active=thinking_mode_active,
+        )
         messages = self._fill_reasoning_content(
             messages,
             model=model,

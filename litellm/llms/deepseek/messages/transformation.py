@@ -1112,6 +1112,21 @@ def default_deepseek_anthropic_thinking_to_enabled(
     }
 
 
+def _normalize_tool_choice_for_thinking(request_params: Mapping[str, object]) -> Mapping[str, object]:
+    thinking: Final = request_params.get("thinking")
+    if not (isinstance(thinking, Mapping) and thinking.get("type") == "enabled"):
+        return request_params
+    tool_choice: Final = request_params.get("tool_choice")
+    if not isinstance(tool_choice, Mapping):
+        return request_params
+    choice_type: Final = tool_choice.get("type")
+    if choice_type in ("auto", "none"):
+        return request_params
+    if choice_type in ("any", "tool"):
+        return {**request_params, "tool_choice": {"type": "auto"}}
+    return request_params
+
+
 def omit_false_stream_for_deepseek_anthropic(
     request_params: Mapping[str, object],
 ) -> dict[str, object]:
@@ -1244,7 +1259,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 model=model,
             )
         )
-        request_params: Final = request_params_with_thinking_default
+        request_params: Final = _normalize_tool_choice_for_thinking(request_params_with_thinking_default)
         thinking: Final = request_params.get("thinking")
         require_reasoning: Final = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
         transformed_messages: Final = _deepseek_history(

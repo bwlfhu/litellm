@@ -221,6 +221,97 @@ async def test_async_transform_request_strips_unsupported_tools_from_body():
     assert body["tools"][0]["function"]["name"] == "shell"
 
 
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "required"},
+        {"type": "function", "function": {"name": "shell"}},
+    ],
+)
+def test_transform_request_normalizes_forced_tool_choice_when_thinking_is_enabled(
+    tool_choice,
+    deepseek_always_on_models,
+):
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the shell tool"}],
+        optional_params={
+            "thinking": {"type": "enabled"},
+            "tools": [_function_tool("shell")],
+            "tool_choice": tool_choice,
+        },
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["tool_choice"] == "auto"
+
+
+def test_transform_request_normalizes_forced_tool_choice_when_v4_thinking_defaults_on(deepseek_always_on_models):
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the shell tool"}],
+        optional_params={
+            "tools": [_function_tool("shell")],
+            "tool_choice": "required",
+        },
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["tool_choice"] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("thinking", "tool_choice"),
+    [
+        ({"type": "disabled"}, "required"),
+        ({"type": "disabled"}, {"type": "function", "function": {"name": "shell"}}),
+        ({"type": "enabled"}, "auto"),
+        ({"type": "enabled"}, "none"),
+    ],
+)
+def test_transform_request_preserves_supported_tool_choice_modes(
+    thinking,
+    tool_choice,
+    deepseek_always_on_models,
+):
+    body = DeepSeekChatConfig().transform_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the shell tool"}],
+        optional_params={
+            "thinking": thinking,
+            "tools": [_function_tool("shell")],
+            "tool_choice": tool_choice,
+        },
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["tool_choice"] == tool_choice
+
+
+async def test_async_transform_request_normalizes_forced_tool_choice_when_thinking_is_enabled(
+    deepseek_always_on_models,
+):
+    body = await DeepSeekChatConfig().async_transform_request(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Use the shell tool"}],
+        optional_params={
+            "thinking": {"type": "enabled"},
+            "tools": [_function_tool("shell")],
+            "tool_choice": "required",
+        },
+        litellm_params={},
+        headers={},
+    )
+
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["tool_choice"] == "auto"
+
+
 def test_vision_model_preserves_user_image_content_list(deepseek_vision_models):
     message = {
         "role": "user",
