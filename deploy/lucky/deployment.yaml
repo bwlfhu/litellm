@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lucky
+  namespace: lucky
+  labels:
+    app.kubernetes.io/name: lucky
+    app.kubernetes.io/instance: lucky
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lucky
+      app.kubernetes.io/instance: lucky
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lucky
+        app.kubernetes.io/instance: lucky
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: lucky
+          image: gdy666/lucky@sha256:96a530d208af31c45951520c0723767c29efb8cd461073dda0ccfb8bcca53e44
+          imagePullPolicy: IfNotPresent
+          args:
+            - -cd
+            - /goodluck
+          ports:
+            - name: admin
+              containerPort: 16601
+              protocol: TCP
+            - name: web
+              containerPort: 18443
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /app/conf
+            - name: tmp
+              mountPath: /tmp
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: lucky-config
+        - name: tmp
+          emptyDir: {}
