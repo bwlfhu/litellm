@@ -1,0 +1,28 @@
+bindAddr = "0.0.0.0"
+bindPort = 45217
+
+proxyBindAddr = "127.0.0.1"
+
+kcpBindPort = 0
+quicBindPort = 0
+vhostHTTPPort = 0
+vhostHTTPSPort = 0
+
+auth.method = "token"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "/etc/frp/token"
+
+transport.tls.force = true
+transport.tls.certFile = "/etc/frp/server.crt"
+transport.tls.keyFile = "/etc/frp/server.key"
+transport.tls.trustedCaFile = "/etc/frp/ca.crt"
+transport.maxPoolCount = 1
+
+maxPortsPerClient = 5
+allowPorts = [
+  { start = 19080, end = 19084 }
+]
+
+webServer.port = 0
+detailedErrorsToClient = false

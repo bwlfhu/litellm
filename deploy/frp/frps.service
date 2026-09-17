@@ -1,0 +1,23 @@
+[Unit]
+Description=FRP server for the private application gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=frp
+Group=frp
+ExecStart=/usr/local/bin/frps -c /etc/frp/frps.toml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=full
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWriteDirectories=/var/lib/frp
+
+[Install]
+WantedBy=multi-user.target

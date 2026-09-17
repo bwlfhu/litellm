@@ -35,6 +35,21 @@ spec:
             - name: web
               containerPort: 18443
               protocol: TCP
+            - name: pm-frontend
+              containerPort: 18444
+              protocol: TCP
+            - name: pm-backend
+              containerPort: 18445
+              protocol: TCP
+            - name: pms
+              containerPort: 18446
+              protocol: TCP
+            - name: sso
+              containerPort: 18447
+              protocol: TCP
+            - name: pms-api
+              containerPort: 18448
+              protocol: TCP
           livenessProbe:
             tcpSocket:
               port: admin

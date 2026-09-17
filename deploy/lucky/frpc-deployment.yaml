@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lucky-frpc
+  namespace: lucky
+  labels:
+    app.kubernetes.io/name: lucky-frpc
+    app.kubernetes.io/instance: lucky-frpc
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lucky-frpc
+      app.kubernetes.io/instance: lucky-frpc
+  template:
+    metadata:
+      annotations:
+        config.kubernetes.io/revision: "4"
+      labels:
+        app.kubernetes.io/name: lucky-frpc
+        app.kubernetes.io/instance: lucky-frpc
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: frpc
+          image: ghcr.io/fatedier/frpc@sha256:99ece6a2b62cfc68731e0df289af804ff1c699911cfc47871856434f1d6d53ee
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - /config/frpc.toml
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /config/frpc.toml
+              subPath: frpc.toml
+              readOnly: true
+            - name: credentials
+              mountPath: /etc/frp
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: config
+          configMap:
+            name: lucky-frpc-config
+        - name: credentials
+          secret:
+            secretName: lucky-frpc-credentials
+            defaultMode: 0400
+        - name: tmp
+          emptyDir: {}

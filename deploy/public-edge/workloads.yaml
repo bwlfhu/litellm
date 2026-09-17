@@ -1,0 +1,429 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pm-agent-public-frontend
+  namespace: pm-agent
+  labels:
+    app.kubernetes.io/name: pm-agent
+    app.kubernetes.io/instance: pm-agent-public
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pm-agent
+    app.kubernetes.io/instance: pm-agent-public
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pm-agent-public-frontend
+  namespace: pm-agent
+  labels:
+    app.kubernetes.io/name: pm-agent
+    app.kubernetes.io/instance: pm-agent-public
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pm-agent
+      app.kubernetes.io/instance: pm-agent-public
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pm-agent
+        app.kubernetes.io/instance: pm-agent-public
+        app.kubernetes.io/component: frontend
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: harbor-pull-secret
+      initContainers:
+        - name: prepare-static
+          image: harbor.allcam.org/pm-agent/pm-agent-frontend@sha256:56bf897e08d15d7585ed5070e07d797405c9df052cc837e6c2d3dbcf536a359a
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+          args:
+            - cp -a /app/.next/static/. /patched-static/ && find /patched-static -type f -name '*.js' -exec sed -i 's|https://pm-agent.allcam.org|https://pm-agent.allcam.com.cn|g' {} \;
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: static
+              mountPath: /patched-static
+      containers:
+        - name: frontend
+          image: harbor.allcam.org/pm-agent/pm-agent-frontend@sha256:56bf897e08d15d7585ed5070e07d797405c9df052cc837e6c2d3dbcf536a359a
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NEXT_TELEMETRY_DISABLED
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: static
+              mountPath: /app/.next/static
+              readOnly: true
+            - name: cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: static
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pm-agent-public-backend
+  namespace: pm-agent
+  labels:
+    app.kubernetes.io/name: pm-agent
+    app.kubernetes.io/instance: pm-agent-public
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pm-agent
+    app.kubernetes.io/instance: pm-agent-public
+    app.kubernetes.io/component: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pm-agent-public-backend
+  namespace: pm-agent
+  labels:
+    app.kubernetes.io/name: pm-agent
+    app.kubernetes.io/instance: pm-agent-public
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pm-agent
+      app.kubernetes.io/instance: pm-agent-public
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pm-agent
+        app.kubernetes.io/instance: pm-agent-public
+        app.kubernetes.io/component: backend
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: harbor-pull-secret
+      containers:
+        - name: backend
+          image: harbor.allcam.org/pm-agent/pm-agent-backend@sha256:bcaf676a78c7e5f6d80f28776c33f0ac266f852ca06eb8d2396df217cab1c6c7
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+          args:
+            - backend.app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          envFrom:
+            - configMapRef:
+                name: pm-agent-config
+          env:
+            - name: PM_AGENT_PUBLIC_BASE_URL
+              value: https://pm-agent.allcam.com.cn
+            - name: AUTH_TRUSTED_ORIGINS
+              value: https://pm-agent.allcam.com.cn
+            - name: CORS_ALLOW_ORIGINS
+              value: https://pm-agent.allcam.com.cn
+            - name: OIDC_ISSUER
+              value: https://sso.allcam.com.cn
+            - name: OIDC_REDIRECT_URI
+              value: https://pm-agent.allcam.com.cn/api/v1/auth/sso/feishu/callback
+            - name: OIDC_CA_FILE
+              value: ""
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: DATABASE_URL
+            - name: AUTH_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: AUTH_SESSION_SECRET
+            - name: AUTH_CSRF_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: AUTH_CSRF_SECRET
+            - name: AUTH_RATE_LIMIT_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: AUTH_RATE_LIMIT_HMAC_SECRET
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: OIDC_CLIENT_SECRET
+            - name: OIDC_FLOW_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: OIDC_FLOW_SECRET
+            - name: PMS_INTEGRATION_CONFIG_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: PMS_INTEGRATION_CONFIG_KEY
+            - name: LLM_INTEGRATION_CONFIG_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: LLM_INTEGRATION_CONFIG_KEY
+            - name: GIT_INTEGRATION_CONFIG_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pm-agent-secret
+                  key: GIT_INTEGRATION_CONFIG_KEY
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: product-model-files
+              mountPath: /var/lib/pm-agent/product-model-definitions
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: product-model-files
+          persistentVolumeClaim:
+            claimName: pm-agent-product-model-files
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pms-public-api
+  namespace: pms
+  labels:
+    app.kubernetes.io/name: pms
+    app.kubernetes.io/instance: pms-public
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pms
+    app.kubernetes.io/instance: pms-public
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 40001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pms-public-api
+  namespace: pms
+  labels:
+    app.kubernetes.io/name: pms
+    app.kubernetes.io/instance: pms-public
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pms
+      app.kubernetes.io/instance: pms-public
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pms
+        app.kubernetes.io/instance: pms-public
+        app.kubernetes.io/component: api
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: pms-harbor-pull
+      initContainers:
+        - name: wait-dependencies
+          image: harbor.allcam.org/pms/pms-api@sha256:ab08ce37eddbe6feb6789e1b3ca0454dcd144498cb896550876a3069a78e6d41
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+          args:
+            - for target in postgres:5432 redis:6379 temporal:7233; do host="${target%:*}"; port="${target#*:}"; until node -e "const net=require('net'); const s=net.connect(Number(process.argv[2]),process.argv[1],()=>process.exit(0)); s.on('error',()=>process.exit(1)); setTimeout(()=>process.exit(1),1000);" "$host" "$port"; do sleep 2; done; done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: api
+          image: harbor.allcam.org/pms/pms-api@sha256:ab08ce37eddbe6feb6789e1b3ca0454dcd144498cb896550876a3069a78e6d41
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: pms-prod-env
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PMS_APP_PORT
+              value: "40001"
+            - name: PMS_PUBLIC_BASE_URL
+              value: https://pms.allcam.com.cn
+            - name: PMS_API_INTERNAL_BASE_URL
+              value: http://pms-public-api:40001
+            - name: PMS_COOKIE_SECURE
+              value: "true"
+            - name: PMS_OIDC_ENABLED
+              value: "true"
+            - name: PMS_OIDC_ISSUER
+              value: https://sso.allcam.com.cn
+            - name: PMS_OIDC_REDIRECT_URI
+              value: https://pms.allcam.com.cn/api/auth/oidc/callback
+            - name: PMS_OIDC_POST_LOGOUT_REDIRECT_URI
+              value: https://pms.allcam.com.cn/login
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/pms-ca/ca-bundle.crt
+          ports:
+            - name: http
+              containerPort: 40001
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: allcam-root-ca
+              mountPath: /etc/pms-ca
+              readOnly: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: allcam-root-ca
+          configMap:
+            name: allcam-root-ca
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt

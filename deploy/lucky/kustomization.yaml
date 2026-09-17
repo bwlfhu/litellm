@@ -5,3 +5,5 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
+  - frpc-configmap.yaml
+  - frpc-deployment.yaml
