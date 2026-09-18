@@ -1,8 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: lucky-frpc-config
+  name: lucky-frpc-config-direct-20260918-v2
   namespace: lucky
+immutable: true
 data:
   frpc.toml: |
     serverAddr = "123.60.74.153"
@@ -22,38 +23,38 @@ data:
     transport.poolCount = 1
 
     [[proxies]]
-    name = "lucky-pm-frontend"
+    name = "pma-frontend"
     type = "tcp"
-    localIP = "lucky-web.lucky.svc.cluster.local"
-    localPort = 18444
+    localIP = "pm-agent-frontend.pm-agent.svc.cluster.local"
+    localPort = 3000
     remotePort = 19080
 
     [[proxies]]
-    name = "lucky-pm-backend"
+    name = "pma-backend"
     type = "tcp"
-    localIP = "lucky-web.lucky.svc.cluster.local"
-    localPort = 18445
+    localIP = "pm-agent-backend.pm-agent.svc.cluster.local"
+    localPort = 8000
     remotePort = 19081
 
     [[proxies]]
-    name = "lucky-pms"
+    name = "pms-web"
     type = "tcp"
-    localIP = "lucky-web.lucky.svc.cluster.local"
-    localPort = 18446
+    localIP = "web.pms.svc.cluster.local"
+    localPort = 40000
     remotePort = 19082
 
     [[proxies]]
-    name = "lucky-sso"
+    name = "sso"
     type = "tcp"
-    localIP = "lucky-web.lucky.svc.cluster.local"
-    localPort = 18447
+    localIP = "casdoor.identity.svc.cluster.local"
+    localPort = 8000
     remotePort = 19083
 
     [[proxies]]
-    name = "lucky-pms-api"
+    name = "pms-api"
     type = "tcp"
-    localIP = "lucky-web.lucky.svc.cluster.local"
-    localPort = 18448
+    localIP = "api.pms.svc.cluster.local"
+    localPort = 40001
     remotePort = 19084
 
     [[proxies]]

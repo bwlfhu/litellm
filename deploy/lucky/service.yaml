@@ -35,23 +35,3 @@ spec:
       port: 18443
       targetPort: web
       protocol: TCP
-    - name: pm-frontend
-      port: 18444
-      targetPort: pm-frontend
-      protocol: TCP
-    - name: pm-backend
-      port: 18445
-      targetPort: pm-backend
-      protocol: TCP
-    - name: pms
-      port: 18446
-      targetPort: pms
-      protocol: TCP
-    - name: sso
-      port: 18447
-      targetPort: sso
-      protocol: TCP
-    - name: pms-api
-      port: 18448
-      targetPort: pms-api
-      protocol: TCP
