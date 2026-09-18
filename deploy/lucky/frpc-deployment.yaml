@@ -17,7 +17,7 @@ spec:
   template:
     metadata:
       annotations:
-        config.kubernetes.io/revision: "5"
+        config.kubernetes.io/revision: "6"
       labels:
         app.kubernetes.io/name: lucky-frpc
         app.kubernetes.io/instance: lucky-frpc

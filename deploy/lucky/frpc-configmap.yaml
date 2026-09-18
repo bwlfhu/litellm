@@ -62,3 +62,10 @@ data:
     localIP = "litellm-public-api.litellm.svc.cluster.local"
     localPort = 8080
     remotePort = 19085
+
+    [[proxies]]
+    name = "pdep"
+    type = "tcp"
+    localIP = "pdep-nginx.pdep.svc.cluster.local"
+    localPort = 80
+    remotePort = 19079

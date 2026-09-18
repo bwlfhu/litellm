@@ -11,8 +11,10 @@ set -eu
     --domains pms.allcam.com.cn \
     --domains sso.allcam.com.cn \
     --domains autocode.allcam.com.cn \
+    --domains pdep.allcam.com.cn \
     --http \
     --http.webroot /var/lib/lucky-edge/acme \
+    --force-cert-domains \
     --renew-days 30
 
 certificate=/var/lib/lucky-edge/lego/certificates/pma.allcam.com.cn.crt
