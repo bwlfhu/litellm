@@ -54,7 +54,7 @@ spec:
             - sh
             - -c
           args:
-            - cp -a /app/.next/static/. /patched-static/ && find /patched-static -type f -name '*.js' -exec sed -i 's|https://pm-agent.allcam.org|https://pm-agent.allcam.com.cn|g' {} \;
+            - cp -R /app/.next/static/. /patched-static/ && find /patched-static -type f -name '*.js' -exec sed -i 's|https://pm-agent.allcam.org|https://pma.allcam.com.cn|g' {} \;
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -194,17 +194,17 @@ spec:
                 name: pm-agent-config
           env:
             - name: PM_AGENT_PUBLIC_BASE_URL
-              value: https://pm-agent.allcam.com.cn
+              value: https://pma.allcam.com.cn
             - name: AUTH_TRUSTED_ORIGINS
-              value: https://pm-agent.allcam.com.cn
+              value: https://pma.allcam.com.cn
             - name: CORS_ALLOW_ORIGINS
-              value: https://pm-agent.allcam.com.cn
+              value: https://pma.allcam.com.cn
             - name: OIDC_ISSUER
               value: https://sso.allcam.com.cn
             - name: OIDC_REDIRECT_URI
-              value: https://pm-agent.allcam.com.cn/api/v1/auth/sso/feishu/callback
+              value: https://pma.allcam.com.cn/api/v1/auth/sso/feishu/callback
             - name: OIDC_CA_FILE
-              value: ""
+              value: /usr/lib/ssl/cert.pem
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

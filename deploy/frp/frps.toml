@@ -19,9 +19,9 @@ transport.tls.keyFile = "/etc/frp/server.key"
 transport.tls.trustedCaFile = "/etc/frp/ca.crt"
 transport.maxPoolCount = 1
 
-maxPortsPerClient = 5
+maxPortsPerClient = 6
 allowPorts = [
-  { start = 19080, end = 19084 }
+  { start = 19080, end = 19085 }
 ]
 
 webServer.port = 0

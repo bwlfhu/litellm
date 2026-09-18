@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+. /etc/lucky-edge/lego.env
+
+/usr/local/bin/lego run \
+    --accept-tos \
+    --email "$LEGO_EMAIL" \
+    --path /var/lib/lucky-edge/lego \
+    --domains pma.allcam.com.cn \
+    --domains pms.allcam.com.cn \
+    --domains sso.allcam.com.cn \
+    --domains autocode.allcam.com.cn \
+    --http \
+    --http.webroot /var/lib/lucky-edge/acme \
+    --renew-days 30
+
+certificate=/var/lib/lucky-edge/lego/certificates/pma.allcam.com.cn.crt
+private_key=/var/lib/lucky-edge/lego/certificates/pma.allcam.com.cn.key
+certificate_public_key=$(/usr/bin/openssl x509 -in "$certificate" -pubkey -noout | /usr/bin/openssl pkey -pubin -outform DER | /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f 1)
+private_public_key=$(/usr/bin/openssl pkey -in "$private_key" -pubout -outform DER | /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f 1)
+test "$certificate_public_key" = "$private_public_key"
+
+install -o root -g nginx -m 0640 "$certificate" /etc/lucky-edge/tls/fullchain.pem.new
+install -o root -g nginx -m 0640 "$private_key" /etc/lucky-edge/tls/privkey.pem.new
+mv /etc/lucky-edge/tls/fullchain.pem.new /etc/lucky-edge/tls/fullchain.pem
+mv /etc/lucky-edge/tls/privkey.pem.new /etc/lucky-edge/tls/privkey.pem
+/usr/sbin/nginx -t
+/usr/bin/systemctl reload nginx

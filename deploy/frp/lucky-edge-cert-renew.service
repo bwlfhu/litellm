@@ -1,0 +1,13 @@
+[Unit]
+Description=Renew the public application gateway certificate
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lucky-edge-cert-renew
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWriteDirectories=/etc/lucky-edge/tls /var/lib/lucky-edge/lego /var/lib/lucky-edge/acme

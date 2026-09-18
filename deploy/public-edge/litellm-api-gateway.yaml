@@ -1,0 +1,176 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-public-api-nginx
+  namespace: litellm
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /dev/stderr warn;
+    pid /tmp/nginx.pid;
+
+    events {
+        worker_connections 256;
+    }
+
+    http {
+        access_log /dev/stdout;
+        server_tokens off;
+        client_body_temp_path /tmp/client_temp;
+        proxy_temp_path /tmp/proxy_temp;
+        fastcgi_temp_path /tmp/fastcgi_temp;
+        uwsgi_temp_path /tmp/uwsgi_temp;
+        scgi_temp_path /tmp/scgi_temp;
+
+        server {
+            listen 8080;
+            server_name _;
+
+            client_max_body_size 20m;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Connection "";
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+
+            location = /healthz {
+                access_log off;
+                return 200;
+            }
+
+            location = /v1/models {
+                limit_except GET {
+                    deny all;
+                }
+                proxy_pass http://litellm:4000;
+            }
+
+            location ~ ^/(?:v1/)?(?:chat/completions|completions|embeddings|responses|responses/compact|messages|moderations|images/(?:generations|edits|variations)|audio/(?:speech|transcriptions|translations)|rerank)$ {
+                limit_except POST {
+                    deny all;
+                }
+                proxy_pass http://litellm:4000;
+            }
+
+            location = /v1/messages/count_tokens {
+                limit_except POST {
+                    deny all;
+                }
+                proxy_pass http://litellm:4000;
+            }
+
+            location = /v2/rerank {
+                limit_except POST {
+                    deny all;
+                }
+                proxy_pass http://litellm:4000;
+            }
+
+            location ~ ^/(?:v1beta/)?models/[^/]+:(?:generateContent|streamGenerateContent)$ {
+                limit_except POST {
+                    deny all;
+                }
+                proxy_pass http://litellm:4000;
+            }
+
+            location / {
+                return 404;
+            }
+        }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-public-api
+  namespace: litellm
+  labels:
+    app.kubernetes.io/name: litellm-public-api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: litellm-public-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-public-api
+  namespace: litellm
+  labels:
+    app.kubernetes.io/name: litellm-public-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: litellm-public-api
+  template:
+    metadata:
+      annotations:
+        config.kubernetes.io/revision: "1"
+      labels:
+        app.kubernetes.io/name: litellm-public-api
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: nginx
+          image: docker.io/nginxinc/nginx-unprivileged@sha256:27985295bdb22a1ef8f712863210bd5877c0f3006494a593e86b3fe0fa55467e
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      securityContext:
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-public-api-nginx
+        - name: tmp
+          emptyDir: {}
