@@ -49,6 +49,7 @@ spec:
                 - -c
                 - |
                   wget -S -O /dev/null --header="Authorization: Bearer sk-frpc-healthcheck-invalid" --header="Connection: close" -T 10 http://litellm-public-api.litellm.svc.cluster.local:8080/v1/models 2>&1 | grep -qE 'HTTP/[0-9.]+ 401 ' || exit 0
+                  wget -S -O /dev/null --header="Connection: close" -T 10 https://autocode.allcam.com.cn/ 2>&1 | grep -qE 'HTTP/[0-9.]+ 404 ' || exit 0
                   wget -S -O /dev/null --header="Authorization: Bearer sk-frpc-healthcheck-invalid" --header="Connection: close" -T 10 https://autocode.allcam.com.cn/v1/models 2>&1 | grep -qE 'HTTP/[0-9.]+ 401 '
             initialDelaySeconds: 30
             periodSeconds: 30
