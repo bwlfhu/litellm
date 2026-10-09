@@ -2355,7 +2355,6 @@ def test_deepseek_anthropic_messages_drops_unsupported_output_effort(effort):
 @pytest.mark.parametrize(
     "block_type",
     [
-        "image",
         "document",
         "search_result",
         "code_execution_tool_result",
@@ -2377,10 +2376,41 @@ def test_deepseek_anthropic_messages_rejects_unsupported_content_blocks(block_ty
     assert getattr(error.value, "_litellm_disable_fallbacks", False) is False
 
 
+def test_deepseek_anthropic_messages_preserves_user_image_content():
+    image_block = {
+        "type": "image",
+        "source": {
+            "type": "url",
+            "url": "https://example.com/image.jpg",
+        },
+    }
+
+    request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-flash",
+        messages=[{"role": "user", "content": [{"type": "text", "text": "Describe this"}, image_block]}],
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"][0]["content"][1] == image_block
+
+
+@pytest.mark.parametrize("role", ["system", "assistant"])
+def test_deepseek_anthropic_messages_rejects_non_user_image_content(role):
+    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-flash",
+            messages=[{"role": role, "content": [{"type": "image"}]}],
+            anthropic_messages_optional_request_params={"max_tokens": 100},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+
 @pytest.mark.parametrize(
     "block_type",
     [
-        "image",
         "document",
         "search_result",
         "code_execution_tool_result",
