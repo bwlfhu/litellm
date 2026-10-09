@@ -30,7 +30,6 @@ from litellm.types.router import GenericLiteLLMParams
 
 _DEEPSEEK_UNSUPPORTED_CONTENT_BLOCK_TYPES: Final = frozenset(
     {
-        "image",
         "document",
         "search_result",
         "code_execution_tool_result",
@@ -622,6 +621,7 @@ def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], 
             if isinstance(block_type, str)
             and (
                 block_type in _DEEPSEEK_UNSUPPORTED_CONTENT_BLOCK_TYPES
+                or (block_type == "image" and (message.get("role") != "user" or depth > 0))
                 or (block_type == "redacted_thinking" and (message.get("role") != "assistant" or depth > 0))
             )
         }

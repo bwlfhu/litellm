@@ -12,6 +12,8 @@ def deepseek_vision_models():
     model_names = (
         "deepseek-v4-flash-vision-exp",
         "deepseek/deepseek-v4-flash-vision-exp",
+        "deepseek-flash",
+        "deepseek/deepseek-flash",
     )
     prior_entries = {name: litellm.model_cost.get(name) for name in model_names}
     litellm.register_model(
@@ -376,7 +378,7 @@ def test_vision_model_drops_search_results_without_extractable_text(deepseek_vis
     assert "search_results" not in body["messages"][0]
 
 
-@pytest.mark.parametrize("model", ["deepseek-chat", "deepseek-v4-flash"])
+@pytest.mark.parametrize("model", ["deepseek-chat"])
 def test_non_vision_model_collapses_image_content_list(model):
     body = DeepSeekChatConfig().transform_request(
         model=model,

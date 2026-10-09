@@ -59,6 +59,11 @@ class TestDeepSeekModelCostEntries:
         entry = data.get("deepseek/deepseek-reasoner", {})
         assert entry.get("supports_system_messages") is True
 
+    def test_deepseek_flash_supports_vision_in_backup(self):
+        data = _load_backup_json()
+        assert data["deepseek-flash"]["supports_vision"] is True
+        assert data["deepseek/deepseek-flash"]["supports_vision"] is True
+
     def test_deepseek_chat_max_input_tokens_matches_bare_in_backup(self):
         data = _load_backup_json()
         bare = data.get("deepseek-chat", {})
@@ -90,6 +95,16 @@ class TestDeepSeekModelCostEntries:
             data = json.load(f)
         entry = data.get("deepseek/deepseek-reasoner", {})
         assert entry.get("supports_response_schema") is True
+
+    def test_main_json_deepseek_flash_supports_vision(self):
+        main_path = os.path.join(
+            os.path.dirname(os.path.dirname(litellm.__file__)),
+            "model_prices_and_context_window.json",
+        )
+        with open(main_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["deepseek-flash"]["supports_vision"] is True
+        assert data["deepseek/deepseek-flash"]["supports_vision"] is True
 
     def test_recent_provider_entries_match_in_both_cost_maps(self):
         main_path = os.path.join(
