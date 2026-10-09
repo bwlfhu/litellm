@@ -27,7 +27,17 @@ spec:
         - name: frpc
           image: ghcr.io/fatedier/frpc@sha256:99ece6a2b62cfc68731e0df289af804ff1c699911cfc47871856434f1d6d53ee
           imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              trap 'kill -TERM "$frpc_pid"; wait "$frpc_pid"' TERM INT
+              "$@" &
+              frpc_pid=$!
+              wait "$frpc_pid"
+            - frpc-supervisor
           args:
+            - /usr/bin/frpc
             - -c
             - /config/frpc.toml
           readinessProbe:
@@ -36,8 +46,7 @@ spec:
                 - /bin/sh
                 - -c
                 - |
-                  wget -S -O /dev/null --header="Authorization: Bearer sk-frpc-healthcheck-invalid" --header="Connection: close" -T 10 http://litellm-public-api.litellm.svc.cluster.local:8080/v1/models 2>&1 | grep -qE 'HTTP/[0-9.]+ 401 ' || exit 1
-                  wget -S -O /dev/null --header="Authorization: Bearer sk-frpc-healthcheck-invalid" --header="Connection: close" -T 10 https://autocode.allcam.com.cn/v1/models 2>&1 | grep -qE 'HTTP/[0-9.]+ 401 '
+                  exec timeout 10 wget -q -O /dev/null -Y off --header="Connection: close" -T 5 https://autocode.allcam.com.cn/health/readiness
             initialDelaySeconds: 15
             periodSeconds: 30
             timeoutSeconds: 15
@@ -48,12 +57,21 @@ spec:
                 - /bin/sh
                 - -c
                 - |
-                  wget -S -O /dev/null --header="Authorization: Bearer sk-frpc-healthcheck-invalid" --header="Connection: close" -T 10 http://litellm-public-api.litellm.svc.cluster.local:8080/v1/models 2>&1 | grep -qE 'HTTP/[0-9.]+ 401 ' || exit 0
-                  wget -S -O /dev/null --header="Connection: close" -T 10 https://autocode.allcam.com.cn/ 2>&1 | grep -qE 'HTTP/[0-9.]+ 404 ' || exit 0
-                  wget -S -O /dev/null --header="Authorization: Bearer sk-frpc-healthcheck-invalid" --header="Connection: close" -T 10 https://autocode.allcam.com.cn/v1/models 2>&1 | grep -qE 'HTTP/[0-9.]+ 401 '
+                  if timeout 10 wget -q -O /dev/null -Y off --header="Connection: close" -T 5 https://autocode.allcam.com.cn/health/liveliness; then
+                    exit 0
+                  fi
+                  if ! timeout 3 wget -q -O /dev/null -Y off --header="Connection: close" -T 2 http://litellm-public-api.litellm.svc.cluster.local:8080/health/liveliness; then
+                    exit 0
+                  fi
+                  edge_response=$(timeout 5 wget -q -S -O /dev/null -Y off --header="Connection: close" -T 3 https://autocode.allcam.com.cn/ 2>&1)
+                  if ! printf '%s\n' "$edge_response" | grep -E '^  HTTP/[0-9.]+ 404 ' > /dev/null; then
+                    exit 0
+                  fi
+                  echo "FRP tunnel unavailable while local LiteLLM and public edge are healthy" >&2
+                  exit 1
             initialDelaySeconds: 30
             periodSeconds: 30
-            timeoutSeconds: 15
+            timeoutSeconds: 20
             failureThreshold: 3
           resources:
             requests:

@@ -43,6 +43,24 @@ data:
                 return 200;
             }
 
+            location = /health/liveliness {
+                limit_except GET {
+                    deny all;
+                }
+                proxy_connect_timeout 2s;
+                proxy_read_timeout 5s;
+                proxy_pass http://litellm:4000;
+            }
+
+            location = /health/readiness {
+                limit_except GET {
+                    deny all;
+                }
+                proxy_connect_timeout 2s;
+                proxy_read_timeout 5s;
+                proxy_pass http://litellm:4000;
+            }
+
             location = /v1/models {
                 limit_except GET {
                     deny all;
@@ -115,7 +133,7 @@ spec:
   template:
     metadata:
       annotations:
-        config.kubernetes.io/revision: "1"
+        config.kubernetes.io/revision: "health-probes-20261009"
       labels:
         app.kubernetes.io/name: litellm-public-api
     spec:
