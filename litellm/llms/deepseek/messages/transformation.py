@@ -598,10 +598,11 @@ def _deepseek_history_validation_error(message: str) -> AnthropicError:
 def _content_block_tree(
     block: object, depth: int = 0, parent_type: str | None = None
 ) -> tuple[tuple[object, int, str | None], ...]:
+    typed_block: Final = _as_deepseek_mapping(block)
     if not isinstance(block, Mapping) or depth >= 1:
         return ((block, depth, parent_type),)
     nested_content: Final = block.get("content")
-    block_type: Final = block.get("type")
+    block_type: Final = typed_block.get("type") if typed_block is not None else None
     return (
         (block, depth, parent_type),
         *(
