@@ -595,18 +595,33 @@ def _deepseek_history_validation_error(message: str) -> AnthropicError:
     return _DeepSeekHistoryValidationError(message=message, status_code=400)
 
 
-def _content_block_tree(block: object, depth: int = 0) -> tuple[tuple[object, int], ...]:
+def _content_block_tree(
+    block: object, depth: int = 0, parent_type: str | None = None
+) -> tuple[tuple[object, int, str | None], ...]:
     if not isinstance(block, Mapping) or depth >= 1:
-        return ((block, depth),)
+        return ((block, depth, parent_type),)
     nested_content: Final = block.get("content")
+    block_type: Final = block.get("type")
     return (
-        (block, depth),
-        *(_content_blocks(nested_content, depth=depth + 1) if isinstance(nested_content, list) else ()),
+        (block, depth, parent_type),
+        *(
+            _content_blocks(
+                nested_content, depth=depth + 1, parent_type=block_type if isinstance(block_type, str) else None
+            )
+            if isinstance(nested_content, list)
+            else ()
+        ),
     )
 
 
-def _content_blocks(content: Sequence[object], depth: int = 0) -> tuple[tuple[object, int], ...]:
-    return tuple(nested_block for block in content for nested_block in _content_block_tree(block, depth=depth))
+def _content_blocks(
+    content: Sequence[object], depth: int = 0, parent_type: str | None = None
+) -> tuple[tuple[object, int, str | None], ...]:
+    return tuple(
+        nested_block
+        for block in content
+        for nested_block in _content_block_tree(block, depth=depth, parent_type=parent_type)
+    )
 
 
 def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], model: str | None = None) -> None:
@@ -615,13 +630,22 @@ def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], 
             block_type
             for message in messages
             for field in ("content", "thinking_blocks")
-            for block, depth in _content_blocks(message.get(field) if isinstance(message.get(field), list) else [])
+            for block, depth, parent_type in _content_blocks(
+                message.get(field) if isinstance(message.get(field), list) else []
+            )
             if isinstance(block, Mapping)
             for block_type in (block.get("type"),)
             if isinstance(block_type, str)
             and (
                 block_type in _DEEPSEEK_UNSUPPORTED_CONTENT_BLOCK_TYPES
-                or (block_type == "image" and (message.get("role") != "user" or depth > 0))
+                or (
+                    block_type == "image"
+                    and (
+                        message.get("role") != "user"
+                        or field != "content"
+                        or (depth > 0 and parent_type != "tool_result")
+                    )
+                )
                 or (block_type == "redacted_thinking" and (message.get("role") != "assistant" or depth > 0))
             )
         }
@@ -657,7 +681,7 @@ def _validate_deepseek_tool_use_blocks(messages: Sequence[Mapping[str, object]])
         invalid_field
         for message in messages
         for field in ("content", "thinking_blocks")
-        for block, _ in _content_blocks(_message_blocks(message, field))
+        for block, _, _ in _content_blocks(_message_blocks(message, field))
         if (invalid_field := _invalid_deepseek_tool_use_field(block)) is not None
     )
     if invalid_fields:

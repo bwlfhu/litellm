@@ -2427,7 +2427,103 @@ def test_deepseek_chat_bridge_rejects_unsupported_content_blocks(block_type):
 
 
 @pytest.mark.parametrize("surface", ["messages", "chat_bridge"])
-def test_deepseek_rejects_unsupported_nested_tool_result_content(surface):
+@pytest.mark.parametrize("thinking_type", ["enabled", "disabled"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"type": "base64", "media_type": "image/png", "data": "aW1hZ2U="},
+        {"type": "url", "url": "https://example.com/image.png"},
+        {"type": "file", "file_id": "file_image"},
+    ],
+)
+def test_deepseek_preserves_nested_tool_result_image_content(
+    surface: str, thinking_type: str, source: dict[str, str]
+) -> None:
+    image_block: Final = {"type": "image", "source": source}
+    messages: Final = [
+        {"role": "user", "content": "Inspect the screenshot"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "toolu_123", "name": "capture", "input": {}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_123",
+                    "content": [{"type": "text", "text": "Screenshot captured"}, image_block],
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+    original_messages: Final = deepcopy(messages)
+
+    if surface == "messages":
+        request: Final = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-flash",
+            messages=messages,
+            anthropic_messages_optional_request_params={
+                "max_tokens": 100,
+                "thinking": {"type": thinking_type},
+                "tools": [{"name": "capture", "input_schema": {"type": "object", "properties": {}}}],
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+        assert request["messages"][2]["content"] == original_messages[2]["content"]
+    else:
+        prepared_messages: Final = prepare_deepseek_chat_history(
+            messages, require_reasoning=thinking_type == "enabled", missing_reasoning="placeholder"
+        )
+        assert prepared_messages[2]["content"] == original_messages[2]["content"]
+
+    assert messages == original_messages
+
+
+@pytest.mark.parametrize("surface", ["messages", "chat_bridge"])
+@pytest.mark.parametrize(
+    ("role", "parent_type", "field"),
+    [
+        ("user", "text", "content"),
+        ("assistant", "tool_result", "content"),
+        ("system", "tool_result", "content"),
+        ("user", "tool_result", "thinking_blocks"),
+        ("user", None, "thinking_blocks"),
+    ],
+)
+def test_deepseek_rejects_images_outside_user_tool_results(
+    surface: str, role: str, parent_type: str | None, field: str
+) -> None:
+    messages: Final = [
+        {
+            "role": role,
+            field: [{"type": parent_type, "tool_use_id": "toolu_123", "content": [{"type": "image"}]}]
+            if parent_type is not None
+            else [{"type": "image"}],
+        }
+    ]
+
+    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
+        if surface == "messages":
+            DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+                model="deepseek-flash",
+                messages=messages,
+                anthropic_messages_optional_request_params={"max_tokens": 100},
+                litellm_params=GenericLiteLLMParams(),
+                headers={},
+            )
+        else:
+            prepare_deepseek_chat_history(messages)
+
+
+@pytest.mark.parametrize("surface", ["messages", "chat_bridge"])
+@pytest.mark.parametrize(
+    "block_type",
+    ["document", "search_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result", "container_upload"],
+)
+def test_deepseek_rejects_unsupported_nested_tool_result_content(surface: str, block_type: str) -> None:
     messages = [
         {
             "role": "user",
@@ -2435,13 +2531,13 @@ def test_deepseek_rejects_unsupported_nested_tool_result_content(surface):
                 {
                     "type": "tool_result",
                     "tool_use_id": "toolu_123",
-                    "content": [{"type": "image"}],
+                    "content": [{"type": block_type}],
                 }
             ],
         }
     ]
 
-    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
+    with pytest.raises(litellm.utils.UnsupportedParamsError, match=block_type):
         if surface == "messages":
             DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
                 model="deepseek-v4-pro",
