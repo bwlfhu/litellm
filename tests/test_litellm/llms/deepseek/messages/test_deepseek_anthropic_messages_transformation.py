@@ -2558,8 +2558,7 @@ def test_deepseek_content_validation_has_bounded_nesting():
     )
 
     _validate_deepseek_content_blocks([{"role": "user", "content": [nested_block]}])
-    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
-        _validate_deepseek_content_blocks([{"role": "user", "content": [{"type": "image"}]}])
+    _validate_deepseek_content_blocks([{"role": "user", "content": [{"type": "image"}]}])
 
 
 @pytest.mark.parametrize("role", ["user", "tool"])

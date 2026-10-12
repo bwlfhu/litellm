@@ -406,6 +406,7 @@ class TestDeepSeekThinkingParams:
         assert "tool_choice" not in result
         assert result["parallel_tool_calls"] is True
 
+
 @pytest.mark.parametrize(
     "tool_choice",
     [
