@@ -2505,8 +2505,8 @@ def test_deepseek_rejects_images_outside_user_tool_results(
         }
     ]
 
-    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
-        if surface == "messages":
+    if surface == "messages":
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
             DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
                 model="deepseek-flash",
                 messages=messages,
@@ -2514,7 +2514,8 @@ def test_deepseek_rejects_images_outside_user_tool_results(
                 litellm_params=GenericLiteLLMParams(),
                 headers={},
             )
-        else:
+    else:
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
             prepare_deepseek_chat_history(messages)
 
 
@@ -2537,8 +2538,8 @@ def test_deepseek_rejects_unsupported_nested_tool_result_content(surface: str, b
         }
     ]
 
-    with pytest.raises(litellm.utils.UnsupportedParamsError, match=block_type):
-        if surface == "messages":
+    if surface == "messages":
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match=block_type):
             DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
                 model="deepseek-v4-pro",
                 messages=messages,
@@ -2546,7 +2547,8 @@ def test_deepseek_rejects_unsupported_nested_tool_result_content(surface: str, b
                 litellm_params=GenericLiteLLMParams(),
                 headers={},
             )
-        else:
+    else:
+        with pytest.raises(litellm.utils.UnsupportedParamsError, match=block_type):
             prepare_deepseek_chat_history(messages)
 
 
@@ -2559,6 +2561,8 @@ def test_deepseek_content_validation_has_bounded_nesting():
 
     _validate_deepseek_content_blocks([{"role": "user", "content": [nested_block]}])
     _validate_deepseek_content_blocks([{"role": "user", "content": [{"type": "image"}]}])
+    with pytest.raises(litellm.utils.UnsupportedParamsError, match="image"):
+        _validate_deepseek_content_blocks([{"role": "assistant", "content": [{"type": "image"}]}])
 
 
 @pytest.mark.parametrize("role", ["user", "tool"])
