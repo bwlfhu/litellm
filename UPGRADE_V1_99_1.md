@@ -1,5 +1,7 @@
 # Stable Fork Migration Ledger
 
+Current status: the 1.99.1 production baseline was deployed and verified on 2026-10-12. The maintained source is now `mainline`, with the tested workspace baseline recorded in [CURRENT_BASELINE.md](CURRENT_BASELINE.md). The checkpoint below records historical migration evidence and known limitations. Its earlier statements that deployment and mainline replacement were pending are historical
+
 Checkpoint: 2026-09-05. Source migration, isolated validation and production acceptance are recorded separately. A migrated package is not automatically approved for deployment
 
 ## Baselines And Order
