@@ -5,18 +5,22 @@ Verified on 2026-10-14. Use `mainline` as the single long-lived maintenance bran
 | Item | Value |
 | --- | --- |
 | Upstream release | `v1.99.1` |
-| Deployed build commit | `01b32e5bad72b78b19a3fee4c2ca4151dccfab76` |
-| Tested maintenance baseline | `c4415fe867c0ca2b3003552d6ed6cef2ad656799` |
-| Image | `registry.allcam.org/litellm/litellm:v1.99.1-custom.01b32e5bad-deepseek-vision-recovery@sha256:1b5b1cadce89d0e71dcee0b453b3628061f9c363ad595002d247a9a46bea081f` |
-| Release tag | `release-v1.99.1-deepseek-vision-20261012` |
+| Deployed build commit | `715f26b9008b6532db5fa3a1920c23bc8f982ff2` |
+| Tested patch source | `715f26b9008b6532db5fa3a1920c23bc8f982ff2` |
+| Image | `registry.allcam.org/litellm/litellm:v1.99.1-custom.715f26b900-reasoning-policy@sha256:7d98f5658d91a6a5be90e810321da98e8f6d76453762672d189c6e5c9bc48d9c` |
+| Image tag | `v1.99.1-custom.715f26b900-reasoning-policy` |
 | Installed LiteLLM / proxy extras | `1.99.1` / `0.4.89` |
 | Development Python | `3.13.14` |
 
-The maintenance baseline differs from the deployed build only in a test file. Documentation commits after the deployment do not change the deployed release identity
+Four production replicas use this image. Their installed package versions and three changed runtime module hashes match the frozen patch source. Chat and Messages tool round trips passed on every replica, covering 16 real HTTP requests. Documentation and history reconciliation commits after the build do not change the deployed source identity
 
-Provision the main worktree with `uv sync --frozen --python 3.13.14 --extra proxy --group proxy-dev --group e2e-dev`, then run `uv run --no-sync python scripts/prisma_generate_if_needed.py`. Before a build, verify the installed package versions, runtime source hashes, build commit and image digest. `docker/Dockerfile.deepseek-vision` pins the verified production image and checks the package versions
+Provision the main worktree with `uv sync --frozen --python 3.13.14 --extra proxy --group proxy-dev --group e2e-dev`, then run `uv run --no-sync python scripts/prisma_generate_if_needed.py`. Before a build, verify the installed package versions, runtime source hashes, build commit and image digest. `docker/Dockerfile.deepseek-vision` pins the verified predecessor image and checks the package versions
 
-The DeepSeek user-image and user-tool-result-image fixes are present. Routing statistics, model status, the original tool-choice fix, dependency lock, database schema and UI remain from the verified 1.99.1 baseline. The 81 model configurations are unchanged. Official `deepseek-flash` remains order 1 and its backup remains order 2
+The DeepSeek image, tool-history and SSE fixes remain present. The affected Chat deployment now uses the trusted `deepseek_anthropic_missing_reasoning: omit` policy, which forwards absent historical reasoning without fabricating a single space. Existing nonempty reasoning and tool records are preserved. Other deployment policies retain their previous behavior. Routing priorities, credentials, accounting, dependencies, database schema and UI were not changed by this patch
+
+Targeted regressions passed 344 tests. Standard Ruff and strict/type-discipline/test-quality comparisons against the prior deployed source passed. The aggregate repository gate still reports pre-existing branch budget overruns; it is not recorded as green. Temporary production traffic-capture mounts were removed during rollout
+
+The original final incident request returned a normal tool call in the candidate replay, with all 31 manufactured placeholders absent. Another legacy request was rejected by the upstream for missing thinking, and an earlier long request did not complete within the verification window. These results do not establish recovery of every existing conversation. Direct upstream tests still show `thinking.disabled` being ignored, so that separate compatibility defect remains open
 
 Historical branches, stash entries and the independent WIP commit are preserved by archive refs and a verified private bundle. They are not part of the production baseline. The old DeepSeek branch also contains infrastructure files for Casdoor, FRP, Lucky and public-edge. Those files require a separate infrastructure review and were not deployed by this consolidation
 
