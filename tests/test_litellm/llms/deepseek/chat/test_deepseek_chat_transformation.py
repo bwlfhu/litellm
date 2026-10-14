@@ -1,10 +1,12 @@
 from copy import deepcopy
+from typing import Final
 
 import pytest
 
 import litellm
 from litellm.llms.deepseek.chat.transformation import DeepSeekChatConfig
 from litellm.router_protocol import _build_deployment_protocol_context
+from litellm.types.llms.openai import AllMessageValues
 
 
 @pytest.fixture
@@ -764,6 +766,73 @@ def test_thinking_mode_uses_deployment_placeholder_only_for_tool_history():
     )
 
     assert body["messages"][1]["reasoning_content"] == " "
+
+
+@pytest.mark.parametrize("missing_reasoning", [None, "", "   "])
+def test_deployment_can_omit_missing_reasoning_without_changing_real_history(missing_reasoning: str | None) -> None:
+    context: Final = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "omit"})
+    assert context is not None
+    assert context.missing_reasoning == "omit"
+    messages: Final[list[AllMessageValues]] = [
+        {"role": "user", "content": "Use both tools"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "Keep the original reasoning exactly.",
+            "tool_calls": [_function_tool_call("first")],
+        },
+        {"role": "tool", "tool_call_id": "call_first", "content": "First result"},
+        {
+            "role": "assistant",
+            "content": "<analysis>Literal XML content</analysis>",
+            "reasoning_content": missing_reasoning,
+            "tool_calls": [_function_tool_call("second")],
+        },
+        {"role": "tool", "tool_call_id": "call_second", "content": "Second result"},
+    ]
+    original: Final = deepcopy(messages)
+    body: Final = DeepSeekChatConfig().transform_request(
+        model="deepseek-reasoner",
+        messages=messages,
+        optional_params={"thinking": {"type": "enabled"}},
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert body["messages"][1]["reasoning_content"] == "Keep the original reasoning exactly."
+    assert "reasoning_content" not in body["messages"][3]
+    assert body["messages"][3]["content"] == "<analysis>Literal XML content</analysis>"
+    assert body["messages"][3]["tool_calls"] == messages[3]["tool_calls"]
+    assert messages == original
+
+
+@pytest.mark.asyncio
+async def test_async_deployment_omit_policy_keeps_missing_reasoning_absent() -> None:
+    context: Final = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "omit"})
+    body: Final = await DeepSeekChatConfig().async_transform_request(
+        model="deepseek-reasoner",
+        messages=[{"role": "assistant", "content": None, "tool_calls": [_function_tool_call("shell")]}],
+        optional_params={"thinking": {"type": "enabled"}},
+        litellm_params={"_litellm_deployment_protocol_context": context},
+        headers={},
+    )
+
+    assert "reasoning_content" not in body["messages"][0]
+    assert body["messages"][0]["tool_calls"] == [_function_tool_call("shell")]
+
+
+def test_deployment_error_policy_rejects_incomplete_reasoning_before_dispatch() -> None:
+    context: Final = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "error"})
+    assert context is not None
+    assert context.missing_reasoning == "error"
+    with pytest.raises(litellm.BadRequestError, match="requires non-empty reasoning_content"):
+        DeepSeekChatConfig().transform_request(
+            model="deepseek-reasoner",
+            messages=[{"role": "assistant", "content": None, "tool_calls": [_function_tool_call("shell")]}],
+            optional_params={"thinking": {"type": "enabled"}},
+            litellm_params={"_litellm_deployment_protocol_context": context},
+            headers={},
+        )
 
 
 @pytest.mark.parametrize("content", [None, ""])

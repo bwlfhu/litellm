@@ -2152,6 +2152,72 @@ def test_deepseek_chat_bridge_placeholder_warning_is_aggregated(caplog):
     assert sum(message["thinking_blocks"][0]["thinking"] == " " for message in prepared) == 2
 
 
+def test_deepseek_native_omit_policy_preserves_tools_without_inventing_thinking() -> None:
+    messages: Final = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "<summary>Literal XML</summary>"},
+                {"type": "tool_use", "id": "toolu_1", "name": "first_tool", "input": {}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "Done"}]},
+    ]
+    original: Final = deepcopy(messages)
+    request: Final = DeepSeekAnthropicMessagesConfig(missing_reasoning="omit").transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "enabled"}},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"] == original
+    assert messages == original
+
+
+def test_deepseek_bridge_omit_policy_preserves_real_reasoning_and_omits_missing_reasoning() -> None:
+    prepared: Final = prepare_deepseek_chat_history(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "The original thought.",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "first", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "Done"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "second", "arguments": "{}"}}],
+            },
+        ],
+        require_reasoning=True,
+        missing_reasoning="omit",
+    )
+
+    assert prepared[0]["thinking_blocks"] == [{"type": "thinking", "thinking": "The original thought."}]
+    assert "thinking_blocks" not in prepared[2]
+    assert prepared[2]["tool_calls"][0]["id"] == "call_2"
+
+
+def test_deepseek_native_error_policy_rejects_missing_reasoning() -> None:
+    with pytest.raises(AnthropicError, match="requires non-empty reasoning"):
+        DeepSeekAnthropicMessagesConfig(missing_reasoning="error").transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "first", "input": {}}],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "Done"}]},
+            ],
+            anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "enabled"}},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+
 def test_deepseek_anthropic_messages_prefers_real_sidecar_reasoning_to_placeholder():
     request = DeepSeekAnthropicMessagesConfig(missing_reasoning="placeholder").transform_anthropic_messages_request(
         model="deepseek-v4-pro",

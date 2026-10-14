@@ -1,12 +1,14 @@
-FROM registry.allcam.org/litellm/litellm:v1.99.1-custom.01b32e5bad-deepseek-vision-recovery@sha256:1b5b1cadce89d0e71dcee0b453b3628061f9c363ad595002d247a9a46bea081f
+FROM registry.allcam.org/litellm/litellm:v1.99.1-custom.634a1cca00-deepseek-history-sse@sha256:ee4f23f4716a2c83ae5182605e45fbcb24a334143d0bea608b1c0f60aeec2a80
 
 RUN /app/.venv/bin/python -c 'from importlib.metadata import version; assert version("litellm") == "1.99.1"; assert version("litellm-proxy-extras") == "0.4.89"'
 
+COPY litellm/router_protocol.py /app/.venv/lib/python3.13/site-packages/litellm/router_protocol.py
+COPY litellm/llms/deepseek/chat/transformation.py /app/.venv/lib/python3.13/site-packages/litellm/llms/deepseek/chat/transformation.py
 COPY litellm/llms/deepseek/messages/transformation.py /app/.venv/lib/python3.13/site-packages/litellm/llms/deepseek/messages/transformation.py
 COPY litellm/model_prices_and_context_window_backup.json /app/.venv/lib/python3.13/site-packages/litellm/model_prices_and_context_window_backup.json
 COPY model_prices_and_context_window.json /app/model_prices_and_context_window.json
 
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
-LABEL org.opencontainers.image.base.revision="01b32e5bad72b78b19a3fee4c2ca4151dccfab76"
-LABEL org.opencontainers.image.base.digest="sha256:1b5b1cadce89d0e71dcee0b453b3628061f9c363ad595002d247a9a46bea081f"
+LABEL org.opencontainers.image.base.revision="634a1cca0050acd3a4aa4e2a8eb58a64abe3e666"
+LABEL org.opencontainers.image.base.digest="sha256:ee4f23f4716a2c83ae5182605e45fbcb24a334143d0bea608b1c0f60aeec2a80"

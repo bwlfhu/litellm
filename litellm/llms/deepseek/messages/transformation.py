@@ -25,6 +25,7 @@ from litellm.llms.anthropic.experimental_pass_through.messages.transformation im
     AnthropicMessagesConfig,
 )
 from litellm.llms.deepseek.common_utils import warn_missing_reasoning_placeholders
+from litellm.router_protocol import DeepSeekMissingReasoning
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
 from litellm.types.router import GenericLiteLLMParams
@@ -817,7 +818,7 @@ def _sidecar_reasoning_blocks(message: Mapping[str, object]) -> tuple[Sequence[o
 def _deepseek_history_message(
     message: Mapping[str, object],
     require_reasoning: bool,
-    missing_reasoning: Literal["placeholder"] | None,
+    missing_reasoning: DeepSeekMissingReasoning | None,
 ) -> dict:
     transformed_message: Final = deepcopy(
         dict(message)  # mutable-ok: history normalization requires a private working copy
@@ -850,7 +851,13 @@ def _deepseek_history_message(
             and not scalar_has_reasoning
             and missing_reasoning == "placeholder"
         )
-        if scalar_has_tool_history and require_reasoning and not scalar_has_reasoning and not scalar_uses_placeholder:
+        if (
+            scalar_has_tool_history
+            and require_reasoning
+            and not scalar_has_reasoning
+            and not scalar_uses_placeholder
+            and missing_reasoning != "omit"
+        ):
             raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
         replayable_reasoning: Final = (
             [{"type": "thinking", "thinking": " "}] if scalar_uses_placeholder else reasoning_blocks
@@ -898,7 +905,13 @@ def _deepseek_history_message(
     use_placeholder: Final = (
         has_tool_history and require_reasoning and not has_reasoning and missing_reasoning == "placeholder"
     )
-    if has_tool_history and require_reasoning and not has_reasoning and not use_placeholder:
+    if (
+        has_tool_history
+        and require_reasoning
+        and not has_reasoning
+        and not use_placeholder
+        and missing_reasoning != "omit"
+    ):
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
     final_content: Final = (
         [{"type": "thinking", "thinking": " "}, *selected_content] if use_placeholder else selected_content
@@ -914,7 +927,7 @@ def _deepseek_history_message(
 def _deepseek_history(
     messages: Sequence[Mapping[str, object]],
     require_reasoning: bool,
-    missing_reasoning: Literal["placeholder"] | None,
+    missing_reasoning: DeepSeekMissingReasoning | None,
 ) -> list[dict]:
     transformed: Final = [
         _deepseek_history_message(
@@ -952,7 +965,7 @@ def deepseek_messages_have_tool_history(messages: Iterable[Mapping[str, object]]
 def _prepare_deepseek_chat_message(
     message: dict,
     require_reasoning: bool,
-    missing_reasoning: Literal["placeholder"] | None,
+    missing_reasoning: DeepSeekMissingReasoning | None,
 ) -> dict:
     transformed_message = deepcopy(message)
     if transformed_message.get("role") != "assistant":
@@ -1011,7 +1024,13 @@ def _prepare_deepseek_chat_message(
     use_placeholder: Final = (
         has_tool_history and require_reasoning and not has_reasoning_for_request and missing_reasoning == "placeholder"
     )
-    if has_tool_history and require_reasoning and not has_reasoning_for_request and not use_placeholder:
+    if (
+        has_tool_history
+        and require_reasoning
+        and not has_reasoning_for_request
+        and not use_placeholder
+        and missing_reasoning != "omit"
+    ):
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
     final_thinking_blocks: Final = (
         [  # mutable-ok: provider thinking history requires a concrete JSON array
@@ -1115,7 +1134,7 @@ def _upgrade_legacy_function_result(message: dict, tool_call_id: str | None) -> 
 def prepare_deepseek_chat_history(
     messages: list[dict],
     require_reasoning: bool = True,
-    missing_reasoning: Literal["placeholder"] | None = None,
+    missing_reasoning: DeepSeekMissingReasoning | None = None,
 ) -> list[dict]:
     _validate_deepseek_content_blocks(messages)
     prepared_messages: Final = [
@@ -1282,11 +1301,11 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         self,
         messages_path: Literal["anthropic/v1/messages", "v1/messages"] | None = None,
         tool_thinking: Literal["disabled"] | None = None,
-        missing_reasoning: Literal["placeholder"] | None = None,
+        missing_reasoning: DeepSeekMissingReasoning | None = None,
     ) -> None:
         self._messages_path = messages_path
         self._tool_thinking = tool_thinking
-        self._missing_reasoning: Literal["placeholder"] | None = missing_reasoning
+        self._missing_reasoning: DeepSeekMissingReasoning | None = missing_reasoning
 
     @property
     def custom_llm_provider(self) -> str | None:

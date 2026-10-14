@@ -12,7 +12,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
     extract_search_results_text,
 )
 from litellm.llms.deepseek.common_utils import warn_missing_reasoning_placeholders
-from litellm.router_protocol import get_deployment_protocol_context
+from litellm.router_protocol import DeepSeekMissingReasoning, get_deployment_protocol_context
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues
 from litellm.utils import is_thinking_always_on, supports_reasoning, supports_vision
@@ -200,7 +200,7 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         self,
         message: AllMessageValues,
         model: str,
-        missing_reasoning: Literal["placeholder"] | None,
+        missing_reasoning: DeepSeekMissingReasoning | None,
         require_reasoning: bool,
     ) -> AllMessageValues:
         source_message: Final = _sanitize_deepseek_chat_message(message)
@@ -254,7 +254,7 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
                 model=model,
                 llm_provider="deepseek",
             )
-        if reasoning is None and require_reasoning and missing_reasoning != "placeholder":
+        if reasoning is None and require_reasoning and missing_reasoning not in ("placeholder", "omit"):
             raise _DeepSeekChatHistoryValidationError(
                 message="DeepSeek chat tool history requires non-empty reasoning_content",
                 model=model,
@@ -262,7 +262,7 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
             )
         final_message: Final = (
             {**patched, "reasoning_content": " "}  # mutable-ok: provider message needs a placeholder field
-            if reasoning is None and require_reasoning
+            if reasoning is None and require_reasoning and missing_reasoning == "placeholder"
             else patched
         )
         return _as_all_message_values(final_message)

@@ -1,5 +1,23 @@
 # Stable Fork Migration Ledger
 
+## DeepSeek Missing-Reasoning Policies
+
+Set `model_info.deepseek_anthropic_missing_reasoning` on a deployment to select how incomplete tool history is handled. `omit` forwards missing reasoning without manufacturing it, `error` rejects incomplete thinking-mode tool history before dispatch, and `placeholder` retains the legacy single-space compatibility behavior. Unconfigured deployments keep the existing behavior
+
+```yaml
+model_list:
+  - model_name: deepseek-flash
+    litellm_params:
+      model: deepseek/deepseek-v4.1-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      deepseek_anthropic_missing_reasoning: omit
+```
+
+The policy applies to Chat Completions, native Messages and the Chat-to-Messages bridge through trusted deployment context. Client request fields cannot select that context. Original nonempty reasoning, visible content and tool records are preserved
+
+`omit` does not recover lost reasoning or disable thinking. A provider requiring complete reasoning history can still reject the request; preserve the original reasoning or explicitly rebuild the conversation in that case. XML in visible content is forwarded unchanged
+
 Current status: the 1.99.1 production baseline was deployed and verified on 2026-10-12. The maintained source is now `mainline`, with the tested workspace baseline recorded in [CURRENT_BASELINE.md](CURRENT_BASELINE.md). The checkpoint below records historical migration evidence and known limitations. Its earlier statements that deployment and mainline replacement were pending are historical
 
 Checkpoint: 2026-09-05. Source migration, isolated validation and production acceptance are recorded separately. A migrated package is not automatically approved for deployment
