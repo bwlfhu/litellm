@@ -23,6 +23,7 @@ from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
 from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
     _sanitize_deepseek_messages_stream,
+    _sanitize_deepseek_sse_event,
     _validate_deepseek_content_blocks,
     prepare_deepseek_chat_history,
 )
@@ -516,7 +517,11 @@ async def test_direct_deepseek_provider_receives_trusted_deployment_options_with
                     {
                         "role": "assistant",
                         "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-                    }
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}],
+                    },
                 ],
             )
     finally:
@@ -1081,7 +1086,8 @@ def test_deepseek_anthropic_messages_explicit_disabled_strips_all_reasoning_with
             "reasoning_items": [{"type": "reasoning", "id": "reasoning_123"}],
             "thinking": "foreign thinking",
             "provider_specific_fields": {"reasoning_content": "provider reasoning", "source": "upstream"},
-        }
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
     ]
     original_messages = deepcopy(messages)
 
@@ -1101,7 +1107,8 @@ def test_deepseek_anthropic_messages_explicit_disabled_strips_all_reasoning_with
                 {"type": "text", "text": "I will use the tool."},
                 {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
             ],
-        }
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
     ]
     assert messages == original_messages
 
@@ -1368,6 +1375,154 @@ def test_deepseek_anthropic_messages_normalizes_openai_tool_history_without_muta
     assert messages == original_messages
 
 
+@pytest.mark.parametrize("surface", ["anthropic", "openai"])
+def test_deepseek_anthropic_messages_aggregates_parallel_tool_results(surface):
+    call_ids: Final = ("fc_first", "fc_second")
+    calls: Final = [{"type": "tool_use", "id": call_id, "name": "inspect", "input": {}} for call_id in call_ids]
+    result_contents: Final = (
+        [{"type": "text", "text": "first result"}],
+        [{"type": "image", "source": {"type": "url", "url": "https://example.com/image.png"}}],
+    )
+    results: Final = [
+        {"type": "tool_result", "tool_use_id": call_id, "content": content}
+        for call_id, content in zip(call_ids, result_contents)
+    ]
+    messages: Final = (
+        [
+            {"role": "assistant", "content": calls},
+            *[{"role": "user", "content": [result]} for result in results],
+        ]
+        if surface == "anthropic"
+        else [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": call_id, "type": "function", "function": {"name": "inspect", "arguments": "{}"}}
+                    for call_id in call_ids
+                ],
+            },
+            *[
+                {"role": "tool", "tool_call_id": call_id, "content": text}
+                for call_id, text in zip(call_ids, ("first result", "second result"))
+            ],
+        ]
+    )
+    original: Final = deepcopy(messages)
+    request: Final = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-flash",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+    assert request["messages"][0]["content"] == calls
+    assert len(request["messages"]) == 2
+    assert tuple(block["tool_use_id"] for block in request["messages"][1]["content"]) == call_ids
+    if surface == "anthropic":
+        assert request["messages"][1]["content"] == results
+    else:
+        assert tuple(block["content"] for block in request["messages"][1]["content"]) == (
+            "first result",
+            "second result",
+        )
+    assert messages == original
+
+
+@pytest.mark.parametrize(
+    "tail, expected_error",
+    [
+        ([], "immediately following user message"),
+        ([{"role": "user", "content": "continue"}], "immediately following user message"),
+        (
+            [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "fc_first", "content": "ok"}]}],
+            "fc_second",
+        ),
+        (
+            [
+                {"role": "user", "content": "continue"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": call_id, "content": "ok"}
+                        for call_id in ("fc_first", "fc_second")
+                    ],
+                },
+            ],
+            "immediately following user message",
+        ),
+        (
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": call_id, "content": "ok"}
+                        for call_id in ("fc_first", "fc_second", "fc_extra")
+                    ],
+                }
+            ],
+            "fc_extra",
+        ),
+        (
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": call_id, "content": "ok"}
+                        for call_id in ("fc_first", "fc_second", "fc_second")
+                    ],
+                }
+            ],
+            "duplicate",
+        ),
+        (
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "results"},
+                        *[
+                            {"type": "tool_result", "tool_use_id": call_id, "content": "ok"}
+                            for call_id in ("fc_first", "fc_second")
+                        ],
+                    ],
+                }
+            ],
+            "before other content",
+        ),
+    ],
+)
+def test_deepseek_anthropic_messages_rejects_unpaired_tool_history(tail, expected_error):
+    with pytest.raises(AnthropicError, match=expected_error):
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-flash",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": call_id, "name": "inspect", "input": {}}
+                        for call_id in ("fc_first", "fc_second")
+                    ],
+                },
+                *tail,
+            ],
+            anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+
+@pytest.mark.parametrize("event_type", ["message_start", "content_block_delta", "message_delta", "message_stop"])
+def test_deepseek_anthropic_messages_data_only_sse_uses_payload_event_type(event_type):
+    event: Final = b"id: event-123\nretry: 1000\ndata: " + json.dumps({"type": event_type}).encode() + b"\n\n"
+    output: Final = _sanitize_deepseek_sse_event(event, thinking_disabled=False)
+    assert output is not None
+    assert b"event: " + event_type.encode() + b"\n" in output
+    assert b"id: event-123\nretry: 1000\n" in output
+    payload: Final = json.loads(next(line[6:] for line in output.splitlines() if line.startswith(b"data: ")))
+    assert payload["type"] == event_type
+
+
 def test_deepseek_anthropic_messages_normalizes_legacy_function_history():
     request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
         model="deepseek-v4-pro",
@@ -1424,6 +1579,12 @@ def test_deepseek_anthropic_messages_matches_mixed_function_result_by_name():
                 ],
             },
             {"role": "function", "name": "modern_b", "content": "modern result"},
+            {
+                "role": "function",
+                "name": "legacy_a",
+                "tool_call_id": "legacy_function_call_0",
+                "content": "legacy result",
+            },
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100},
         litellm_params=GenericLiteLLMParams(),
@@ -1432,7 +1593,10 @@ def test_deepseek_anthropic_messages_matches_mixed_function_result_by_name():
 
     assert request["messages"][1] == {
         "role": "user",
-        "content": [{"type": "tool_result", "tool_use_id": "call_b", "content": "modern result"}],
+        "content": [
+            {"type": "tool_result", "tool_use_id": "call_b", "content": "modern result"},
+            {"type": "tool_result", "tool_use_id": "legacy_function_call_0", "content": "legacy result"},
+        ],
     }
 
 
@@ -1628,7 +1792,8 @@ def test_deepseek_anthropic_messages_backfills_reasoningless_tool_history():
         {
             "role": "assistant",
             "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-        }
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
     ]
     original_messages: Final = deepcopy(messages)
 
@@ -1702,7 +1867,8 @@ def test_deepseek_anthropic_messages_omitted_thinking_backfills_reasoningless_to
             {
                 "role": "assistant",
                 "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100},
         litellm_params=GenericLiteLLMParams(),
@@ -1727,7 +1893,8 @@ def test_deepseek_anthropic_messages_omitted_thinking_enables_thinking_block_his
                     {"type": "thinking", "thinking": "Use the weather tool."},
                     {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
                 ],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100},
         litellm_params=GenericLiteLLMParams(),
@@ -1749,7 +1916,8 @@ def test_deepseek_anthropic_messages_omitted_thinking_enables_reasoning_content_
                 "role": "assistant",
                 "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
                 "reasoning_content": "Use the weather tool.",
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100},
         litellm_params=GenericLiteLLMParams(),
@@ -1779,6 +1947,7 @@ def test_deepseek_anthropic_messages_explicit_disabled_strips_reasoning_from_mix
                 "role": "assistant",
                 "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}],
             },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
         litellm_params=GenericLiteLLMParams(),
@@ -1891,7 +2060,8 @@ def test_deepseek_anthropic_messages_placeholder_is_exactly_one_space():
                     {"type": "text", "text": "I will use the tool."},
                     {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
                 ],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
@@ -1916,12 +2086,14 @@ def test_deepseek_anthropic_placeholder_warning_is_aggregated(caplog):
                 {"type": "tool_use", "id": "toolu_1", "name": "first_tool", "input": {}},
             ],
         },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "Sunny"}]},
         {
             "role": "assistant",
             "content": [
                 {"type": "tool_use", "id": "toolu_2", "name": "second_tool", "input": {}},
             ],
         },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "Sunny"}]},
     ]
     original_messages = deepcopy(messages)
     caplog.set_level("WARNING", logger=litellm.verbose_logger.name)
@@ -1991,7 +2163,8 @@ def test_deepseek_anthropic_messages_prefers_real_sidecar_reasoning_to_placehold
                     {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
                 ],
                 "thinking_blocks": [{"type": "thinking", "thinking": "Use the weather tool.", "signature": "old"}],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
@@ -2102,7 +2275,8 @@ def test_deepseek_anthropic_messages_drops_redacted_tool_history_when_thinking_i
                     {"type": "redacted_thinking", "data": "encrypted"},
                     {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
                 ],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
         litellm_params=GenericLiteLLMParams(),
@@ -2628,7 +2802,8 @@ def test_deepseek_content_validation_does_not_scan_tool_input_payloads():
                         "input": {"type": "image"},
                     },
                 ],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100},
         litellm_params=GenericLiteLLMParams(),
@@ -2674,7 +2849,8 @@ def test_deepseek_anthropic_messages_repairs_incomplete_tool_use_from_matching_t
                         "function": {"name": "get_weather", "arguments": tool_arguments},
                     }
                 ],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
@@ -2860,7 +3036,8 @@ def test_deepseek_anthropic_messages_preserves_complete_tool_use_over_matching_t
                         "function": {"name": "top_level_tool", "arguments": '{"source":"tool_calls"}'},
                     }
                 ],
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
@@ -2992,7 +3169,8 @@ def test_deepseek_anthropic_messages_drops_redacted_when_canonical_reasoning_exi
                     {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
                 ],
                 "reasoning_content": "Use the weather tool.",
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={"max_tokens": 100},
         litellm_params=GenericLiteLLMParams(),
@@ -3036,7 +3214,8 @@ def test_deepseek_anthropic_messages_preserves_thinking_without_promoting_tool_t
                     {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}},
                 ],
                 "reasoning_content": "Canonical reasoning.",
-            }
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]},
         ],
         anthropic_messages_optional_request_params={
             "max_tokens": 100,
@@ -4148,7 +4327,11 @@ async def test_deepseek_anthropic_messages_streams_through_mock_transport():
                             {"type": "thinking", "thinking": "Call the tool.", "signature": "claude"},
                             {"type": "tool_use", "id": "functions.Bash:0", "name": "get_weather", "input": {}},
                         ],
-                    }
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "functions.Bash:0", "content": "Sunny"}],
+                    },
                 ],
                 model="deepseek-group",
                 stream=True,

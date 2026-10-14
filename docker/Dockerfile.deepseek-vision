@@ -1,4 +1,4 @@
-FROM registry.allcam.org/litellm/litellm:v1.99.1-custom.12ecbca31e-deepseek-tool-choice-overlay@sha256:f9355a9848a342b201e2e3f57377e822af51d99160e5c5263dbe94373763fb4a
+FROM registry.allcam.org/litellm/litellm:v1.99.1-custom.01b32e5bad-deepseek-vision-recovery@sha256:1b5b1cadce89d0e71dcee0b453b3628061f9c363ad595002d247a9a46bea081f
 
 RUN /app/.venv/bin/python -c 'from importlib.metadata import version; assert version("litellm") == "1.99.1"; assert version("litellm-proxy-extras") == "0.4.89"'
 
@@ -8,5 +8,5 @@ COPY model_prices_and_context_window.json /app/model_prices_and_context_window.j
 
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
-LABEL org.opencontainers.image.base.revision="12ecbca31e25e7ba53573dafa47618f0dbc73b59"
-LABEL org.opencontainers.image.base.digest="sha256:f9355a9848a342b201e2e3f57377e822af51d99160e5c5263dbe94373763fb4a"
+LABEL org.opencontainers.image.base.revision="01b32e5bad72b78b19a3fee4c2ca4151dccfab76"
+LABEL org.opencontainers.image.base.digest="sha256:1b5b1cadce89d0e71dcee0b453b3628061f9c363ad595002d247a9a46bea081f"

@@ -5,6 +5,7 @@ DeepSeek Anthropic-compatible messages transformation config.
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from copy import deepcopy
+from itertools import groupby
 from typing import Any, Final, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -298,10 +299,13 @@ def _sanitize_deepseek_sse_event(event: bytes, thinking_disabled: bool) -> bytes
     if sanitized_payload is None:
         return None
     non_data_lines: Final = tuple(line for line in lines if line and not line.startswith(b"data:"))
+    event_type: Final = (
+        sanitized_payload.get("type", "message") if isinstance(sanitized_payload, Mapping) else "message"
+    )
     preserved_lines: Final = (
         non_data_lines
         if any(line.startswith(b"event:") for line in non_data_lines)
-        else (b"event: message", *non_data_lines)
+        else (f"event: {event_type}".encode(), *non_data_lines)
     )
     sanitized_data: Final = b"data: " + json.dumps(sanitized_payload, separators=(",", ":")).encode()
     return b"\n".join((*preserved_lines, sanitized_data)) + b"\n\n"
@@ -553,6 +557,103 @@ def _normalize_deepseek_native_tool_history(
         else deepcopy(message)
         for message_index, message in enumerate(messages)
     )
+
+
+def _is_deepseek_tool_result_message(message: Mapping[str, object]) -> bool:
+    content: Final = _message_blocks(message, "content")
+    return (
+        message.get("role") == "user"
+        and bool(content)
+        and all(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)
+    )
+
+
+def _merged_deepseek_tool_result_group(messages: Iterable[Mapping[str, object]]) -> tuple[Mapping[str, object], ...]:
+    group: Final = tuple(messages)
+    if len(group) < 2:
+        return group
+    return (
+        {  # mutable-ok: provider message requires a concrete JSON object
+            **group[0],
+            "content": [  # mutable-ok: provider message requires a concrete JSON array
+                block for message in group for block in _message_blocks(message, "content")
+            ],
+        },
+    )
+
+
+def _merge_deepseek_tool_result_messages(
+    messages: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    return tuple(
+        message
+        for is_result, group in groupby(messages, _is_deepseek_tool_result_message)
+        for message in (_merged_deepseek_tool_result_group(group) if is_result else tuple(group))
+    )
+
+
+def _deepseek_tool_history_ids(
+    message: Mapping[str, object], block_type: Literal["tool_use", "tool_result"], message_index: int
+) -> tuple[str, ...]:
+    field: Final = "id" if block_type == "tool_use" else "tool_use_id"
+    raw_ids: Final = tuple(
+        block.get(field)
+        for block in _message_blocks(message, "content")
+        if isinstance(block, Mapping) and block.get("type") == block_type
+    )
+    if any(not isinstance(call_id, str) or not call_id.strip() for call_id in raw_ids):
+        raise _deepseek_history_validation_error(
+            f"DeepSeek Anthropic messages[{message_index}] {block_type} has invalid {field}"
+        )
+    call_ids: Final = tuple(call_id for call_id in raw_ids if isinstance(call_id, str))
+    if len(call_ids) != len(frozenset(call_ids)):
+        raise _deepseek_history_validation_error(
+            f"DeepSeek Anthropic messages[{message_index}] contains duplicate {block_type} ids"
+        )
+    return call_ids
+
+
+def _validate_deepseek_tool_history(messages: Sequence[Mapping[str, object]]) -> None:
+    for index, message in enumerate(messages):
+        calls: Final = _deepseek_tool_history_ids(message, "tool_use", index)
+        results: Final = _deepseek_tool_history_ids(message, "tool_result", index)
+        if calls and message.get("role") != "assistant":
+            raise _deepseek_history_validation_error(
+                f"DeepSeek Anthropic messages[{index}] tool_use requires assistant role"
+            )
+        following: Final = messages[index + 1] if index + 1 < len(messages) else None
+        following_results: Final = (
+            _deepseek_tool_history_ids(following, "tool_result", index + 1)
+            if following is not None and following.get("role") == "user"
+            else ()
+        )
+        missing: Final = tuple(call_id for call_id in calls if call_id not in following_results)
+        if missing:
+            raise _deepseek_history_validation_error(
+                f"DeepSeek Anthropic messages[{index}] tool_use ids require tool_result blocks in the immediately "
+                f"following user message: {', '.join(missing)}"
+            )
+        if not results:
+            continue
+        previous: Final = messages[index - 1] if index > 0 else None
+        previous_calls: Final = (
+            _deepseek_tool_history_ids(previous, "tool_use", index - 1)
+            if previous is not None and previous.get("role") == "assistant"
+            else ()
+        )
+        unmatched: Final = tuple(call_id for call_id in results if call_id not in previous_calls)
+        if message.get("role") != "user" or unmatched:
+            raise _deepseek_history_validation_error(
+                f"DeepSeek Anthropic messages[{index}] tool_result ids have no immediately preceding "
+                f"assistant tool_use: {', '.join(unmatched or results)}"
+            )
+        content: Final = _message_blocks(message, "content")
+        if any(
+            not isinstance(block, Mapping) or block.get("type") != "tool_result" for block in content[: len(results)]
+        ):
+            raise _deepseek_history_validation_error(
+                f"DeepSeek Anthropic messages[{index}] tool_result blocks must appear before other content"
+            )
 
 
 def _unsigned_content_block(block: object) -> tuple[object | None, bool, bool, bool]:
@@ -1268,7 +1369,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         headers: dict,
     ) -> dict:
         _validate_deepseek_content_blocks(messages, model=model)
-        normalized_messages: Final = _normalize_deepseek_native_tool_history(messages)
+        normalized_messages: Final = _merge_deepseek_tool_result_messages(
+            _normalize_deepseek_native_tool_history(messages)
+        )
         _validate_deepseek_content_blocks(normalized_messages, model=model)
         normalized_reasoning_params: Final = _without_adaptive_reasoning_params(
             anthropic_messages_optional_request_params,
@@ -1293,6 +1396,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             missing_reasoning=self._missing_reasoning or "placeholder",
         )
         _validate_deepseek_tool_use_blocks(transformed_messages)
+        _validate_deepseek_tool_history(transformed_messages)
         anthropic_messages_request: Final = super().transform_anthropic_messages_request(
             model=model,
             messages=transformed_messages,
