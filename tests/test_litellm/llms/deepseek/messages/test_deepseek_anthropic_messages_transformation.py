@@ -1523,6 +1523,29 @@ def test_deepseek_anthropic_messages_data_only_sse_uses_payload_event_type(event
     assert payload["type"] == event_type
 
 
+@pytest.mark.parametrize(
+    ("wire_event_type", "payload_event_type"),
+    [("message", "message_start"), ("content_block_start", "content_block_delta")],
+)
+def test_deepseek_anthropic_messages_sse_repairs_event_type_mismatch(wire_event_type, payload_event_type):
+    event: Final = (
+        f"event: {wire_event_type}\n".encode()
+        + b"id: event-123\ndata: "
+        + json.dumps({"type": payload_event_type}).encode()
+        + b"\n\n"
+    )
+
+    output: Final = _sanitize_deepseek_sse_event(event, thinking_disabled=False)
+
+    assert output == (
+        f"event: {payload_event_type}\n".encode()
+        + b"id: event-123\n"
+        + b"data: "
+        + json.dumps({"type": payload_event_type}, separators=(",", ":")).encode()
+        + b"\n\n"
+    )
+
+
 def test_deepseek_anthropic_messages_normalizes_legacy_function_history():
     request = DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
         model="deepseek-v4-pro",

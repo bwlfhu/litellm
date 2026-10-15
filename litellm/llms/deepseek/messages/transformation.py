@@ -299,13 +299,13 @@ def _sanitize_deepseek_sse_event(event: bytes, thinking_disabled: bool) -> bytes
     )
     if sanitized_payload is None:
         return None
-    non_data_lines: Final = tuple(line for line in lines if line and not line.startswith(b"data:"))
+    non_data_lines: Final = tuple(
+        line for line in lines if line and not line.startswith(b"data:") and not line.startswith(b"event:")
+    )
     payload_object: Final = _as_deepseek_mapping(sanitized_payload)
     event_type: Final = payload_object.get("type", "message") if payload_object is not None else "message"
     preserved_lines: Final = (
-        non_data_lines
-        if any(line.startswith(b"event:") for line in non_data_lines)
-        else (f"event: {event_type}".encode(), *non_data_lines)
+        (f"event: {event_type}".encode(), *non_data_lines)
     )
     sanitized_data: Final = b"data: " + json.dumps(sanitized_payload, separators=(",", ":")).encode()
     return b"\n".join((*preserved_lines, sanitized_data)) + b"\n\n"
