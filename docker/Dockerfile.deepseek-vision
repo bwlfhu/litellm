@@ -5,6 +5,8 @@ RUN /app/.venv/bin/python -c 'from importlib.metadata import version; assert ver
 COPY litellm/router_protocol.py /app/.venv/lib/python3.13/site-packages/litellm/router_protocol.py
 COPY litellm/llms/deepseek/chat/transformation.py /app/.venv/lib/python3.13/site-packages/litellm/llms/deepseek/chat/transformation.py
 COPY litellm/llms/deepseek/messages/transformation.py /app/.venv/lib/python3.13/site-packages/litellm/llms/deepseek/messages/transformation.py
+COPY litellm/proxy/common_request_processing.py /app/.venv/lib/python3.13/site-packages/litellm/proxy/common_request_processing.py
+COPY litellm/proxy/anthropic_endpoints/endpoints.py /app/.venv/lib/python3.13/site-packages/litellm/proxy/anthropic_endpoints/endpoints.py
 COPY litellm/model_prices_and_context_window_backup.json /app/.venv/lib/python3.13/site-packages/litellm/model_prices_and_context_window_backup.json
 COPY model_prices_and_context_window.json /app/model_prices_and_context_window.json
 

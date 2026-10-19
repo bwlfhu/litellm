@@ -6758,6 +6758,76 @@ async def test_ttft_keepalive_delivers_a_late_failure_as_an_sse_frame():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_status,error_type", [(429, "rate_limit_error"), (500, "api_error")])
+async def test_ttft_keepalive_anthropic_error_is_a_typed_event(http_status: int, error_type: str):
+    async def slow_failure() -> Response:
+        await asyncio.sleep(0.03)
+        raise HTTPException(status_code=http_status, detail="upstream unavailable")
+
+    response: Final = await open_sse_before_first_byte(
+        slow_failure(), ping_interval_seconds=0.01, anthropic_messages=True
+    )
+    collected: Final = await _drain(response)
+    frame: Final = collected[-1].decode()
+    payload: Final = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
+
+    assert collected[0] == TTFT_PING
+    assert frame.startswith("event: error\n")
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == error_type
+    assert payload["error"]["message"] == "upstream unavailable"
+    assert not any(b"[DONE]" in chunk for chunk in collected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("json_body", [True, False])
+async def test_ttft_keepalive_anthropic_json_failure_is_a_typed_event(json_body: bool):
+    async def slow_failure() -> Response:
+        await asyncio.sleep(0.03)
+        return (
+            JSONResponse(status_code=503, content={"error": {"message": "upstream unavailable"}})
+            if json_body else Response(status_code=503, content="upstream unavailable")
+        )
+
+    response: Final = await open_sse_before_first_byte(
+        slow_failure(), ping_interval_seconds=0.01, anthropic_messages=True
+    )
+    collected: Final = await _drain(response)
+    frame: Final = collected[-1].decode()
+    payload: Final = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
+
+    assert frame.startswith("event: error\n")
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == "api_error"
+    assert payload["error"]["message"] == "upstream unavailable"
+    assert not any(b"[DONE]" in chunk for chunk in collected)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_iterator_failure_after_content_is_a_typed_event():
+    async def failed_stream() -> AsyncGenerator[bytes, None]:
+        yield b'event: message_start\ndata: {"type":"message_start"}\n\n'
+        raise RuntimeError("upstream disconnected")
+
+    logging: Final = ProxyLogging(user_api_key_cache=litellm.Cache())
+    logging.post_call_failure_hook = AsyncMock(return_value=None)
+    stream: Final = ProxyBaseLLMRequestProcessing.async_sse_data_generator(
+        response=failed_stream(), user_api_key_dict=ProxyUserAPIKeyAuth(),
+        request_data={"model": "deepseek-flash"}, proxy_logging_obj=logging,
+    )
+    collected: Final = [chunk async for chunk in stream]
+    frame: Final = collected[-1]
+    payload: Final = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
+
+    assert collected[0] == b'event: message_start\ndata: {"type":"message_start"}\n\n'
+    assert frame.startswith("event: error\n")
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == "api_error"
+    assert "upstream disconnected" in payload["error"]["message"]
+    logging.post_call_failure_hook.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_ttft_keepalive_relays_a_late_non_streaming_body_as_an_sse_frame():
     async def slow_json():
         await asyncio.sleep(0.2)
@@ -7012,7 +7082,8 @@ async def test_a_failing_audit_hook_never_costs_the_client_its_error_frame():
 
 
 @pytest.mark.asyncio
-async def test_base_process_llm_request_audits_a_failure_that_lands_after_its_keepalive():
+@pytest.mark.parametrize("route_type", ["acompletion", "anthropic_messages"])
+async def test_base_process_llm_request_audits_a_failure_that_lands_after_its_keepalive(route_type):
     """The helper honouring on_late_failure is not enough: this pins that the shared
     funnel actually passes one, which is where the route's own except would have
     fired before the response was opened early."""
@@ -7034,7 +7105,7 @@ async def test_base_process_llm_request_audits_a_failure_that_lands_after_its_ke
                 request=MagicMock(spec=Request),
                 fastapi_response=Response(),
                 user_api_key_dict=user_api_key_dict,
-                route_type="acompletion",
+                route_type=route_type,
                 proxy_logging_obj=proxy_logging_obj,
                 general_settings={},
                 proxy_config=MagicMock(spec=ProxyConfig),
@@ -7048,7 +7119,15 @@ async def test_base_process_llm_request_audits_a_failure_that_lands_after_its_ke
     assert getattr(call["original_exception"], "detail", None) == "upstream exploded"
 
     assert collected[0] == TTFT_PING
-    assert collected[-1] == b"data: [DONE]\n\n"
+    if route_type == "anthropic_messages":
+        assert collected[-1].startswith(b"event: error\n")
+        payload = json.loads(collected[-1].decode().split("data: ", 1)[1])
+        assert payload["type"] == "error"
+        assert payload["error"]["type"] == "api_error"
+        assert payload["error"]["message"] == "upstream exploded"
+        assert not any(b"[DONE]" in chunk for chunk in collected)
+    else:
+        assert collected[-1] == b"data: [DONE]\n\n"
 
 
 @pytest.mark.asyncio

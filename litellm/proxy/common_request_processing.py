@@ -22,6 +22,7 @@ from starlette.types import Receive, Scope, Send
 import litellm
 from litellm._logging import _redact_string, verbose_proxy_logger
 from litellm._uuid import uuid
+from litellm.anthropic_interface.exceptions import AnthropicErrorResponse, AnthropicExceptionMapping
 from litellm.constants import (
     AUTO_ROUTED_REQUEST_METADATA_KEY,
     DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE,
@@ -46,6 +47,7 @@ from litellm.litellm_core_utils.llm_response_utils.get_headers import (
     get_response_headers,
 )
 from litellm.litellm_core_utils.safe_json_dumps import safe_dumps
+from litellm.litellm_core_utils.safe_json_loads import safe_json_loads
 from litellm.litellm_core_utils.streaming_handler import (
     backfill_missing_cache_usage_fields,
 )
@@ -817,7 +819,7 @@ def _sse_error_payload(exc: BaseException) -> tuple[int, Mapping[str, object]]:
     """
     # Preserve status code from HTTPException (e.g. guardrail blocks)
     error_status: Final = getattr(exc, "status_code", status.HTTP_500_INTERNAL_SERVER_ERROR)
-    raw_detail: Final = _getattr_object(exc, "detail", "Error processing stream start")
+    raw_detail: Final = _getattr_object(exc, "detail", _getattr_object(exc, "message", "Error processing stream start"))
     message, structured_fields = _serialize_http_exception_detail(raw_detail)
 
     existing_fields: Final = getattr(exc, "provider_specific_fields", None) or {}
@@ -861,8 +863,19 @@ def _log_stream_timing(
     )
 
 
-def _sse_error_frames(error_obj: Mapping[str, object]) -> tuple[str, str]:
-    """The two frames an SSE stream ends with once it can no longer raise."""
+def _sse_error_frames(error_obj: Mapping[str, object], *, anthropic_messages: bool = False) -> tuple[str, ...]:
+    if anthropic_messages:
+        code: Final = error_obj.get("code")
+        status_code: Final = int(code) if isinstance(code, (str, int)) and str(code).isdigit() else 500
+        payload: Final[AnthropicErrorResponse] = {
+            "type": "error",
+            "error": {
+                **error_obj,
+                "type": AnthropicExceptionMapping.get_error_type(status_code),
+                "message": str(error_obj.get("message", "Error processing stream")),
+            },
+        }
+        return (f"event: error\ndata: {json.dumps(payload)}\n\n",)
     return f"data: {json.dumps({'error': error_obj})}\n\n", "data: [DONE]\n\n"
 
 
@@ -872,6 +885,7 @@ async def create_response(
     headers: dict,
     default_status_code: int = status.HTTP_200_OK,
     request: Request | None = None,
+    anthropic_messages: bool = False,
 ) -> StreamingResponse | JSONResponse:
     """
     Create streaming response, checking if the first chunk is an error.
@@ -966,7 +980,7 @@ async def create_response(
         error_status, error_obj = _sse_error_payload(e)
 
         async def error_gen_message() -> AsyncGenerator[str, None]:
-            for frame in _sse_error_frames(error_obj):
+            for frame in _sse_error_frames(error_obj, anthropic_messages=anthropic_messages):
                 yield frame
 
         return StreamingResponse(
@@ -1053,9 +1067,18 @@ async def _aclose_late_response(produced: Response) -> None:
             verbose_proxy_logger.debug("error closing relayed streaming generator: %s", exc)
 
 
-async def _relay_late_response(produced: Response) -> AsyncGenerator[bytes, None]:
+async def _relay_late_response(produced: Response, *, anthropic_messages: bool = False) -> AsyncGenerator[bytes, None]:
     """Replay a Response that was built after a keepalive had already opened the wire."""
     if not isinstance(produced, StreamingResponse):
+        if anthropic_messages and produced.status_code >= 400:
+            body: Final = bytes(produced.body).decode("utf-8", errors="replace")
+            parsed_body: Final[object] = safe_json_loads(body)
+            message, _ = _serialize_http_exception_detail(parsed_body if parsed_body is not None else body)
+            for frame in _sse_error_frames(
+                MappingProxyType({"message": message, "code": str(produced.status_code)}), anthropic_messages=True
+            ):
+                yield frame.encode()
+            return
         # The status line is already on the wire, so a non-streaming body, an error
         # body included, can only reach the client as an SSE frame.
         yield b"data: " + (bytes(produced.body) or b"{}") + b"\n\n"
@@ -1101,6 +1124,7 @@ async def open_sse_before_first_byte(
     ping_interval_seconds: float | str | None,
     media_type: str = "text/event-stream",
     on_late_failure: Callable[[Exception], Awaitable[HTTPException | None]] | None = None,
+    anthropic_messages: bool = False,
 ) -> _LateResponseT | StreamingResponse:
     """Write SSE keepalive comments while the upstream LLM call is still in flight.
 
@@ -1145,10 +1169,10 @@ async def open_sse_before_first_byte(
                 # also gets to sanitize what reaches the client, by returning or
                 # raising a replacement, so its answer decides the frame.
                 _, error_obj = _sse_error_payload(await _sanitized_late_failure(exc, on_late_failure))
-                for frame in _sse_error_frames(error_obj):
+                for frame in _sse_error_frames(error_obj, anthropic_messages=anthropic_messages):
                     yield frame.encode()
                 return
-            async for chunk in _relay_late_response(produced):
+            async for chunk in _relay_late_response(produced, anthropic_messages=anthropic_messages):
                 yield chunk
         finally:
             if not produce_task.done():
@@ -2207,6 +2231,7 @@ class ProxyBaseLLMRequestProcessing:
             ),
             ping_interval_seconds=ttft_keepalive_interval(self.data, llm_router),
             on_late_failure=_audit_late_failure,
+            anthropic_messages=route_type == "anthropic_messages",
         )
 
     async def _process_llm_request(
@@ -2489,6 +2514,7 @@ class ProxyBaseLLMRequestProcessing:
                             media_type="text/event-stream",
                             headers=custom_headers,
                             request=request,
+                            anthropic_messages=True,
                         )
                     # Non-streaming response - fall through to normal response handling
                 elif select_data_generator:
@@ -3561,9 +3587,7 @@ class ProxyBaseLLMRequestProcessing:
             request_data=request_data,
             proxy_logging_obj=proxy_logging_obj,
             serialize_chunk=ProxyBaseLLMRequestProcessing.return_sse_chunk,
-            serialize_error=lambda proxy_exc: (
-                f"{STREAM_SSE_DATA_PREFIX}{json.dumps({'error': proxy_exc.to_dict()})}\n\n"
-            ),
+            serialize_error=lambda proxy_exc: _sse_error_frames(proxy_exc.to_dict(), anthropic_messages=True)[0],
             request=request,
         )
 

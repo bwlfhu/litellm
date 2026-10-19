@@ -169,6 +169,7 @@ async def anthropic_response(
                 generator=selected_data_generator,
                 media_type="text/event-stream",
                 headers={},
+                anthropic_messages=True,
             )
 
         return _anthropic_response
