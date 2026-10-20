@@ -6,6 +6,7 @@ import { ThemeProvider } from "next-themes";
 
 import { AuthProvider } from "@/contexts/AuthContext";
 import ReactQueryProvider from "@/contexts/ReactQueryProvider";
+import HotkeysProvider from "@/contexts/HotkeysProvider";
 import { Toaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
@@ -27,7 +28,9 @@ export default function RootLayout({
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
           <NuqsAdapter>
             <ReactQueryProvider>
-              <AuthProvider>{children}</AuthProvider>
+              <HotkeysProvider>
+                <AuthProvider>{children}</AuthProvider>
+              </HotkeysProvider>
               <Toaster />
             </ReactQueryProvider>
           </NuqsAdapter>

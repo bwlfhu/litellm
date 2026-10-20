@@ -17,11 +17,11 @@ from litellm.litellm_core_utils.prompt_templates.factory import (
     convert_to_anthropic_tool_invoke,
     convert_to_anthropic_tool_result,
 )
-from litellm.llms.anthropic.common_utils import AnthropicError, is_anthropic_invalid_thinking_signature_error
-from litellm.llms.anthropic.experimental_pass_through.messages.streaming_iterator import (
+from litellm.llms.anthropic.common_utils import AnthropicError
+from litellm.llms.anthropic.pass_through.messages.streaming_iterator import (
     aclose_if_supported,
 )
-from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
+from litellm.llms.anthropic.pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
 from litellm.llms.deepseek.common_utils import warn_missing_reasoning_placeholders
@@ -58,6 +58,11 @@ _DEEPSEEK_TOOL_USE_BLOCK_TYPES: Final = frozenset({"server_tool_use", "tool_use"
 _DEEPSEEK_LEGACY_REASONING_MODEL_PREFIXES: Final = ("deepseek-v3", "deepseek-reasoner")
 _DEEPSEEK_OUTPUT_EFFORTS: Final = frozenset(("low", "high", "max"))
 _DEEPSEEK_ENABLED_THINKING_TYPES: Final = frozenset(("enabled", "adaptive"))
+
+
+def _is_invalid_thinking_signature_error(error_text: str) -> bool:
+    lower: Final = error_text.lower()
+    return "thinking" in lower and "signature" in lower and ("invalid" in lower or "valid string" in lower)
 
 
 class _DeepSeekHistoryValidationError(AnthropicError):
@@ -304,9 +309,7 @@ def _sanitize_deepseek_sse_event(event: bytes, thinking_disabled: bool) -> bytes
     )
     payload_object: Final = _as_deepseek_mapping(sanitized_payload)
     event_type: Final = payload_object.get("type", "message") if payload_object is not None else "message"
-    preserved_lines: Final = (
-        (f"event: {event_type}".encode(), *non_data_lines)
-    )
+    preserved_lines: Final = (f"event: {event_type}".encode(), *non_data_lines)
     sanitized_data: Final = b"data: " + json.dumps(sanitized_payload, separators=(",", ":")).encode()
     return b"\n".join((*preserved_lines, sanitized_data)) + b"\n\n"
 
@@ -1357,6 +1360,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             headers=headers,
             optional_params=optional_params,
             custom_llm_provider=self.custom_llm_provider or "deepseek",
+            messages=messages,
         )
 
         return headers, api_base
@@ -1374,7 +1378,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return _complete_messages_url(base_url, self._messages_path)
 
     @staticmethod
-    def _sanitize_tools_for_deepseek(tools: Any) -> Any:
+    def _sanitize_tools_for_deepseek(tools: Any) -> object:
         if not isinstance(tools, list):
             return tools
 
@@ -1433,7 +1437,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             headers=headers,
         )
         normalized_anthropic_messages_request: Final = omit_false_stream_for_deepseek_anthropic(
-            anthropic_messages_request
+            {**anthropic_messages_request, **({"thinking": thinking} if thinking is not None else {})}
         )
         if "tools" not in normalized_anthropic_messages_request:
             return normalized_anthropic_messages_request
@@ -1529,4 +1533,4 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return False
 
     def should_disable_anthropic_messages_fallbacks_on_http_error(self, e: httpx.HTTPStatusError) -> bool:
-        return e.response.status_code == 400 and is_anthropic_invalid_thinking_signature_error(e.response.text)
+        return e.response.status_code == 400 and _is_invalid_thinking_signature_error(e.response.text)
