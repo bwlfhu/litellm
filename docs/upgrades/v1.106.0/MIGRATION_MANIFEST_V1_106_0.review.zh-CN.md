@@ -223,4 +223,4 @@
 
 费用优先级已独立实调对象/dict、原terminal/assembled、无已算成本/已算0/已算0.125，金额和缓存0及client payload隔离均正确；证据review-completeness-current-cost.json
 
-正式make check以主线程针对最终源码引用的完整日志记录为准，本清单不根据历史PASS推定当前门禁通过；候选镜像、完整数据库副本和真实Harness/生产发布仍需单独验收。生产CURRENT_BASELINE.md逐字保持定制源版本
+最终源码efee6c541fe0add9e6fbf7f9fdab1d330b518185的正式make check已在make-check-source-final.log记录check: PASS；按变更范围跳过无改动的tests/e2e检查，该记录不是模型端到端测试。候选镜像、完整数据库副本和真实Harness/生产发布仍需单独验收。生产CURRENT_BASELINE.md逐字保持定制源版本

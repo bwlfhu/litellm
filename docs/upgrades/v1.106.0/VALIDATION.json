@@ -81,7 +81,7 @@
     "tracked_entries_checked": 110,
     "result": "PASS",
     "source_snapshot": "efee6c541fe0add9e6fbf7f9fdab1d330b518185",
-    "manifest_sha256": "3d3aafeae2be91d104e25e86b7f05faa7ce41ba2e616cb699c77d1b6904813be"
+    "manifest_sha256": "43e2b62b40af94ad856d1acda9266721ecad053ced460635dae834701c5044c9"
   },
   "independent_reviews": {
     "protocol": "PASS",
