@@ -137,7 +137,9 @@ class AzureAIStudioConfig(OpenAIConfig):
                 headers["Authorization"] = f"Bearer {api_key}"
         else:
             # No api_key provided — fall back to Azure AD token-based auth
-            litellm_params_obj = GenericLiteLLMParams.model_validate(litellm_params)
+            litellm_params_obj = GenericLiteLLMParams.model_validate(
+                dict(**(litellm_params if isinstance(litellm_params, dict) else {}))
+            )
             headers = BaseAzureLLM.base_validate_azure_environment(headers=headers, litellm_params=litellm_params_obj)
 
         headers["Content-Type"] = "application/json"

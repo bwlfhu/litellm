@@ -1724,10 +1724,8 @@ def client(original_function):
         # Check if this is an async function. If so only execute the async function
         call_type: Final = _get_call_type_from_public_name(original_function.__name__)
         if call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
-            kwargs["tools"] = (
-                materialize_single_pass_iterable(  # rebind-ok: retries must replay the materialized tool iterable
-                    kwargs["tools"]
-                )
+            kwargs["tools"] = (  # rebind-ok: retries must replay the materialized tool iterable
+                materialize_single_pass_iterable(kwargs["tools"])
             )
         if _is_async_request(kwargs):
             # [OPTIONAL] CHECK MAX RETRIES / REQUEST
@@ -2019,10 +2017,8 @@ def client(original_function):
     async def wrapper_async(*args, **kwargs):
         raw_call_type: Final = original_function.__name__
         if raw_call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
-            kwargs["tools"] = (
-                materialize_single_pass_iterable(  # rebind-ok: retries must replay the materialized tool iterable
-                    kwargs["tools"]
-                )
+            kwargs["tools"] = (  # rebind-ok: retries must replay the materialized tool iterable
+                materialize_single_pass_iterable(kwargs["tools"])
             )
         print_args_passed_to_litellm(original_function, args, kwargs)
         start_time: Final = datetime.datetime.now()

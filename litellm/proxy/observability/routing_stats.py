@@ -536,9 +536,9 @@ def initialize_routing_stats(redis_cache: RedisCache | None) -> None:
         verbose_proxy_logger.warning("Routing stats disabled because coordination Redis is unavailable")
         return
     if _routing_stats_logger is None:
-        _routing_stats_logger = RoutingStatsLogger(
+        _routing_stats_logger = RoutingStatsLogger(  # rebind-ok: startup owns the callback singleton
             redis_cache=redis_cache
-        )  # rebind-ok: startup owns the callback singleton
+        )
         import litellm
 
         litellm.logging_callback_manager.add_litellm_input_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]  # callback manager registrations have legacy untyped kwargs

@@ -173,18 +173,18 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         ] = ()
         self._current_step_chunk_start: int = 0
         self._current_step_finalized: bool = False
-        self._current_step_annotations: list[
+        self._current_step_annotations: list[  # mutable-ok: annotations accumulate until the current output step closes
             BaseLiteLLMOpenAIResponseObject
-        ] = []  # mutable-ok: annotations accumulate until the current output step closes
+        ] = []
         self._active_upstream_chunk_id: str | None = None
         self._upstream_step_finished = False
         self._cached_response_id: str | None = None
         self._buffered_chunk: ModelResponseStream | None = None
         self._upstream_exhausted: bool = False
         self._response_id_primed: bool = False
-        self._pending_tool_events: list[
+        self._pending_tool_events: list[  # mutable-ok: FIFO buffer bridges one upstream chunk to multiple SSE events
             BaseLiteLLMOpenAIResponseObject
-        ] = []  # mutable-ok: FIFO buffer bridges one upstream chunk to multiple SSE events
+        ] = []
         self._tool_output_index_by_call_id: dict[str, int] = {}
         self._tool_args_by_call_id: dict[str, str] = {}
         self._tool_item_id_by_call_id: dict[str, str] = {}  # mutable-ok: filled per call id as tool call events stream
@@ -204,9 +204,9 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         self._reasoning_done_emitted = False
         self._reasoning_item_id: str | None = None
         self._accumulated_reasoning_content_parts: list[str] = []
-        self._accumulated_provider_specific_fields: dict[
+        self._accumulated_provider_specific_fields: dict[  # mutable-ok: provider results arrive across separate upstream chunks
             str, object
-        ] = {}  # mutable-ok: provider results arrive across separate upstream chunks
+        ] = {}
         self._custom_tool_names: frozenset[str] = frozenset(
             extract_custom_tool_names(self.responses_api_request.get("tools"))
         )
@@ -214,9 +214,9 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             self.responses_api_request.get("tools")
         )
         self._web_search_calls: dict[str, object] = {}  # mutable-ok: latest call by provider id
-        self._code_interpreter_calls: dict[
+        self._code_interpreter_calls: dict[  # mutable-ok: server tool results can follow their initial call event
             str, object
-        ] = {}  # mutable-ok: server tool results can follow their initial call event
+        ] = {}
         self._queued_code_interpreter_call_ids: set[str] = set()
         self._queued_web_search_call_ids: set[str] = set()  # mutable-ok: emitted call ids
 

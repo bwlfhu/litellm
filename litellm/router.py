@@ -894,9 +894,9 @@ def as_output_cap(value: object) -> int | None:
 def _callback_mapping(value: object) -> MutableMapping[str, object] | None:
     if not isinstance(value, dict):
         return None
-    return cast(
+    return cast(  # cast-ok: retain caller-owned callback state after the dict runtime check
         MutableMapping[str, object], value
-    )  # cast-ok: retain caller-owned callback state after the dict runtime check
+    )
 
 
 def _callback_parameter_containers(logging_obj: object) -> Iterator[MutableMapping[str, object]]:
