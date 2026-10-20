@@ -1,0 +1,181 @@
+{
+  "mro": [
+    "GenericLiteLLMParams",
+    "CredentialLiteLLMParams",
+    "CustomPricingLiteLLMParams",
+    "MirroredPricingParams",
+    "LiteLLMBaseModel",
+    "BaseModel",
+    "object"
+  ],
+  "custom_init": false,
+  "uses_pydantic_base_init": true,
+  "model_config": {
+    "extra": "allow",
+    "arbitrary_types_allowed": true,
+    "defer_build": true
+  },
+  "post_init": "model_post_init",
+  "field_validators": [
+    "validate_provider_affinity_header",
+    "coerce_drop_params"
+  ],
+  "model_validators": [
+    "preprocess_input_data"
+  ],
+  "unique_call_shapes": [
+    {
+      "before": "GenericLiteLLMParams(**kwargs)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**kwargs, azure_ad_token=azure_ad_token)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**kwargs, api_key=api_key, api_base=api_base, custom_llm_provider=custom_llm_provider)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**litellm_params)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**_input_litellm_params)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**{**dict(litellm_params), **{key: value for key, value in modified_kwargs.items() if key not in optional_param_names and key not in {'model', 'input', 'custom_llm_provider'}}})",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**litellm_params or {})",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**litellm_params if isinstance(litellm_params, dict) else {})",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    },
+    {
+      "before": "GenericLiteLLMParams(**azure_auth_params)",
+      "model_values_equal": true,
+      "fields_set_equal": true,
+      "extra_equal": true,
+      "context_identity_preserved": true
+    }
+  ],
+  "validation_cases": [
+    {
+      "case": 0,
+      "result_kind": "model",
+      "equivalent": true
+    },
+    {
+      "case": 1,
+      "result_kind": "model",
+      "equivalent": true
+    },
+    {
+      "case": 2,
+      "result_kind": "model",
+      "equivalent": true
+    },
+    {
+      "case": 3,
+      "result_kind": "error",
+      "equivalent": true
+    },
+    {
+      "case": 4,
+      "result_kind": "error",
+      "equivalent": true
+    },
+    {
+      "case": 5,
+      "result_kind": "error",
+      "equivalent": true
+    }
+  ],
+  "duplicate_keyword_cases": [
+    {
+      "order": "explicit_first",
+      "before_error": "TypeError",
+      "after_error": "TypeError"
+    },
+    {
+      "order": "expansion_first",
+      "before_error": "TypeError",
+      "after_error": "TypeError"
+    }
+  ],
+  "invalid_expansion_cases": [
+    {
+      "value_type": "NoneType",
+      "before_error": "TypeError",
+      "after_error": "TypeError"
+    },
+    {
+      "value_type": "dict",
+      "before_error": "TypeError",
+      "after_error": "TypeError"
+    }
+  ],
+  "trusted_context": {
+    "trusted": {
+      "identity_preserved": true,
+      "owner_check_accepts": true
+    },
+    "fake-dict": {
+      "identity_preserved": true,
+      "owner_check_accepts": false
+    },
+    "missing": {
+      "identity_preserved": true,
+      "owner_check_accepts": false
+    }
+  },
+  "all_passed": true,
+  "provider_or_network_calls": false,
+  "limits": "Invalid argument TypeError messages name dict instead of model; function evaluation and exception kind preserved. This is an offline boundary review, not endpoint or production validation.",
+  "final_source_ref": "efee6c541fe0add9e6fbf7f9fdab1d330b518185",
+  "final_ast_cross_check": "review-param-boundary-ast.json",
+  "azure_legacy_guard_cross_check": "review-param-boundary-azure-restored.json"
+}

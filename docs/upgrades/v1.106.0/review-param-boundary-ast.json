@@ -1,0 +1,1053 @@
+{
+  "expected_total": 94,
+  "converted_total": 94,
+  "dict_envelope_total": 94,
+  "direct_model_validation_total": 0,
+  "files": 25,
+  "errors": [],
+  "details": [
+    {
+      "path": "litellm/assistants/main.py",
+      "sha256": "f56b3a9be3f70074d5467795af748eb66f842d8e435c19c63699791f2cc45e4f",
+      "expected_count": 8,
+      "actual_converted_count": 8,
+      "dict_envelope_count": 8,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/containers/endpoint_factory.py",
+      "sha256": "b0044cb2817f4b1f5b4e472104a57415811b784b697d2f3ee994fc30bcecd41d",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/containers/main.py",
+      "sha256": "d6cda96227824a74bd8483711e4b3e5f2c4ed3b948bcd43427d60899da4ab7c1",
+      "expected_count": 6,
+      "actual_converted_count": 6,
+      "dict_envelope_count": 6,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "sha256": "0a8a86ed87780afc34f5be9d434e86fae681b7e56853753695c9c09d7a70728a",
+      "expected_count": 11,
+      "actual_converted_count": 11,
+      "dict_envelope_count": 11,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/files/main.py",
+      "sha256": "6bf047458aaf52e14a68ed66c1b430b6b8d619e845da622e02b99ee8fae01a87",
+      "expected_count": 5,
+      "actual_converted_count": 5,
+      "dict_envelope_count": 5,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/fine_tuning/main.py",
+      "sha256": "5814130804ad05e8ff22249a2a87d73a854ae8bc04fd487846a73d3326f55c7c",
+      "expected_count": 4,
+      "actual_converted_count": 4,
+      "dict_envelope_count": 4,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/google_genai/main.py",
+      "sha256": "0ec24766bf03e84a57b60bfaeb0a41699f22df8d55bc4471073b5006b0a8a564",
+      "expected_count": 2,
+      "actual_converted_count": 2,
+      "dict_envelope_count": 2,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/images/main.py",
+      "sha256": "e4879f4387e0d4e7e8ae7c5aed3838d7b2d14f1f31dbb93eafdb18766860d8fd",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/interactions/agents/main.py",
+      "sha256": "e51592179ef915e6ed1bbd5efaf8c5e43517c9ef09ac46de3aa8d7f2c6fddf90",
+      "expected_count": 5,
+      "actual_converted_count": 5,
+      "dict_envelope_count": 5,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/interactions/main.py",
+      "sha256": "1fe8f07f4b146b702172e9d777621ab767bc9e638e17b4a4457af90e19752898",
+      "expected_count": 4,
+      "actual_converted_count": 4,
+      "dict_envelope_count": 4,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/llms/anthropic/pass_through/messages/handler.py",
+      "sha256": "565f1542cbfdd95ead0607fcf4c9d9e9c5513fa5ab1b148720c38c475eba436e",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/llms/azure/image_edit/transformation.py",
+      "sha256": "c5d5c4afa51ff1af7a99d9874ed2e2621e2c03f50742e37d987b6b1cdd879c43",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/llms/azure_ai/agents/transformation.py",
+      "sha256": "2bb3437b3946ceff28df3b24f278ad74f301a1fc14303958dccc744046a6bb9c",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/llms/azure_ai/anthropic/messages_transformation.py",
+      "sha256": "eddf7e81b09b8c5af4acc14390a41fd691715c2620df4ddd431657fc00d326e5",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/llms/azure_ai/anthropic/transformation.py",
+      "sha256": "a81827094c4dd0833a473b0df870152e2594e9cc7fb4bf5784affdac5bf1cd0f",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/llms/azure_ai/chat/transformation.py",
+      "sha256": "d0722cc96cd36475e62e1f0f69622df9b65d96c038831d6f293ea96fa8ceeb82",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/llms/custom_httpx/llm_http_handler.py",
+      "sha256": "5d3e0b6cb4d64be77d6dd6d4baf00ed7221c7b13c01074d05a4a9202b8171aa5",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": [
+        {
+          "line": 6980,
+          "expression": "GenericLiteLLMParams.model_validate({'api_base': api_base, 'api_key': api_key, **kwargs})",
+          "identical_call_in_initial_merge": true
+        }
+      ]
+    },
+    {
+      "path": "litellm/proxy/vector_store_endpoints/management_endpoints.py",
+      "sha256": "3e0732cc86b4aa9007e8969e87bafd984f23ff9c0b9eaa7e3a352fe1a915d08c",
+      "expected_count": 2,
+      "actual_converted_count": 2,
+      "dict_envelope_count": 2,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/realtime_api/main.py",
+      "sha256": "f723e66c64aa14a26860e0e1fefa3ab769b37aa4a0a89cd2f68ef025d57ef07c",
+      "expected_count": 5,
+      "actual_converted_count": 5,
+      "dict_envelope_count": 5,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": [
+        {
+          "line": 625,
+          "expression": "GenericLiteLLMParams.model_validate(dict(model_params))"
+        }
+      ]
+    },
+    {
+      "path": "litellm/rerank_api/main.py",
+      "sha256": "5d0e2969c47fcc419307d48b2c9f00f615a7ba496819d38cabf542284aa59925",
+      "expected_count": 1,
+      "actual_converted_count": 1,
+      "dict_envelope_count": 1,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "sha256": "6956b2fa72aacce8e27883e57a3c5d4c2807f52697a7e254f5c6de43758aef72",
+      "expected_count": 7,
+      "actual_converted_count": 7,
+      "dict_envelope_count": 7,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/skills/main.py",
+      "sha256": "43dd361d2aaf3394f32fddbc30065d3f19736806b9e563d7e5eaed335955b667",
+      "expected_count": 4,
+      "actual_converted_count": 4,
+      "dict_envelope_count": 4,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/vector_store_files/main.py",
+      "sha256": "daf72f8913adcc2ec9eaab82a93a2d07ffeb94048f85f559d645281d15df1448",
+      "expected_count": 6,
+      "actual_converted_count": 6,
+      "dict_envelope_count": 6,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/vector_stores/main.py",
+      "sha256": "46ebe83b7920e547900972152a51fa3141a28acb6917d0c097283ea79fdabdad",
+      "expected_count": 6,
+      "actual_converted_count": 6,
+      "dict_envelope_count": 6,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "sha256": "41d7fb5802a23877774623db4851092ffe24410e8eacf147b0a66d067e0a1291",
+      "expected_count": 9,
+      "actual_converted_count": 9,
+      "dict_envelope_count": 9,
+      "direct_model_validation_count": 0,
+      "parameters_and_order_identical": true,
+      "dict_shadow": [],
+      "unrelated_existing_wrappers": []
+    }
+  ],
+  "conversions": [
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 84,
+      "reviewed_after_line": 84,
+      "original_call": "GenericLiteLLMParams(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 251,
+      "reviewed_after_line": 253,
+      "original_call": "GenericLiteLLMParams(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 419,
+      "reviewed_after_line": 423,
+      "original_call": "GenericLiteLLMParams(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 588,
+      "reviewed_after_line": 594,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 737,
+      "reviewed_after_line": 743,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 906,
+      "reviewed_after_line": 912,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 1064,
+      "reviewed_after_line": 1070,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/assistants/main.py",
+      "recorded_before_line": 1255,
+      "reviewed_after_line": 1261,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/containers/endpoint_factory.py",
+      "recorded_before_line": 84,
+      "reviewed_after_line": 84,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/containers/main.py",
+      "recorded_before_line": 214,
+      "reviewed_after_line": 214,
+      "original_call": "GenericLiteLLMParams(\n            api_key=api_key,\n            api_base=api_base,\n            api_version=api_version,\n            **kwargs,\n        )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/containers/main.py",
+      "recorded_before_line": 432,
+      "reviewed_after_line": 434,
+      "original_call": "GenericLiteLLMParams(\n            api_key=api_key,\n            api_base=api_base,\n            api_version=api_version,\n            **kwargs,\n        )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/containers/main.py",
+      "recorded_before_line": 623,
+      "reviewed_after_line": 627,
+      "original_call": "GenericLiteLLMParams(\n            api_key=api_key,\n            api_base=api_base,\n            api_version=api_version,\n            **kwargs,\n        )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/containers/main.py",
+      "recorded_before_line": 838,
+      "reviewed_after_line": 844,
+      "original_call": "GenericLiteLLMParams(\n            api_key=api_key,\n            api_base=api_base,\n            api_version=api_version,\n            **kwargs,\n        )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/containers/main.py",
+      "recorded_before_line": 1067,
+      "reviewed_after_line": 1075,
+      "original_call": "GenericLiteLLMParams(\n            api_key=api_key,\n            api_base=api_base,\n            api_version=api_version,\n            **kwargs,\n        )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/containers/main.py",
+      "recorded_before_line": 1318,
+      "reviewed_after_line": 1328,
+      "original_call": "GenericLiteLLMParams(\n            api_key=api_key,\n            api_base=api_base,\n            api_version=api_version,\n            **kwargs,\n        )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 151,
+      "reviewed_after_line": 151,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 336,
+      "reviewed_after_line": 336,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 502,
+      "reviewed_after_line": 502,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 667,
+      "reviewed_after_line": 667,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 872,
+      "reviewed_after_line": 872,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 1022,
+      "reviewed_after_line": 1022,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 1201,
+      "reviewed_after_line": 1201,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 1385,
+      "reviewed_after_line": 1385,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 1555,
+      "reviewed_after_line": 1555,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 1711,
+      "reviewed_after_line": 1711,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/evals/main.py",
+      "recorded_before_line": 1876,
+      "reviewed_after_line": 1876,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/files/main.py",
+      "recorded_before_line": 176,
+      "reviewed_after_line": 176,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/files/main.py",
+      "recorded_before_line": 350,
+      "reviewed_after_line": 350,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/files/main.py",
+      "recorded_before_line": 527,
+      "reviewed_after_line": 527,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/files/main.py",
+      "recorded_before_line": 695,
+      "reviewed_after_line": 695,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/files/main.py",
+      "recorded_before_line": 871,
+      "reviewed_after_line": 871,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/fine_tuning/main.py",
+      "recorded_before_line": 175,
+      "reviewed_after_line": 175,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/fine_tuning/main.py",
+      "recorded_before_line": 386,
+      "reviewed_after_line": 386,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/fine_tuning/main.py",
+      "recorded_before_line": 540,
+      "reviewed_after_line": 540,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/fine_tuning/main.py",
+      "recorded_before_line": 690,
+      "reviewed_after_line": 690,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/google_genai/main.py",
+      "recorded_before_line": 118,
+      "reviewed_after_line": 118,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/google_genai/main.py",
+      "recorded_before_line": 332,
+      "reviewed_after_line": 332,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/images/main.py",
+      "recorded_before_line": 776,
+      "reviewed_after_line": 776,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/agents/main.py",
+      "recorded_before_line": 179,
+      "reviewed_after_line": 179,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/agents/main.py",
+      "recorded_before_line": 254,
+      "reviewed_after_line": 254,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/agents/main.py",
+      "recorded_before_line": 330,
+      "reviewed_after_line": 330,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/agents/main.py",
+      "recorded_before_line": 407,
+      "reviewed_after_line": 407,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/agents/main.py",
+      "recorded_before_line": 484,
+      "reviewed_after_line": 484,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/main.py",
+      "recorded_before_line": 272,
+      "reviewed_after_line": 272,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/main.py",
+      "recorded_before_line": 419,
+      "reviewed_after_line": 419,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/main.py",
+      "recorded_before_line": 523,
+      "reviewed_after_line": 523,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/interactions/main.py",
+      "recorded_before_line": 625,
+      "reviewed_after_line": 625,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/llms/anthropic/pass_through/messages/handler.py",
+      "recorded_before_line": 510,
+      "reviewed_after_line": 510,
+      "original_call": "GenericLiteLLMParams(\n        **kwargs,\n        api_key=api_key,\n        api_base=api_base,\n        custom_llm_provider=custom_llm_provider,\n    )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/llms/azure/image_edit/transformation.py",
+      "recorded_before_line": 65,
+      "reviewed_after_line": 65,
+      "original_call": "GenericLiteLLMParams(**(litellm_params or {}))",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/llms/azure_ai/agents/transformation.py",
+      "recorded_before_line": 355,
+      "reviewed_after_line": 355,
+      "original_call": "GenericLiteLLMParams(**azure_auth_params)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/llms/azure_ai/anthropic/messages_transformation.py",
+      "recorded_before_line": 46,
+      "reviewed_after_line": 46,
+      "original_call": "GenericLiteLLMParams(**litellm_params)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/llms/azure_ai/anthropic/transformation.py",
+      "recorded_before_line": 68,
+      "reviewed_after_line": 68,
+      "original_call": "GenericLiteLLMParams(**litellm_params)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/llms/azure_ai/chat/transformation.py",
+      "recorded_before_line": 140,
+      "reviewed_after_line": 140,
+      "original_call": "GenericLiteLLMParams(**(litellm_params if isinstance(litellm_params, dict) else {}))",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/llms/custom_httpx/llm_http_handler.py",
+      "recorded_before_line": 2638,
+      "reviewed_after_line": 2639,
+      "original_call": "GenericLiteLLMParams(\n            **{\n                **dict(litellm_params),\n                **{\n                    key: value\n                    for key, value in modified_kwargs.items()\n                    if key not in optional_param_names and key not in {\"model\", \"input\", \"custom_llm_provider\"}\n                },\n            }\n        )",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/proxy/vector_store_endpoints/management_endpoints.py",
+      "recorded_before_line": 249,
+      "reviewed_after_line": 249,
+      "original_call": "GenericLiteLLMParams(**litellm_params)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/proxy/vector_store_endpoints/management_endpoints.py",
+      "recorded_before_line": 657,
+      "reviewed_after_line": 659,
+      "original_call": "GenericLiteLLMParams(**_input_litellm_params)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/realtime_api/main.py",
+      "recorded_before_line": 142,
+      "reviewed_after_line": 142,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/realtime_api/main.py",
+      "recorded_before_line": 210,
+      "reviewed_after_line": 210,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/realtime_api/main.py",
+      "recorded_before_line": 271,
+      "reviewed_after_line": 271,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/realtime_api/main.py",
+      "recorded_before_line": 374,
+      "reviewed_after_line": 374,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/realtime_api/main.py",
+      "recorded_before_line": 438,
+      "reviewed_after_line": 440,
+      "original_call": "GenericLiteLLMParams(**kwargs, azure_ad_token=azure_ad_token)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/rerank_api/main.py",
+      "recorded_before_line": 137,
+      "reviewed_after_line": 137,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "recorded_before_line": 1288,
+      "reviewed_after_line": 1288,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "recorded_before_line": 1636,
+      "reviewed_after_line": 1636,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "recorded_before_line": 1808,
+      "reviewed_after_line": 1808,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "recorded_before_line": 1957,
+      "reviewed_after_line": 1957,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "recorded_before_line": 2103,
+      "reviewed_after_line": 2103,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "recorded_before_line": 2276,
+      "reviewed_after_line": 2276,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/responses/main.py",
+      "recorded_before_line": 2451,
+      "reviewed_after_line": 2451,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/skills/main.py",
+      "recorded_before_line": 168,
+      "reviewed_after_line": 168,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/skills/main.py",
+      "recorded_before_line": 361,
+      "reviewed_after_line": 361,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/skills/main.py",
+      "recorded_before_line": 534,
+      "reviewed_after_line": 534,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/skills/main.py",
+      "recorded_before_line": 698,
+      "reviewed_after_line": 698,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_store_files/main.py",
+      "recorded_before_line": 130,
+      "reviewed_after_line": 130,
+      "original_call": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_store_files/main.py",
+      "recorded_before_line": 259,
+      "reviewed_after_line": 259,
+      "original_call": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_store_files/main.py",
+      "recorded_before_line": 369,
+      "reviewed_after_line": 369,
+      "original_call": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_store_files/main.py",
+      "recorded_before_line": 477,
+      "reviewed_after_line": 477,
+      "original_call": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_store_files/main.py",
+      "recorded_before_line": 591,
+      "reviewed_after_line": 591,
+      "original_call": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_store_files/main.py",
+      "recorded_before_line": 706,
+      "reviewed_after_line": 706,
+      "original_call": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_stores/main.py",
+      "recorded_before_line": 209,
+      "reviewed_after_line": 209,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_stores/main.py",
+      "recorded_before_line": 408,
+      "reviewed_after_line": 408,
+      "original_call": "GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_stores/main.py",
+      "recorded_before_line": 571,
+      "reviewed_after_line": 571,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_stores/main.py",
+      "recorded_before_line": 715,
+      "reviewed_after_line": 715,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_stores/main.py",
+      "recorded_before_line": 867,
+      "reviewed_after_line": 867,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/vector_stores/main.py",
+      "recorded_before_line": 1010,
+      "reviewed_after_line": 1010,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 202,
+      "reviewed_after_line": 202,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 326,
+      "reviewed_after_line": 326,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 595,
+      "reviewed_after_line": 595,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 807,
+      "reviewed_after_line": 807,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 1028,
+      "reviewed_after_line": 1028,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 1170,
+      "reviewed_after_line": 1170,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 1295,
+      "reviewed_after_line": 1295,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 1428,
+      "reviewed_after_line": 1428,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    },
+    {
+      "path": "litellm/videos/main.py",
+      "recorded_before_line": 1562,
+      "reviewed_after_line": 1562,
+      "original_call": "GenericLiteLLMParams(**kwargs)",
+      "conversion_kind": "dict-keyword-expansion-model-validation",
+      "arguments_and_keyword_order_equal": true
+    }
+  ],
+  "all_passed": true,
+  "frozen_source": "efee6c541fe0add9e6fbf7f9fdab1d330b518185",
+  "azure_guard_regression_report": "review-param-boundary-azure-restored.json"
+}

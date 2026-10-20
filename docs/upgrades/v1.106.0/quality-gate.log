@@ -1,0 +1,238 @@
+make[1]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv sync --inexact --frozen --extra proxy --group proxy-dev --group e2e-dev
+Checked 240 packages in 4ms
+uv run --no-sync python scripts/prisma_generate_if_needed.py
+Prisma client already generated for litellm/proxy/schema.prisma (prisma 0.11.0); skipping prisma generate
+cd ui/litellm-dashboard && ../../scripts/with_dashboard_node.sh npm install --no-audit --no-fund
+
+up to date in 1s
+bootstrap: .env left untouched
+bootstrap: done
+./scripts/pre_commit_lint.sh
+check: logging full output to /home/allcam/projects/litellm/.git/worktrees/litellm-v1106-upgrade/pre_commit_lint.log
+check: nothing staged; scoping to the working tree's diff against the merge base with v1.106.0:
+    CURRENT_BASELINE.md
+    Dockerfile
+    UPGRADE_V1_106_0.md
+    UPGRADE_V1_99_1.md
+    deploy/INFRASTRUCTURE_ARCHIVE.md
+    deploy/casdoor/PDEP_OIDC.md
+    deploy/casdoor/README.md
+    deploy/casdoor/bootstrap.sh
+    deploy/casdoor/casdoor.yaml
+    deploy/casdoor/configure-feishu.sh
+    deploy/casdoor/ingress.yaml
+    deploy/casdoor/namespace.yaml
+    deploy/casdoor/postgres.yaml
+    deploy/casdoor/provision-pdep.sh
+    litellm/assistants/main.py
+    litellm/caching/dual_cache.py
+    litellm/caching/in_memory_cache.py
+    litellm/caching/redis_batch.py
+    litellm/caching/redis_cache.py
+    litellm/completion_extras/litellm_responses_transformation/transformation.py
+    litellm/containers/endpoint_factory.py
+    litellm/containers/main.py
+    litellm/evals/main.py
+    litellm/files/main.py
+    litellm/fine_tuning/main.py
+    litellm/google_genai/main.py
+    litellm/images/main.py
+    litellm/interactions/agents/main.py
+    litellm/interactions/main.py
+    litellm/litellm_core_utils/exception_mapping_utils.py
+    litellm/litellm_core_utils/get_litellm_params.py
+    litellm/litellm_core_utils/litellm_logging.py
+    litellm/litellm_core_utils/prompt_templates/factory.py
+    litellm/llms/anthropic/chat/handler.py
+    litellm/llms/anthropic/chat/transformation.py
+    litellm/llms/anthropic/common_utils.py
+    litellm/llms/anthropic/pass_through/adapters/handler.py
+    litellm/llms/anthropic/pass_through/adapters/streaming_iterator.py
+    litellm/llms/anthropic/pass_through/adapters/transformation.py
+    litellm/llms/anthropic/pass_through/messages/handler.py
+    litellm/llms/anthropic/pass_through/messages/utils.py
+    litellm/llms/anthropic/pass_through/responses_adapters/transformation.py
+    litellm/llms/azure/image_edit/transformation.py
+    litellm/llms/azure_ai/agents/transformation.py
+    litellm/llms/azure_ai/anthropic/messages_transformation.py
+    litellm/llms/azure_ai/anthropic/transformation.py
+    litellm/llms/azure_ai/chat/transformation.py
+    litellm/llms/base_llm/anthropic_messages/transformation.py
+    litellm/llms/bedrock/chat/invoke_transformations/amazon_deepseek_transformation.py
+    litellm/llms/chatgpt/chat/streaming_utils.py
+    litellm/llms/custom_httpx/llm_http_handler.py
+    litellm/llms/dashscope/cost_calculator.py
+    litellm/llms/deepseek/chat/transformation.py
+    litellm/llms/deepseek/common_utils.py
+    litellm/llms/deepseek/messages/transformation.py
+    litellm/llms/fireworks_ai/chat/transformation.py
+    litellm/llms/openai/responses/transformation.py
+    litellm/llms/vertex_ai/gemini/vertex_and_google_ai_studio_gemini.py
+    litellm/main.py
+    litellm/model_prices_and_context_window_backup.json
+    litellm/proxy/_lazy_openapi_snapshot.json
+    litellm/proxy/anthropic_endpoints/endpoints.py
+    litellm/proxy/common_request_processing.py
+    litellm/proxy/common_utils/reset_budget_job.py
+    litellm/proxy/db/spend_counter_reseed.py
+    litellm/proxy/litellm_pre_call_utils.py
+    litellm/proxy/observability/__init__.py
+    litellm/proxy/observability/observability_endpoints.py
+    litellm/proxy/observability/routing_stats.py
+    litellm/proxy/pass_through_endpoints/llm_provider_handlers/anthropic_passthrough_logging_handler.py
+    litellm/proxy/proxy_server.py
+    litellm/proxy/public_endpoints/provider_create_fields.json
+    litellm/proxy/vector_store_endpoints/management_endpoints.py
+    litellm/realtime_api/main.py
+    litellm/repositories/verification_token_repository.py
+    litellm/rerank_api/main.py
+    litellm/responses/litellm_completion_transformation/custom_tools.py
+    litellm/responses/litellm_completion_transformation/streaming_iterator.py
+    litellm/responses/litellm_completion_transformation/transformation.py
+    litellm/responses/main.py
+    litellm/responses/utils.py
+    litellm/router.py
+    litellm/router_protocol.py
+    litellm/router_utils/pre_call_checks/deployment_affinity_check.py
+    litellm/router_utils/pre_call_checks/encrypted_content_affinity_check.py
+    litellm/skills/main.py
+    litellm/types/llms/openai.py
+    litellm/types/utils.py
+    litellm/utils.py
+    litellm/vector_store_files/main.py
+    litellm/vector_stores/main.py
+    litellm/videos/main.py
+    model_prices_and_context_window.json
+    tests/integration/spend/test_local_budget_generation.py
+    tests/integration/spend/test_local_budget_reset.py
+    tests/unit/caching/test_dual_cache.py
+    tests/unit/caching/test_redis_cache.py
+    tests/unit/completion_extras/litellm_responses_transformation/test_completion_extras_litellm_responses_transformation_transformation.py
+    tests/unit/litellm_core_utils/prompt_templates/test_litellm_core_utils_prompt_templates_factory.py
+    tests/unit/litellm_core_utils/test_litellm_logging.py
+    tests/unit/llms/anthropic/pass_through/adapters/test_anthropic_experimental_pass_through_adapters_transformation.py
+    tests/unit/llms/anthropic/pass_through/adapters/test_handler_output_config_passthrough.py
+    tests/unit/llms/anthropic/pass_through/adapters/test_streaming_iterator_combined_chunk.py
+    tests/unit/llms/anthropic/pass_through/messages/test_anthropic_experimental_pass_through_messages_handler.py
+    tests/unit/llms/anthropic/pass_through/messages/test_mcp_handler.py
+    tests/unit/llms/anthropic/pass_through/responses_adapters/test_responses_adapters_streaming_iterator.py
+    tests/unit/llms/anthropic/pass_through/responses_adapters/test_responses_adapters_transformation.py
+    tests/unit/llms/anthropic/test_anthropic_common_utils.py
+    tests/unit/llms/azure_ai/chat/test_azure_ai_transformation.py
+    tests/unit/llms/bedrock/chat/invoke_transformations/test_amazon_deepseek_transformation.py
+    tests/unit/llms/custom_httpx/test_llm_http_handler.py
+    tests/unit/llms/dashscope/test_dashscope_cost_calculator.py
+    tests/unit/llms/deepseek/chat/test_deepseek_chat_transformation.py
+    tests/unit/llms/deepseek/messages/test_deepseek_anthropic_messages_transformation.py
+    tests/unit/llms/fireworks_ai/chat/test_fireworks_ai_chat_transformation.py
+    tests/unit/llms/hosted_vllm/chat/test_hosted_vllm_chat_transformation.py
+    tests/unit/llms/openai/test_use_chat_completions_api_no_leak.py
+    tests/unit/proxy/common_utils/test_reset_budget_job.py
+    tests/unit/proxy/pass_through_endpoints/llm_provider_handlers/test_anthropic_passthrough_logging_handler.py
+    tests/unit/proxy/proxy_server/test_spend_counters.py
+    tests/unit/proxy/test_common_request_processing.py
+    tests/unit/proxy/test_litellm_pre_call_utils.py
+    tests/unit/proxy/test_proxy_utils.py
+    tests/unit/proxy/test_routing_stats.py
+    tests/unit/responses/litellm_completion_transformation/test_handler.py
+    tests/unit/responses/litellm_completion_transformation/test_litellm_completion_responses.py
+    tests/unit/responses/test_streaming_iterator.py
+    tests/unit/responses/test_v197_response_migration_regressions.py
+    tests/unit/router_utils/pre_call_checks/test_deployment_affinity_check.py
+    tests/unit/router_utils/pre_call_checks/test_encrypted_content_affinity_check.py
+    tests/unit/router_utils/test_fallback_event_handlers.py
+    tests/unit/router_utils/test_health_check_allowed_fails_integration.py
+    tests/unit/test_deepseek_model_metadata.py
+    tests/unit/test_router/test_router.py
+    tests/unit/test_router/test_router_aresponses_streaming_fallback.py
+    tests/unit/test_router/test_router_helper_utils.py
+    tests/unit/test_router_order_fallback.py
+    tests/unit/test_utils.py
+    tests/unit/utils/test_validate_tool_choice.py
+    ui/litellm-dashboard/src/app/layout.tsx
+    ui/litellm-dashboard/src/lib/http/schema.d.ts
+check: linting Python (make lint)
+make[2]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[3]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv sync --inexact --frozen --group proxy-dev --group e2e-dev
+Checked 210 packages in 3ms
+uv run --no-sync python scripts/prisma_generate_if_needed.py
+Prisma client already generated for litellm/proxy/schema.prisma (prisma 0.11.0); skipping prisma generate
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+cd litellm && uv run --no-sync python ../tests/documentation_tests/test_circular_imports.py && cd ..
+No LiteLLM type hints found.
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+75 files already formatted
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv run --no-sync python scripts/check_mcp_operation_boundary.py
+MCP operation boundary: passed
+cd litellm && uv run --no-sync ruff check . && cd ..
+All checks passed!
+uv run --no-sync ruff check --config ruff-tests.toml tests
+All checks passed!
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv run --no-sync python scripts/ruff_strict_gate.py --base "v1.106.0"
+OK: no strict rule grew past its merge-base count (base v1.106.0)
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+[from litellm import *] OK! no issues!
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv run --no-sync python scripts/test_quality_gate.py --base "v1.106.0"
+OK: no TQ rule grew past its merge-base count (base v1.106.0)
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv run --no-sync python scripts/type_discipline_gate.py --base "v1.106.0"
+OK: no LIT rule grew past its merge-base count (base v1.106.0)
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv run --no-sync basedpyright tests/e2e tests/e2e_harness
+0 errors, 0 warnings, 0 notes
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[4]: Entering directory '/home/allcam/projects/litellm-v1106-upgrade'
+uv run --no-sync python scripts/type_check_gate.py --base "v1.106.0"
+OK: every basedpyright rule is within its ceiling (114324 errors total, base 955bdaafa8b7)
+make[4]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[3]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+make[2]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'
+check: ruff format --check (scoped litellm files)
+75 files already formatted
+check: linting dashboard (prettier + eslint + lint budgets)
+npm notice run litellm-dashboard@0.1.0 npx
+npm notice run 'prettier' --check src/app/layout.tsx src/lib/http/schema.d.ts
+Checking formatting...
+All matched files use Prettier code style!
+npm notice run litellm-dashboard@0.1.0 npx
+npm notice run 'eslint' --no-warn-ignored --pass-on-unpruned-suppressions src/app/layout.tsx src/lib/http/schema.d.ts
+npm notice run litellm-dashboard@0.1.0 npx
+npm notice run 'eslint' . -f json -o /tmp/tmp.6rvjdjjCAg
+There are suppressions left that do not occur anymore. Consider re-running the command with `--prune-suppressions`.
+@typescript-eslint/no-explicit-any: 1433 | max: 2040 | target: 1500 | at target
+no-console: 12 | max: 12 | target: 0 | 0 of headroom
+complexity: 137 | max: 140 | target: 80 | 3 of headroom
+max-depth: 53 | max: 70 | target: 30 | 17 of headroom
+local/no-large-inline-object-arg: 550 | max: 551 | target: 300 | 1 of headroom
+local/no-long-condition-chain: 193 | max: 194 | target: 120 | 1 of headroom
+testing-library/no-container: 124 | max: 133 | target: 50 | 9 of headroom
+testing-library/no-node-access: 688 | max: 707 | target: 500 | 19 of headroom
+testing-library/prefer-screen-queries: 18 | max: 18 | target: 18 | at target
+check: checking the lazy OpenAPI snapshot and dashboard API types are in sync (npm run gen:api)
+Prisma client already generated for litellm/proxy/schema.prisma (prisma 0.11.0); skipping prisma generate
+wrote 37 feature fragments to /home/allcam/projects/litellm-v1106-upgrade/litellm/proxy/_lazy_openapi_snapshot.json
+npm notice run litellm-dashboard@0.1.0 gen:api
+npm notice run node scripts/gen-api-types.mjs
+✨ openapi-typescript 7.13.0
+🚀 /tmp/litellm-openapi-lqaWRh/openapi.json → /home/allcam/projects/litellm-v1106-upgrade/ui/litellm-dashboard/src/lib/http/schema.d.ts [2.8s]
+check: summary
+    ran:     Python lint (make lint)
+    skipped: tests/e2e checks (basedpyright + raw HTTP client ban) (no tests/e2e Python files in scope)
+    ran:     test-tree lint (ruff-tests.toml + test-quality gate)
+    ran:     dashboard lint (prettier + eslint + lint budgets)
+    ran:     dashboard API-type sync (npm run gen:api)
+check: PASS
+check: full log: /home/allcam/projects/litellm/.git/worktrees/litellm-v1106-upgrade/pre_commit_lint.log
+make[1]: Leaving directory '/home/allcam/projects/litellm-v1106-upgrade'

@@ -1,0 +1,87 @@
+{
+  "freeze": "7811a2dc41e9a14a121752268e093a194f458830",
+  "path": "litellm/llms/azure_ai/chat/transformation.py",
+  "declared_parameter": "litellm_params: dict",
+  "actual_after_call": "GenericLiteLLMParams.model_validate(dict(**(litellm_params if isinstance(litellm_params, dict) else {})))",
+  "dict_contract_cases": [
+    {
+      "case": 0,
+      "result_kind": "model",
+      "equivalent": true,
+      "input_unchanged": true
+    },
+    {
+      "case": 1,
+      "result_kind": "model",
+      "equivalent": true,
+      "input_unchanged": true
+    },
+    {
+      "case": 2,
+      "result_kind": "model",
+      "equivalent": true,
+      "input_unchanged": true
+    },
+    {
+      "case": 3,
+      "result_kind": "model",
+      "equivalent": true,
+      "input_unchanged": true
+    },
+    {
+      "case": 4,
+      "result_kind": "model",
+      "equivalent": true,
+      "input_unchanged": true
+    },
+    {
+      "case": 5,
+      "result_kind": "validation-error",
+      "equivalent": true,
+      "input_unchanged": true
+    },
+    {
+      "case": 6,
+      "result_kind": "validation-error",
+      "equivalent": true,
+      "input_unchanged": true
+    },
+    {
+      "case": 7,
+      "result_kind": "validation-error",
+      "equivalent": true,
+      "input_unchanged": true
+    }
+  ],
+  "legacy_non_dict_and_invalid_key_compatibility": [
+    {
+      "input_type": "NoneType",
+      "old_result": "model",
+      "new_result": "model",
+      "equivalent": true
+    },
+    {
+      "input_type": "list",
+      "old_result": "model",
+      "new_result": "model",
+      "equivalent": true
+    },
+    {
+      "input_type": "dict",
+      "old_result": "TypeError",
+      "new_result": "TypeError",
+      "equivalent": true
+    }
+  ],
+  "all_declared_dict_contract_cases_passed": true,
+  "network_or_provider_calls": false,
+  "final_source_equivalence": {
+    "executed_source_ref": "7811a2dc41e9a14a121752268e093a194f458830",
+    "final_source_ref": "efee6c541fe0add9e6fbf7f9fdab1d330b518185",
+    "only_change": "Azure validate_environment litellm_params parameter annotation dict -> object; old runtime isinstance guard and dict(**...) validation retained",
+    "runtime_ast_equal_after_one_annotation_normalization": true,
+    "changed_paths": [
+      "litellm/llms/azure_ai/chat/transformation.py"
+    ]
+  }
+}

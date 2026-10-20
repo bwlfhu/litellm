@@ -1,0 +1,91 @@
+{
+  "recorded_at_utc": "2026-10-20T20:00:17.730919+00:00",
+  "source_snapshot": "efee6c541fe0add9e6fbf7f9fdab1d330b518185",
+  "behavior_test_snapshot": "8433fae985165efd7631c96b2606bb2c98241e09",
+  "official_target": "955bdaafa8b72b2b6ff728048f272fbc06049f63",
+  "custom_source": "29532d2608410044f84ac202503a79a6cd60e693",
+  "merge_commit": "121f21de7766800d384cb4027383f7164f272503",
+  "quality_gate": {
+    "command": "BASE_REF=v1.106.0 UV_NO_INSTALL_PROJECT=1 make check",
+    "exit_code": 0,
+    "result": "PASS",
+    "log": "quality-gate.log",
+    "sha256": "0ab6d3f0394d5191e83e67ec1d0b2cc774641df5d86d68200a3b5561e8eed129",
+    "limits_changed": false
+  },
+  "tests": [
+    {
+      "xml": "regressions-acceptance.xml",
+      "tests": 6838,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "0e2085ba195b4fd3c13c5d7a250b2ad0d8ede400ca6c2589998c93bb8decd6e9"
+    },
+    {
+      "xml": "post-types-final.xml",
+      "tests": 2466,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "9e88578d60c436aae8fdced55ce5fbb8f51f1cd70b8a6ab33ebc1568f7b7c22d"
+    },
+    {
+      "xml": "budget-real-acceptance.xml",
+      "tests": 30,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "5db4f125a837f0a4f05091555c1adc9c56962b1680e2d5b7a42c79a7af4c1e95"
+    },
+    {
+      "xml": "azure-final.xml",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "8d043aae1e4d0f9b847e68db76996f100fcaf64e738dab679454c0fd86570226"
+    },
+    {
+      "xml": "review-protocol-final-boundaries.xml",
+      "tests": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "41070881f3936fa90020333e25f971d4d88316baf078d5a563df77fe705a1568"
+    }
+  ],
+  "counts_overlap_do_not_sum": true,
+  "final_runtime_delta_after_behavior_snapshot": "五文件仅规则注释位移；Azure恢复官方非dict兜底/kwargs非法key行为并扩大入参注解为object，官方29项及独立边界对照通过",
+  "unit_python": "3.13.14",
+  "typecheck_python": "3.12.13",
+  "ruff_target_python": "3.10",
+  "local_synthetic_services": {
+    "postgresql": "18.6",
+    "redis": "8.0.5",
+    "tests": 30,
+    "skipped": 0,
+    "stopped": true
+  },
+  "production_changed": false,
+  "traffic_capture_enabled": false,
+  "not_verified": [
+    "Rust源码构建",
+    "候选完整容器构建与运行源码一致性",
+    "完整生产数据库副本迁移与恢复演练",
+    "真实上游模型及DeepSeek Harness端到端验收",
+    "生产发布与观察窗口"
+  ],
+  "raw_evidence_directory": "/home/allcam/projects/litellm-v1106-evidence",
+  "manifest_final_hash_verification": {
+    "tracked_entries_checked": 110,
+    "result": "PASS",
+    "source_snapshot": "efee6c541fe0add9e6fbf7f9fdab1d330b518185",
+    "manifest_sha256": "3d3aafeae2be91d104e25e86b7f05faa7ce41ba2e616cb699c77d1b6904813be"
+  },
+  "independent_reviews": {
+    "protocol": "PASS",
+    "responses": "PASS",
+    "completeness": "PASS"
+  }
+}
