@@ -115,7 +115,7 @@ class GenerateContentHelper:
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         ## MOCK RESPONSE LOGIC (only for non-streaming)
         if (
@@ -329,7 +329,7 @@ def generate_content(
         if "generationConfig" in kwargs and config is None:
             config = kwargs.pop("generationConfig")
         # Check for mock response first
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         if litellm_params.mock_response and isinstance(litellm_params.mock_response, str):
             return GenerateContentHelper.mock_generate_content_response(mock_response=litellm_params.mock_response)
 

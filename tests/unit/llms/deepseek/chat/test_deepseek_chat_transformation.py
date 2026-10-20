@@ -9,7 +9,7 @@ import pytest
 import litellm
 from litellm.caching.llm_caching_handler import LLMClientCache
 from litellm.llms.deepseek.chat.transformation import DeepSeekChatConfig
-from litellm.router_protocol import _build_deployment_protocol_context
+from litellm.router_protocol import build_deployment_protocol_context
 from litellm.types.llms.openai import AllMessageValues
 
 
@@ -1314,7 +1314,7 @@ def test_v4_thinking_mode_can_be_disabled_explicitly():
 
 
 def test_thinking_mode_uses_deployment_placeholder_only_for_tool_history():
-    context = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "placeholder"})
+    context = build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "placeholder"})
     assert context is not None
     body = DeepSeekChatConfig().transform_request(
         model="deepseek-reasoner",
@@ -1336,7 +1336,7 @@ def test_thinking_mode_uses_deployment_placeholder_only_for_tool_history():
 
 @pytest.mark.parametrize("missing_reasoning", [None, "", "   "])
 def test_deployment_can_omit_missing_reasoning_without_changing_real_history(missing_reasoning: str | None) -> None:
-    context: Final = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "omit"})
+    context: Final = build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "omit"})
     assert context is not None
     assert context.missing_reasoning == "omit"
     messages: Final[list[AllMessageValues]] = [
@@ -1374,7 +1374,7 @@ def test_deployment_can_omit_missing_reasoning_without_changing_real_history(mis
 
 @pytest.mark.asyncio
 async def test_async_deployment_omit_policy_keeps_missing_reasoning_absent() -> None:
-    context: Final = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "omit"})
+    context: Final = build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "omit"})
     body: Final = await DeepSeekChatConfig().async_transform_request(
         model="deepseek-reasoner",
         messages=[{"role": "assistant", "content": None, "tool_calls": [_function_tool_call("shell")]}],
@@ -1388,7 +1388,7 @@ async def test_async_deployment_omit_policy_keeps_missing_reasoning_absent() -> 
 
 
 def test_deployment_error_policy_rejects_incomplete_reasoning_before_dispatch() -> None:
-    context: Final = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "error"})
+    context: Final = build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "error"})
     assert context is not None
     assert context.missing_reasoning == "error"
     with pytest.raises(litellm.BadRequestError, match="requires non-empty reasoning_content"):
@@ -1446,7 +1446,7 @@ def test_thinking_mode_promotes_provider_reasoning_without_serializing_internal_
 
 
 def test_thinking_mode_rejects_redacted_tool_history_even_with_placeholder_policy():
-    context = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "placeholder"})
+    context = build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "placeholder"})
     assert context is not None
     with pytest.raises(litellm.BadRequestError, match="cannot replay redacted thinking"):
         DeepSeekChatConfig().transform_request(
@@ -1620,7 +1620,7 @@ def test_placeholder_warning_is_aggregated_and_history_is_immutable(caplog):
 
 
 def test_deployment_tool_thinking_legacy_field_does_not_disable_thinking():
-    context = _build_deployment_protocol_context(
+    context = build_deployment_protocol_context(
         {
             "deepseek_anthropic_tool_thinking": "disabled",
         }

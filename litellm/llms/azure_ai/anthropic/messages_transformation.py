@@ -43,7 +43,7 @@ class AzureAnthropicMessagesConfig(AnthropicMessagesConfig):
         if isinstance(litellm_params, dict):
             if api_key and "api_key" not in litellm_params:
                 litellm_params = {**litellm_params, "api_key": api_key}
-            litellm_params_obj = GenericLiteLLMParams(**litellm_params)
+            litellm_params_obj = GenericLiteLLMParams.model_validate(dict(**litellm_params))
         else:
             litellm_params_obj = litellm_params or GenericLiteLLMParams()
             if api_key and not litellm_params_obj.api_key:

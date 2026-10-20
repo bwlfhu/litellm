@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
@@ -510,7 +511,7 @@ class AnthropicPassthroughLoggingHandler:
             log_anthropic_response_shape(
                 content=response_content,
                 stop_reason=response_stop_reason,
-                model=model if isinstance(model, str) else None,
+                model=model,
                 custom_llm_provider=response_provider if isinstance(response_provider, str) else None,
                 call_id=response_call_id if isinstance(response_call_id, str) else None,
                 stream=True,
@@ -544,43 +545,50 @@ class AnthropicPassthroughLoggingHandler:
     @staticmethod
     def _extract_response_shape_from_sse(
         all_chunks: Sequence[str | bytes],
-    ) -> tuple[tuple[dict[str, str], ...], str | None]:
+    ) -> tuple[tuple[Mapping[str, str], ...], str | None]:
+        raw_events: Final = chain.from_iterable(
+            AnthropicPassthroughLoggingHandler._split_sse_chunk_into_events(chunk) for chunk in all_chunks
+        )
+        matching_events: Final = (
+            event for event in raw_events if '"content_block_start"' in event or '"message_delta"' in event
+        )
         relevant_events: Final = tuple(
-            data
-            for chunk in all_chunks
-            for event in AnthropicPassthroughLoggingHandler._split_sse_chunk_into_events(chunk)
-            if '"content_block_start"' in event or '"message_delta"' in event
-            for data in (AnthropicPassthroughLoggingHandler._extract_response_shape_sse_data(event),)
-            if data is not None
+            filter(None, map(AnthropicPassthroughLoggingHandler._extract_response_shape_sse_data, matching_events))
         )
         content: Final = tuple(
-            {"type": block_type}
+            {"type": value}
             for event in relevant_events
-            for content_block in (event.get("content_block"),)
-            if event.get("type") == "content_block_start" and isinstance(content_block, dict)
-            for block_type in (
-                cast(  # cast-ok: guarded SSE content-block dict
-                    dict[str, object], content_block
-                ).get("type"),
+            if (
+                value := AnthropicPassthroughLoggingHandler._response_shape_field(
+                    event, "content_block_start", "content_block", "type"
+                )
             )
-            if isinstance(block_type, str)
+            is not None
         )
         stop_reasons: Final = tuple(
-            stop_reason
+            value
             for event in relevant_events
-            for delta in (event.get("delta"),)
-            if event.get("type") == "message_delta" and isinstance(delta, dict)
-            for stop_reason in (
-                cast(dict[str, object], delta).get(  # cast-ok: guarded SSE message-delta dict
-                    "stop_reason"
-                ),
+            if (
+                value := AnthropicPassthroughLoggingHandler._response_shape_field(
+                    event, "message_delta", "delta", "stop_reason"
+                )
             )
-            if isinstance(stop_reason, str)
+            is not None
         )
         return content, stop_reasons[-1] if stop_reasons else None
 
     @staticmethod
-    def _extract_response_shape_sse_data(event_str: str) -> dict[str, object] | None:
+    def _response_shape_field(event: Mapping[str, object], kind: str, container_key: str, field: str) -> str | None:
+        if event.get("type") != kind:
+            return None
+        container: Final = event.get(container_key)
+        if not isinstance(container, dict):
+            return None
+        value: Final = TypeAdapter(Mapping[str, object]).validate_python(container).get(field)
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _extract_response_shape_sse_data(event_str: str) -> Mapping[str, object] | None:
         """Parse one SSE object for redacted response-shape diagnostics."""
         for line in event_str.splitlines():
             stripped = line.strip()

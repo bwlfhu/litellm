@@ -18,7 +18,7 @@ from types import MappingProxyType, TracebackType
 from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple, cast
 
 from httpx import Response
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
 import litellm
 from litellm import _custom_logger_compatible_callbacks_literal
@@ -79,7 +79,12 @@ from litellm.litellm_core_utils.core_helpers import (
 )
 from litellm.litellm_core_utils.error_normalization import normalize_error
 from litellm.litellm_core_utils.get_litellm_params import get_litellm_params
-from litellm.litellm_core_utils.hidden_params import HIDDEN_PARAMS_ATTR, get_hidden_params, set_hidden_param
+from litellm.litellm_core_utils.hidden_params import (
+    HIDDEN_PARAMS_ATTR,
+    get_hidden_params,
+    set_hidden_param,
+    set_hidden_params,
+)
 from litellm.litellm_core_utils.internal_call_metadata import (
     MODEL_ACCESS_GROUP_METADATA_KEY,
     is_unbilled_non_inference_call,
@@ -915,16 +920,16 @@ class Logging(LiteLLMLoggingBaseClass):
         """
         if not hasattr(self, "litellm_params"):
             return None
-        model_info: Final = self.litellm_params.get("model_info", {}) or {}
-        model_id = model_info.get("id")
-        if model_id is not None:
-            return model_id
-        for key in ("litellm_metadata", "metadata"):
-            meta = self.litellm_params.get(key, {}) or {}
-            info = meta.get("model_info", {}) or {}
-            model_id = info.get("id")
-            if model_id is not None:
-                return model_id
+        params: Final = _pricing_mapping(self.litellm_params)
+        containers: Final = (
+            params,
+            _pricing_mapping(params.get("litellm_metadata")),
+            _pricing_mapping(params.get("metadata")),
+        )
+        for container in containers:
+            model_id = _pricing_mapping(container.get("model_info")).get("id")
+            if isinstance(model_id, (str, int)):
+                return str(model_id)
         return None
 
     def get_deployment_model_for_cost(self) -> str | None:
@@ -1021,7 +1026,7 @@ class Logging(LiteLLMLoggingBaseClass):
         """
         base_litellm_params: Final[dict[str, Any]] = {}
 
-        existing_model_info: Final = self.litellm_params.get("model_info")
+        existing_model_info: Final = _pricing_mapping(self.litellm_params).get("model_info")
         if isinstance(existing_model_info, dict):
             base_litellm_params["model_info"] = existing_model_info
         if isinstance(kwargs.get("model_info"), dict):
@@ -1883,23 +1888,24 @@ class Logging(LiteLLMLoggingBaseClass):
             else response_result
         )
 
-        result_hidden_params: Final = getattr(priced_result, HIDDEN_PARAMS_ATTR, None) or MappingProxyType({})
-        if isinstance(priced_result, (BaseModel, HttpxBinaryResponseContent)) and hasattr(
-            priced_result, "_hidden_params"
-        ):
-            hidden_params: Final = result_hidden_params
-            if (
-                "response_cost" in hidden_params and hidden_params["response_cost"] is not None
-            ):  # use cost if already calculated
-                self._record_zero_cost_diagnostic(
-                    priced_result,
-                    hidden_params["response_cost"],
-                    litellm_model_name=litellm_model_name,
-                    router_model_id=router_model_id or hidden_params.get("model_id"),
-                )
-                return hidden_params["response_cost"]
-            elif router_model_id is None and "model_id" in hidden_params:  # use model_id if not already set
-                router_model_id = hidden_params["model_id"]
+        result_hidden_params: Final = get_hidden_params(priced_result) or MappingProxyType[str, object]({})
+        hidden_cost: Final = result_hidden_params.get("response_cost")
+        hidden_model_id: Final = result_hidden_params.get("model_id")
+        if hidden_cost is not None:
+            precomputed_cost: Final = TypeAdapter(float).validate_python(hidden_cost)
+            self._record_zero_cost_diagnostic(
+                priced_result,
+                precomputed_cost,
+                litellm_model_name=litellm_model_name,
+                router_model_id=router_model_id or (str(hidden_model_id) if hidden_model_id is not None else None),
+            )
+            return precomputed_cost
+        if router_model_id is None and hidden_model_id is not None:
+            router_model_id = str(hidden_model_id)
+
+        provider_reported_cost: Final = _reported_responses_cost(priced_result)
+        if provider_reported_cost is not None:
+            return provider_reported_cost
 
         # Fallback: extract router_model_id from litellm_params when not available
         # from the result object. ResponsesAPIResponse objects (used by /v1/responses
@@ -2529,39 +2535,41 @@ class Logging(LiteLLMLoggingBaseClass):
 
     def _transform_usage_objects(self, result):
         if isinstance(result, ResponsesAPIResponse):
-            result = result.model_copy()
-            transformed_usage = ResponseAPILoggingUtils.transform_response_api_usage_to_chat_usage(result.usage)
-            setattr(result, "usage", transformed_usage)
-            if (standard_logging_payload := self.model_call_details.get("standard_logging_object")) is not None:
-                response_dict: Final = result.model_dump() if hasattr(result, "model_dump") else dict(result)
-                # Ensure usage is properly included with transformed chat format
-                if transformed_usage is not None:
-                    response_dict["usage"] = (
-                        transformed_usage.model_dump()
-                        if hasattr(transformed_usage, "model_dump")
-                        else dict(transformed_usage)
-                    )
-                standard_logging_payload["response"] = response_dict
-        elif isinstance(result, TranscriptionResponse):
+            transformed_usage: Final = ResponseAPILoggingUtils.transform_response_api_usage_to_chat_usage(result.usage)
+            normalized_result: Final = result.model_copy(update={"usage": transformed_usage})
+            if (payload := self.model_call_details.get("standard_logging_object")) is not None:
+                payload["response"] = {**normalized_result.model_dump(), "usage": transformed_usage.model_dump()}
+            return normalized_result
+        if isinstance(result, TranscriptionResponse) and result.usage is not None:
             from litellm.litellm_core_utils.llm_cost_calc.usage_object_transformation import (
                 TranscriptionUsageObjectTransformation,
             )
 
-            result = result.model_copy()
-            transformed_usage = TranscriptionUsageObjectTransformation.transform_transcription_usage_object(
+            normalized_usage: Final = TranscriptionUsageObjectTransformation.transform_transcription_usage_object(
                 result.usage
             )
-            setattr(result, "usage", transformed_usage)
+            return result.model_copy(update={"usage": normalized_usage})
         return result
 
     def _with_client_facing_stream_model(
         self,
-        response: ModelResponse | TextCompletionResponse | ResponsesAPIResponse | InteractionsAPIResponse,
-    ) -> ModelResponse | TextCompletionResponse | ResponsesAPIResponse | InteractionsAPIResponse:
+        response: ModelResponse
+        | TextCompletionResponse
+        | ResponsesAPIResponse
+        | InteractionsAPIResponse
+        | Mapping[str, object],
+    ) -> ModelResponse | TextCompletionResponse | ResponsesAPIResponse | InteractionsAPIResponse | Mapping[str, object]:
         model: Final = self.client_facing_stream_model
-        if model is None or response.model in (None, model):
+        if model is None:
             return response
-        return response.model_copy(update={"model": model})
+        response_model: Final = response.get("model") if isinstance(response, Mapping) else response.model
+        if response_model in (None, model):
+            return response
+        return (
+            {**response, "model": model}
+            if isinstance(response, Mapping)
+            else response.model_copy(update={"model": model})
+        )
 
     def _success_handler_helper_fn(
         self,
@@ -2854,7 +2862,12 @@ class Logging(LiteLLMLoggingBaseClass):
         try:
             ## BUILD COMPLETE STREAMED RESPONSE
             complete_streaming_response: (
-                ModelResponse | TextCompletionResponse | ResponsesAPIResponse | InteractionsAPIResponse | None
+                ModelResponse
+                | TextCompletionResponse
+                | ResponsesAPIResponse
+                | InteractionsAPIResponse
+                | Mapping[str, object]
+                | None
             ) = None
             if "complete_streaming_response" in self.model_call_details:
                 return  # break out of this.
@@ -3292,7 +3305,7 @@ class Logging(LiteLLMLoggingBaseClass):
         ## CALCULATE COST FOR BATCH JOBS
         if self.call_type == CallTypes.aretrieve_batch.value and isinstance(result, LiteLLMBatch):
             litellm_params = self.litellm_params or {}
-            litellm_metadata: Final = litellm_params.get("litellm_metadata") or {}
+            litellm_metadata: Final = _pricing_mapping(litellm_params.get("litellm_metadata"))
             if (
                 litellm_metadata.get("batch_ignore_default_logging", False) is True
             ):  # polling job will query these frequently, don't spam db logs
@@ -3372,7 +3385,12 @@ class Logging(LiteLLMLoggingBaseClass):
         if "async_complete_streaming_response" in self.model_call_details:
             return  # break out of this.
         complete_streaming_response: Final[
-            ModelResponse | TextCompletionResponse | ResponsesAPIResponse | InteractionsAPIResponse | None
+            ModelResponse
+            | TextCompletionResponse
+            | ResponsesAPIResponse
+            | InteractionsAPIResponse
+            | Mapping[str, object]
+            | None
         ] = self._get_assembled_streaming_response(
             result=result,
             start_time=start_time,
@@ -4179,13 +4197,13 @@ class Logging(LiteLLMLoggingBaseClass):
         start_time: datetime.datetime,
         end_time: datetime.datetime,
         is_async: bool,
-        streaming_chunks: list[object],
+        streaming_chunks: Sequence[object],
     ) -> (
         ModelResponse
         | TextCompletionResponse
         | ResponsesAPIResponse
         | InteractionsAPIResponse
-        | dict[str, object]
+        | Mapping[str, object]
         | None
     ):
         if self.stream is not True:
@@ -4196,49 +4214,49 @@ class Logging(LiteLLMLoggingBaseClass):
             result,
             (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent),
         ):
-            if isinstance(result.response, dict):
-                response = dict(result.response)
-            elif isinstance(result.response, BaseModel):
-                response = result.response.model_copy()
-            else:
-                response = copy.copy(result.response)
-            usage: Final = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            raw_response: Final[object] = result.response
+            response: Final = (
+                dict(_PRICING_MAPPING_ADAPTER.validate_python(raw_response))
+                if isinstance(raw_response, Mapping)
+                else result.response.model_copy()
+            )
+            usage: Final[object] = (
+                response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            )
             original_hidden: Final = get_hidden_params(response)
             if original_hidden is not None:
-                setattr(response, "_hidden_params", dict(original_hidden)) if not isinstance(
-                    response, dict
-                ) else response.update({"_hidden_params": dict(original_hidden)})
-            reported_cost: Final = usage.get("cost") if isinstance(usage, Mapping) else getattr(usage, "cost", None)
+                set_hidden_params(response, dict(original_hidden))
+            usage_mapping: Final = (
+                _PRICING_MAPPING_ADAPTER.validate_python(usage) if isinstance(usage, Mapping) else None
+            )
+            reported_cost: Final[object] = (
+                usage_mapping.get("cost") if usage_mapping is not None else getattr(usage, "cost", None)
+            )
             if isinstance(reported_cost, (int, float)):
-                headers: Final = (original_hidden or {}).get("additional_headers")
+                headers: Final = original_hidden.get("additional_headers") if original_hidden is not None else None
                 set_hidden_param(
                     response,
                     "additional_headers",
                     {
-                        **(headers if isinstance(headers, Mapping) else {}),
+                        **(_PRICING_MAPPING_ADAPTER.validate_python(headers) if isinstance(headers, Mapping) else {}),
                         RESPONSE_COST_HEADER: reported_cost,
                     },
                 )
-            normalized_usage: Final = ResponseAPILoggingUtils._coerce_response_api_usage(usage)
-            if normalized_usage is not None:
-                transformed_usage: Final = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
-                    normalized_usage
-                )
-                serialized_usage = (
-                    transformed_usage.model_dump()
-                    if hasattr(transformed_usage, "model_dump")
-                    else dict(transformed_usage)
-                )
-            elif usage is not None:
-                serialized_usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0).model_dump()
-            else:
-                serialized_usage = None
-            if serialized_usage is not None:
-                if isinstance(response, dict):
-                    response["usage"] = serialized_usage
-                else:
-                    setattr(response, "usage", serialized_usage)
-            return response
+            normalized_usage: Final = ResponseAPILoggingUtils.coerce_response_api_usage(usage)
+            serialized_usage: Final = (
+                ResponseAPILoggingUtils.transform_response_api_usage_to_chat_usage(normalized_usage).model_dump()
+                if normalized_usage is not None
+                else Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0).model_dump()
+                if usage is not None
+                else None
+            )
+            if serialized_usage is None:
+                return response
+            return (
+                {**response, "usage": serialized_usage}
+                if isinstance(response, dict)
+                else response.model_copy(update={"usage": serialized_usage})
+            )
         elif isinstance(result, InteractionsAPIStreamingResponse):
             return self._assemble_completed_interaction_response(result)
         else:
@@ -4340,13 +4358,14 @@ class Logging(LiteLLMLoggingBaseClass):
             if isinstance(result, Mapping):
                 from litellm.utils import log_anthropic_response_shape
 
+                response_fields: Final = _PRICING_MAPPING_ADAPTER.validate_python(result)
                 log_anthropic_response_shape(
-                    content=result.get("content"),
-                    stop_reason=result.get("stop_reason"),
+                    content=response_fields.get("content"),
+                    stop_reason=response_fields.get("stop_reason"),
                     model=self.model,
                     custom_llm_provider=self.model_call_details.get("custom_llm_provider"),
                     call_id=self.litellm_call_id,
-                    stream=self.stream,
+                    stream=self.stream is True,
                 )
             pydantic_result: Final = AnthropicResponse.model_validate(result)
             import httpx
@@ -4402,10 +4421,8 @@ class Logging(LiteLLMLoggingBaseClass):
             model_response.model = self.model
             usage: Final = getattr(result, "usage", None)
             if usage is not None and ResponseAPILoggingUtils.is_response_api_usage(usage):
-                setattr(
-                    model_response,
-                    "usage",
-                    ResponseAPILoggingUtils.transform_response_api_usage_to_chat_usage(usage),
+                return model_response.model_copy(
+                    update={"usage": ResponseAPILoggingUtils.transform_response_api_usage_to_chat_usage(usage)}
                 )
             return model_response
 
@@ -5717,60 +5734,75 @@ def _deployment_model_info(litellm_params: dict | None) -> Mapping[str, object]:
     return MappingProxyType({})
 
 
-def use_custom_pricing_for_model(litellm_params: dict | None) -> bool:
-    """
-    Check if the model uses custom pricing
-
-    Returns True if any custom pricing field is present in `litellm_params`, or if
-    any custom pricing or deployment-scoped pricing field (such as
-    ``off_peak_pricing``) is present in the metadata ``model_info``
-    """
+def use_custom_pricing_for_model(litellm_params: Mapping[str, object] | None) -> bool:
     if litellm_params is None:
         return False
+    model_info: Final = _pricing_mapping(litellm_params.get("model_info"))
+    if any(litellm_params.get(key) is not None for key in _CUSTOM_PRICING_KEYS):
+        return True
+    if any(model_info.get(key) is not None for key in _CUSTOM_PRICING_KEYS):
+        return True
+    return any(_metadata_has_custom_pricing(litellm_params.get(key)) for key in ("metadata", "litellm_metadata"))
 
-    # Check litellm_params using set intersection (only check keys that exist in both)
-    matching_keys = _CUSTOM_PRICING_KEYS & litellm_params.keys()
-    for key in matching_keys:
-        if litellm_params.get(key) is not None:
-            return True
 
-    model_info: dict = litellm_params.get("model_info", {}) or {}
-    matching_keys = _CUSTOM_PRICING_KEYS & model_info.keys()
-    for key in matching_keys:
-        if model_info.get(key) is not None:
-            return True
+def _metadata_has_custom_pricing(metadata: object) -> bool:
+    info: Final = _pricing_mapping(_pricing_mapping(metadata).get("model_info"))
+    return any(info.get(key) is not None for key in _MODEL_INFO_CUSTOM_PRICING_KEYS)
 
-    # Check model_info from metadata or litellm_metadata (generic_api_call routes
-    # like /responses and /messages store model_info under litellm_metadata)
-    for metadata_key in ("metadata", "litellm_metadata"):
-        metadata: dict = litellm_params.get(metadata_key, {}) or {}
-        model_info = metadata.get("model_info", {}) or {}
 
-        if model_info:
-            matching_keys = _MODEL_INFO_CUSTOM_PRICING_KEYS & model_info.keys()
-            for key in matching_keys:
-                if model_info.get(key) is not None:
-                    return True
+_PRICING_MAPPING_ADAPTER: Final = TypeAdapter(Mapping[str, object])
 
-    return False
+
+def _pricing_mapping(value: object) -> Mapping[str, object]:
+    return (
+        _PRICING_MAPPING_ADAPTER.validate_python(value.model_dump())
+        if isinstance(value, BaseModel)
+        else _PRICING_MAPPING_ADAPTER.validate_python(value)
+        if isinstance(value, Mapping)
+        else MappingProxyType[str, object]({})
+    )
+
+
+def _reported_responses_cost(response: object) -> float | None:
+    hidden: Final = get_hidden_params(response)
+    headers_value: Final = hidden.get("additional_headers") if hidden is not None else None
+    headers: Final = (
+        _PRICING_MAPPING_ADAPTER.validate_python(headers_value) if isinstance(headers_value, Mapping) else None
+    )
+    header_cost: Final = headers.get(RESPONSE_COST_HEADER) if headers is not None else None
+    if isinstance(header_cost, (int, float, str)):
+        return float(header_cost)
+    usage: Final[object] = (
+        response.usage
+        if isinstance(response, ResponsesAPIResponse)
+        else _PRICING_MAPPING_ADAPTER.validate_python(response).get("usage")
+        if isinstance(response, Mapping)
+        else None
+    )
+    if isinstance(usage, ResponseAPIUsage):
+        return usage.cost
+    usage_mapping: Final = _PRICING_MAPPING_ADAPTER.validate_python(usage) if isinstance(usage, Mapping) else None
+    cost: Final = usage_mapping.get("cost") if usage_mapping is not None else None
+    return float(cost) if isinstance(cost, (int, float)) else None
 
 
 def get_custom_pricing_provider(
-    litellm_params: dict | None,
+    litellm_params: Mapping[str, object] | None,
     custom_llm_provider: str | None,
 ) -> str | None:
     if litellm_params is None:
         return custom_llm_provider
-
-    for model_info in (
-        litellm_params.get("model_info", {}) or {},
-        (litellm_params.get("metadata", {}) or {}).get("model_info", {}) or {},
-        (litellm_params.get("litellm_metadata", {}) or {}).get("model_info", {}) or {},
-    ):
-        pricing_provider = model_info.get("litellm_provider") if isinstance(model_info, dict) else None
-        if isinstance(pricing_provider, str):
-            return pricing_provider
-
+    for raw in (litellm_params, litellm_params.get("metadata"), litellm_params.get("litellm_metadata")):
+        if not isinstance(raw, Mapping):
+            continue
+        container = _PRICING_MAPPING_ADAPTER.validate_python(raw)
+        model_info_value = container.get("model_info")
+        if not isinstance(model_info_value, Mapping):
+            continue
+        model_info = _PRICING_MAPPING_ADAPTER.validate_python(model_info_value)
+        provider = model_info.get("litellm_provider")
+        if isinstance(provider, str):
+            return provider
     return custom_llm_provider
 
 

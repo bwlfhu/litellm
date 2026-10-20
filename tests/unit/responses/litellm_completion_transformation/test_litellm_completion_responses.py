@@ -5454,7 +5454,6 @@ def test_code_interpreter_done_and_terminal_snapshot_have_one_stable_item():
         responses_api_request={},
     )
     call = {"id": "call-code", "type": "function", "function": {"name": "python", "arguments": "{}"}}
-    iterator._queue_tool_call_delta_events([{"index": 0, **call}])
     response = ModelResponse(
         choices=[
             {
@@ -5485,6 +5484,7 @@ def test_code_interpreter_done_and_terminal_snapshot_have_one_stable_item():
     assert done[0].model_dump(exclude_none=True) == terminal.response.output[0].model_dump(exclude_none=True)
     added = next(e for e in iterator._pending_tool_events if e.type == "response.output_item.added")
     assert done[0].id == added.item.id
+    assert added.item.type == done[0].type
 
 
 def test_namespace_sdk_sequences_and_mapping_schemas_roundtrip():
@@ -5518,3 +5518,50 @@ def test_namespace_sdk_sequences_and_mapping_schemas_roundtrip():
         "sdk",
         "function",
     )
+
+
+@pytest.mark.parametrize("text_first", [False, True])
+@pytest.mark.parametrize("server_tool", ["bash_code_execution", "web_search"])
+def test_native_server_tools_keep_their_type_and_output_index_through_terminal_snapshot(text_first, server_tool):
+    from litellm.llms.anthropic.chat.handler import ModelResponseIterator
+    from litellm.responses.litellm_completion_transformation.streaming_iterator import LiteLLMCompletionStreamingIterator
+    tool_start = {"type": "content_block_start", "index": 0, "content_block": {
+        "type": "server_tool_use", "id": "server-call", "name": server_tool,
+        "input": {"command": "echo synthetic"} if server_tool == "bash_code_execution" else {"query": "synthetic"},
+    }}
+    result = {"type": "content_block_start", "index": 1, "content_block": {
+        "type": "bash_code_execution_tool_result" if server_tool == "bash_code_execution" else "web_search_tool_result",
+        "tool_use_id": "server-call", "content": {
+            "type": "bash_code_execution_result", "stdout": "synthetic\n", "stderr": "", "return_code": 0,
+        } if server_tool == "bash_code_execution" else [],
+    }}
+    text = [{"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": ""}}, {
+        "type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "Synthetic answer"},
+    }, {"type": "content_block_stop", "index": 2}]
+    tools = [tool_start, {"type": "content_block_stop", "index": 0}, result, {"type": "content_block_stop", "index": 1}]
+    upstream = (text + tools if text_first else tools + text) + [{
+        "type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5},
+    }]
+    parser = ModelResponseIterator(None, sync_stream=True)
+    chunks = [parser.chunk_parser(chunk).model_copy(update={"id": "native-step"}) for chunk in upstream]
+    wrapper = MagicMock(spec=litellm.CustomStreamWrapper)
+    wrapper.logging_obj = None
+    wrapper.__next__.side_effect = iter(chunks)
+    stream = LiteLLMCompletionStreamingIterator(
+        model="test", litellm_custom_stream_wrapper=wrapper, request_input="synthetic", responses_api_request={},
+    )
+    events = list(stream)
+    terminal = events[-1].response.output
+    expected = "code_interpreter_call" if server_tool == "bash_code_execution" else "web_search_call"
+    added = [event for event in events if event.type == "response.output_item.added"]
+    done = [event for event in events if event.type == "response.output_item.done"]
+    assert len(added) == len(done) == len(terminal) == 2
+    assert [event.item.type for event in added] == (["message", expected] if text_first else [expected, "message"])
+    for event in added + done:
+        item = terminal[event.output_index]
+        assert (item.id, item.type) == (event.item.id, event.item.type)
+    assert not any(event.type == "response.function_call_arguments.delta" for event in events)
+    server_item = next(item for item in terminal if item.type == expected)
+    if expected == "code_interpreter_call":
+        assert server_item.code == "echo synthetic"
+        assert "synthetic" in server_item.outputs[0]["logs"]

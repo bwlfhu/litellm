@@ -126,8 +126,8 @@ def test_sync_fallback_hoists_additional_tools_input_items_into_chat_tools():
 
     assert [message["role"] for message in captured["messages"]] == ["user"]
     functions_by_name = {tool["function"]["name"]: tool["function"] for tool in captured["tools"]}
-    assert set(functions_by_name) == {"exec", "functions__wait"}
-    assert set(functions_by_name["exec"]["parameters"]["properties"]) == {"content"}
+    assert set(functions_by_name) == {"functions__exec", "functions__wait"}
+    assert set(functions_by_name["functions__exec"]["parameters"]["properties"]) == {"content"}
 
 
 @pytest.mark.asyncio

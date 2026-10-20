@@ -20,7 +20,7 @@ import litellm.types.llms
 from litellm import verbose_logger
 from litellm._uuid import uuid
 from litellm.constants import REDACTED_BY_LITELLM
-from litellm.litellm_core_utils.prompt_templates.mid_conversation_system import anthropic_system_messages
+from litellm.litellm_core_utils.prompt_templates.mid_conversation_system import anthropic_system_messages, message_field
 from litellm.litellm_core_utils.url_utils import async_safe_get, safe_get
 from litellm.llms.custom_httpx.http_handler import HTTPHandler, get_async_httpx_client
 from litellm.types.files import get_file_extension_from_mime_type
@@ -2767,12 +2767,15 @@ def anthropic_messages_pt(
                         isinstance(_item, dict)
                         and (
                             (
-                                _item.get("type") == "thinking"
+                                not preserve_unsigned_thinking_blocks
+                                and _item.get("type") in ("thinking", "redacted_thinking")
+                            )
+                            or (
+                                preserve_unsigned_thinking_blocks
+                                and _item.get("type") == "thinking"
                                 and isinstance(_thinking_text := _item.get("thinking"), str)
                                 and bool(_thinking_text.strip())
-                                and (preserve_unsigned_thinking_blocks or not is_unsignable_thinking_block(_item))
                             )
-                            or (not preserve_unsigned_thinking_blocks and _item.get("type") == "redacted_thinking")
                         )
                         for _item in _content_list
                     )
@@ -2790,7 +2793,7 @@ def anthropic_messages_pt(
                         thinking_block = m.get("thinking", "")
                         text_block = cast(str, m.get("text", ""))
                         if (
-                            m.get("type", "") == "thinking"
+                            (message_type := message_field(m, "type")) == "thinking"
                             and isinstance(thinking_block, str)
                             and bool(thinking_block.strip())
                             and (preserve_unsigned_thinking_blocks or not is_unsignable_thinking_block(m))
@@ -2801,7 +2804,7 @@ def anthropic_messages_pt(
                             assistant_content.append(anthropic_message)
                         # handle text
                         elif (
-                            m.get("type", "") == "text" and len(text_block) > 0
+                            message_type == "text" and len(text_block) > 0
                         ):  # don't pass empty text blocks. anthropic api raises errors.
                             anthropic_message = AnthropicMessagesTextParam(type="text", text=text_block)
                             _cached_message = add_cache_control_to_content(
@@ -2810,21 +2813,21 @@ def anthropic_messages_pt(
                             )
 
                             assistant_content.append(cast(AnthropicMessagesTextParam, _cached_message))
-                        elif not preserve_unsigned_thinking_blocks and m.get("type", "") == "redacted_thinking":
-                            assistant_content.append(cast(ChatCompletionRedactedThinkingBlock, m))
                         # handle server_tool_use blocks (tool search, web search, etc.)
                         # Pass through as-is since these are Anthropic-native content types
-                        elif m.get("type", "") == "server_tool_use" or m.get("type", "").endswith("_tool_result"):
-                            item_id = m.get("id")
+                        elif message_type == "server_tool_use" or (
+                            isinstance(message_type, str) and message_type.endswith("_tool_result")
+                        ):
+                            item_id = message_field(m, "id")
                             if isinstance(item_id, str) and item_id in unique_tool_ids:
                                 continue
                             if isinstance(item_id, str):
                                 unique_tool_ids.add(item_id)
                             assistant_content.append(m)
-                        elif preserve_unsigned_thinking_blocks and m.get("type", "") == "tool_use":
-                            item_id = m.get("id")
-                            name = m.get("name")
-                            tool_input = m.get("input")
+                        elif preserve_unsigned_thinking_blocks and message_type == "tool_use":
+                            item_id = message_field(m, "id")
+                            name = message_field(m, "name")
+                            tool_input = message_field(m, "input")
                             if (
                                 not isinstance(item_id, str)
                                 or not isinstance(name, str)

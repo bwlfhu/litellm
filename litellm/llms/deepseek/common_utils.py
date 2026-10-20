@@ -1,11 +1,25 @@
 from collections.abc import Mapping, Sequence
 from typing import Final
 
+from pydantic import TypeAdapter
+
 import litellm
+
+_MAPPING_ADAPTER: Final = TypeAdapter(Mapping[str, object])
+_SEQUENCE_ADAPTER: Final = TypeAdapter(Sequence[object])
+
+
+def deepseek_mapping(value: object) -> Mapping[str, object] | None:
+    return _MAPPING_ADAPTER.validate_python(value) if isinstance(value, Mapping) else None
+
+
+def deepseek_sequence(value: object) -> Sequence[object]:
+    return _SEQUENCE_ADAPTER.validate_python(value) if isinstance(value, list) else ()
 
 
 def _is_reasoning_placeholder_block(block: object) -> bool:
-    return isinstance(block, Mapping) and block.get("type") == "thinking" and block.get("thinking") == " "
+    mapping: Final = deepseek_mapping(block)
+    return mapping is not None and mapping.get("type") == "thinking" and mapping.get("thinking") == " "
 
 
 def _has_reasoning_placeholder(message: Mapping[str, object]) -> bool:
@@ -15,10 +29,7 @@ def _has_reasoning_placeholder(message: Mapping[str, object]) -> bool:
         return True
     return any(
         _is_reasoning_placeholder_block(block)
-        for field in ("content", "thinking_blocks")
-        for blocks in (message.get(field),)
-        if isinstance(blocks, list)
-        for block in blocks
+        for block in (*deepseek_sequence(message.get("content")), *deepseek_sequence(message.get("thinking_blocks")))
     )
 
 

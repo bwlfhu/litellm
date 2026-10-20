@@ -16,7 +16,7 @@ logic.
 """
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from types import MappingProxyType
 from typing import Final
 
@@ -74,7 +74,7 @@ def extract_custom_tool_names(tools: Sequence[object] | None) -> set[str]:
     return {name for tool in (*top_level, *nested) if (name := _custom_tool_name_of(tool)) is not None}
 
 
-def is_custom_tool_call(tool_name: str, custom_tool_names: set[str]) -> bool:
+def is_custom_tool_call(tool_name: str, custom_tool_names: Set[str]) -> bool:
     """Check if a tool call name corresponds to a custom tool."""
     return tool_name in custom_tool_names
 
@@ -121,8 +121,8 @@ def build_tool_call_item_kwargs(
     name: str,
     arguments_or_input: str,
     status: str,
-    custom_tool_names: set[str],
-) -> dict[str, str]:
+    custom_tool_names: Set[str],
+) -> dict[str, object]:  # mutable-ok: stream assembly enriches this local payload before serialization
     """Build kwargs for an output item dict that is either a ``function_call``
     or a ``custom_tool_call`` depending on whether *name* is in
     *custom_tool_names*.
@@ -135,7 +135,7 @@ def build_tool_call_item_kwargs(
     """
     custom: Final = is_custom_tool_call(name, custom_tool_names)
     item_type: Final = "custom_tool_call" if custom else "function_call"
-    kwargs: Final[dict[str, str]] = {
+    kwargs: Final[dict[str, object]] = {  # mutable-ok: populate the function or custom input variant before returning
         "type": item_type,
         "id": openai_shaped_tool_call_item_id(item_type, call_id),
         "call_id": call_id,

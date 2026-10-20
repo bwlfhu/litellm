@@ -330,7 +330,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     cache_creation_input_token_cost_above_200k_tokens_batches: ReadOnly[float | None]
     cache_creation_input_token_cost_above_100k_tokens_batches: ReadOnly[float | None]
     cache_creation_input_token_cost_above_272k_tokens_batches: ReadOnly[float | None]
-    cache_read_input_token_cost_thinking: float | None
+    cache_read_input_token_cost_thinking: ReadOnly[float | None]
     # Smallest prefix this model will actually cache, whatever caching mechanism its provider uses.
     # Absent means the provider-agnostic default applies; see MINIMUM_PROMPT_CACHE_TOKEN_COUNT.
     prompt_cache_min_tokens: int | None
@@ -346,7 +346,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     input_cost_per_token_above_272k_tokens_flex: float | None
     input_cost_per_token_above_272k_tokens_ultrafast: ReadOnly[float | None]
     input_cost_per_token_above_512k_tokens: float | None  # MiniMax-M3: prompts >512K priced at 2x input
-    input_cost_per_token_thinking: float | None
+    input_cost_per_token_thinking: ReadOnly[float | None]
     input_cost_per_character_above_128k_tokens: float | None  # only for vertex ai models
     input_cost_per_query: float | None  # per-request pricing: rerank, search, and Bedrock Marengo embeddings
     input_cost_per_image: float | None  # only for vertex ai models
@@ -402,7 +402,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     output_cost_per_reasoning_token: float | None
     output_cost_per_reasoning_token_flex: float | None
     output_cost_per_reasoning_token_priority: float | None
-    output_cost_per_token_thinking: float | None
+    output_cost_per_token_thinking: ReadOnly[float | None]
     output_cost_per_video_per_second: float | None  # only for vertex ai models
     output_cost_per_audio_per_second: float | None  # only for vertex ai models
     output_cost_per_second: float | None  # for OpenAI Speech models

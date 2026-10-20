@@ -173,7 +173,7 @@ def create_file(
     """
     try:
         _is_async: Final = kwargs.pop("acreate_file", False) is True
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         litellm_params_dict: Final = dict(**kwargs)
         logging_obj: Final = cast(LiteLLMLoggingObj | None, kwargs.get("litellm_logging_obj"))
         if logging_obj is None:
@@ -347,7 +347,7 @@ def file_retrieve(
     LiteLLM Equivalent of POST: POST https://api.openai.com/v1/files
     """
     try:
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         ### TIMEOUT LOGIC ###
         timeout = optional_params.timeout or kwargs.get("request_timeout", 600) or 600
         # set timeout for 10 minutes by default
@@ -524,7 +524,7 @@ def file_delete(
                 _, custom_llm_provider, _, _ = get_llm_provider(model, custom_llm_provider)
         except Exception:
             pass
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         litellm_params_dict: Final = get_litellm_params(**kwargs)
         add_trusted_model_credentials_to_litellm_params(
             litellm_params_dict=litellm_params_dict,
@@ -692,7 +692,7 @@ def file_list(
     LiteLLM Equivalent of GET https://api.openai.com/v1/files
     """
     try:
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         ### TIMEOUT LOGIC ###
         timeout = optional_params.timeout or kwargs.get("request_timeout", 600) or 600
         # set timeout for 10 minutes by default
@@ -868,7 +868,7 @@ def file_content(
     LiteLLM Equivalent of POST: POST https://api.openai.com/v1/files
     """
     try:
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         litellm_params_dict: Final = get_litellm_params(**kwargs)
         add_trusted_model_credentials_to_litellm_params(
             litellm_params_dict=litellm_params_dict,

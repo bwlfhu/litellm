@@ -12018,6 +12018,7 @@ def test_stream_logging_preserves_reported_cost_without_mutating_terminal_event(
     if as_dict:
         event = event.model_copy(update={"response": event.response.model_dump()})
     before = copy.deepcopy(event.response)
+    assert _responses_stream_logging_obj().response_cost_calculator(result=event) == 0.0042
     now = datetime.datetime.now()
     assembled = _responses_stream_logging_obj()._get_assembled_streaming_response(
         result=event,
@@ -12031,4 +12032,32 @@ def test_stream_logging_preserves_reported_cost_without_mutating_terminal_event(
 
     assert get_hidden_params(assembled)["additional_headers"][RESPONSE_COST_HEADER] == 0.0042
     assert event.response == before
+    assert _responses_stream_logging_obj().response_cost_calculator(result=assembled) == 0.0042
     assert assembled is not event.response
+
+
+@pytest.mark.parametrize("as_dict", [False, True])
+@pytest.mark.parametrize("calculated_cost", [0.0, 0.125])
+def test_calculated_response_cost_precedes_reported_provider_cost(as_dict, calculated_cost):
+    from litellm.litellm_core_utils.hidden_params import set_hidden_param
+    event = _completed_responses_event(ResponseAPIUsage(input_tokens=12, output_tokens=2, total_tokens=14, cost=0.0042))
+    if as_dict:
+        event = event.model_copy(update={"response": event.response.model_dump()})
+    set_hidden_param(event.response, "response_cost", calculated_cost)
+    logging = _responses_stream_logging_obj()
+    assert logging.response_cost_calculator(result=event) == calculated_cost
+    now = datetime.datetime.now()
+    assembled = logging._get_assembled_streaming_response(
+        result=event, start_time=now, end_time=now, is_async=True, streaming_chunks=[],
+    )
+    assert logging.response_cost_calculator(result=assembled) == calculated_cost
+
+
+def test_with_client_facing_stream_model_preserves_dict_terminal_response(logging_obj):
+    response = {"id": "resp_provider", "model": "provider-model", "usage": {"input_tokens": 29, "cost": 0.0042}}
+    before = copy.deepcopy(response)
+    logging_obj.client_facing_stream_model = "public-model"
+    logged = logging_obj._with_client_facing_stream_model(response)
+    assert logged == {**before, "model": "public-model"}
+    assert logged is not response
+    assert response == before

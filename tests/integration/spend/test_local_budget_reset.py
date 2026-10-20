@@ -182,7 +182,7 @@ async def test_key_budget_reset_db_commit_then_redis_expiry_and_reseed_preserves
         client: Final = cache.init_async_client()
         namespaced: Final = cache.check_and_fix_namespace(key)
         await client.pexpire(namespaced, 1)
-        await client.pexpire(cache._spend_counter_generation_key(namespaced), 1)
+        await client.pexpire(cache.spend_counter_generation_key(namespaced), 1)
         await asyncio.sleep(0.02)
         assert await cache.async_get_cache(key=key) is None
         await cache.async_set_cache(key=key, value=await primary.spend(), nx=True, ttl=60)
@@ -375,7 +375,7 @@ async def test_key_budget_reset_counter_expiry_after_snapshot_blocks_late_old_wi
     redis: Final = cache.init_async_client()
     namespaced: Final = cache.check_and_fix_namespace(key)
     await redis.pexpire(namespaced, 1)
-    await redis.pexpire(cache._spend_counter_generation_key(namespaced), 1)
+    await redis.pexpire(cache.spend_counter_generation_key(namespaced), 1)
     await asyncio.sleep(0.02)
     seed_task: Final = asyncio.create_task(
         SpendCounterReseed.coalesced(

@@ -182,10 +182,11 @@ def test_combine_responses_fallback_usage_supports_dict_response():
 
 def test_combine_responses_fallback_usage_passthrough_for_unknown_event():
     """Events that are not completed/failed/incomplete are not mutated."""
-    other = MagicMock()  # not a ResponseCompletedEvent etc. → isinstance false
+    other = {"type": "response.output_text.delta", "delta": "partial"}
     partial = ResponseAPIUsage(input_tokens=1, output_tokens=1, total_tokens=2)
+    before = dict(other)
     Router._combine_responses_fallback_usage(other, partial)
-    # No mutation expected on the unknown event — call is a no-op.
+    assert other == before
 
 
 # -------- _build_responses_continuation_input --------

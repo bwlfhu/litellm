@@ -81,7 +81,7 @@ def create_sync_endpoint_function(endpoint_config: dict) -> Callable:
                 return mock_response
 
             # Get provider config
-            litellm_params = GenericLiteLLMParams(**kwargs)
+            litellm_params = GenericLiteLLMParams.model_validate(dict(**kwargs))
             # Strip LiteLLM-managed container IDs before calling the provider API
             # (OpenAI enforces max length 64 on container_id).
             if "container_id" in kwargs and isinstance(kwargs["container_id"], str):

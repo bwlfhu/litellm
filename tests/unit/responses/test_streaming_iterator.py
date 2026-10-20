@@ -1053,9 +1053,7 @@ def _unvalidated_completed_config() -> Mock:
 
 @pytest.mark.asyncio
 async def test_streaming_logging_copy_keeps_client_usage_when_response_fails_validation():
-    """LIT-7391: the logging copy cannot round-trip a response that fails validation, and logging
-    rewrites the assembled response's usage to chat shape in place, so the event handed to logging
-    must never be the one the caller receives."""
+    """Usage normalization must preserve client events even when their response cannot be validated."""
     logging_obj = _logging_obj_stub()
     logging_obj.stream = True
     logged: list[object] = []
@@ -1067,10 +1065,13 @@ async def test_streaming_logging_copy_keeps_client_usage_when_response_fails_val
 
     assert len(logged) == 1
     now = datetime.now()
-    LiteLLMLoggingObj._get_assembled_streaming_response(
+    assembled = LiteLLMLoggingObj._get_assembled_streaming_response(
         logging_obj, logged[0], start_time=now, end_time=now, is_async=True, streaming_chunks=[]
     )
-    assert logged[0].response.usage["prompt_tokens"] == 29
+    assert assembled.usage["prompt_tokens"] == 29
+    assert assembled is not logged[0].response
+    assert logged[0] is not events[-1]
+    assert logged[0].response.usage.input_tokens == 29
 
     client_usage = events[-1].response.usage
     assert isinstance(client_usage, ResponseAPIUsage)

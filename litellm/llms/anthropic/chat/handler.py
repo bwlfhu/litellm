@@ -866,6 +866,17 @@ class ModelResponseIterator:
                         self._current_server_tool_id = content_block_start["content_block"]["id"]
                         tool_input: Final = content_block_start["content_block"].get("input", {})
                         self._server_tool_inputs[self._current_server_tool_id] = tool_input
+                        if _stream_tool_name == "bash_code_execution":
+                            provider_specific_fields["code_interpreter_calls"] = {
+                                self._current_server_tool_id: {
+                                    "type": "code_interpreter_call",
+                                    "id": self._current_server_tool_id,
+                                    "code": None,
+                                    "container_id": self._container_id,
+                                    "status": "in_progress",
+                                    "outputs": None,
+                                },
+                            }
                         if _stream_tool_name == "web_search":
                             self._web_search_calls[self._current_server_tool_id] = build_web_search_call(
                                 self._current_server_tool_id,

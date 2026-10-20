@@ -63,7 +63,7 @@ async def test_spend_counter_generation_preserves_reseeded_new_window(
     client: Final = cache.init_async_client()
     key: Final = "spend:key:reseed"
     namespaced: Final = cache.check_and_fix_namespace(key)
-    marker: Final = cache._spend_counter_generation_key(namespaced)
+    marker: Final = cache.spend_counter_generation_key(namespaced)
     await cache.async_set_cache(key=key, value=100.0, ttl=60)
     generation: Final = await cache.async_get_spend_counter_generation(key)
     assert generation is not None
@@ -95,7 +95,7 @@ async def test_spend_counter_generation_ttl_tracks_counter_and_nx_does_not_repla
     client: Final = cache.init_async_client()
     key: Final = "spend:key:ttl"
     namespaced: Final = cache.check_and_fix_namespace(key)
-    marker: Final = cache._spend_counter_generation_key(namespaced)
+    marker: Final = cache.spend_counter_generation_key(namespaced)
     await cache.async_set_cache(key=key, value=100.0, ttl=2)
     generation: Final = await cache.async_get_spend_counter_generation(key)
     assert generation is not None
@@ -122,7 +122,7 @@ async def test_spend_counter_pending_reset_eventually_expires_despite_active_wri
     client: Final = cache.init_async_client()
     key: Final = "spend:key:failed-reconcile"
     namespaced: Final = cache.check_and_fix_namespace(key)
-    marker: Final = cache._spend_counter_generation_key(namespaced)
+    marker: Final = cache.spend_counter_generation_key(namespaced)
     await cache.async_set_cache(key=key, value=100.0, ttl=1)
     assert await cache.async_get_spend_counter_generation(key) is not None
     await asyncio.sleep(0.05)
@@ -160,7 +160,7 @@ async def test_all_spend_writers_preserve_pending_deadline_and_generation_ttl(
     client = cache.init_async_client()
     key = "spend:key:writer-contract"
     namespaced = cache.check_and_fix_namespace(key)
-    marker = cache._spend_counter_generation_key(namespaced)
+    marker = cache.spend_counter_generation_key(namespaced)
     await cache.async_set_cache(key=key, value=100.0, ttl=60)
     generation = await cache.async_get_spend_counter_generation(key, prepare_reset=pending)
     await client.pexpire(namespaced, 1000)
@@ -201,6 +201,6 @@ async def test_all_bulk_set_and_delete_paths_rotate_generation(budget_counter_re
     assert await cache.async_subtract_floor_zero(key, 100.0, old_generation, ttl=60) is None
     assert await cache.async_get_cache(key) == 7.5
     await RedisBatch(cache).delete(key)
-    assert await client.get(cache._spend_counter_generation_key(cache.check_and_fix_namespace(key))) is None
+    assert await client.get(cache.spend_counter_generation_key(cache.check_and_fix_namespace(key))) is None
     assert await cache.async_get_cache(key) is None
     assert await cache.async_refresh_ttl(key, 60) is False

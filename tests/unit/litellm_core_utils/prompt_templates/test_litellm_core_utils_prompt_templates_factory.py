@@ -571,7 +571,7 @@ def test_anthropic_messages_pt_does_not_duplicate_sendable_inline_reasoning():
         ],
     ],
 )
-def test_anthropic_messages_pt_preserves_inline_redacted_thinking_without_sidecar_duplication(inline_blocks):
+def test_anthropic_messages_pt_uses_official_inline_redacted_and_sidecar_precedence(inline_blocks):
     result = anthropic_messages_pt(
         messages=[
             {
@@ -587,7 +587,10 @@ def test_anthropic_messages_pt_preserves_inline_redacted_thinking_without_sideca
     assert result == [
         {
             "role": "assistant",
-            "content": [*inline_blocks, {"type": "text", "text": "Visible answer"}],
+            "content": [
+                *(block for block in inline_blocks if block["type"] == "thinking"),
+                {"type": "text", "text": "Visible answer"},
+            ],
         }
     ]
 

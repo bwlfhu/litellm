@@ -1810,7 +1810,9 @@ class FunctionCallArgumentsDoneEvent(BaseLiteLLMOpenAIResponseObject):
     sequence_number: int | None = None
 
 
-class CustomToolCallInputDeltaEvent(BaseLiteLLMOpenAIResponseObject):
+class CustomToolCallInputDeltaEvent(
+    BaseLiteLLMOpenAIResponseObject
+):  # frozen-ok: follows the mutable SDK streaming event base
     type: Literal[ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DELTA]
     item_id: str
     output_index: int
@@ -1818,7 +1820,9 @@ class CustomToolCallInputDeltaEvent(BaseLiteLLMOpenAIResponseObject):
     sequence_number: int
 
 
-class CustomToolCallInputDoneEvent(BaseLiteLLMOpenAIResponseObject):
+class CustomToolCallInputDoneEvent(
+    BaseLiteLLMOpenAIResponseObject
+):  # frozen-ok: follows the mutable SDK streaming event base
     type: Literal[ResponsesAPIStreamEvents.CUSTOM_TOOL_CALL_INPUT_DONE]
     item_id: str
     output_index: int

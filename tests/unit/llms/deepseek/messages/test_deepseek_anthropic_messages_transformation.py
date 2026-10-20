@@ -29,7 +29,7 @@ from litellm.llms.deepseek.messages.transformation import (
 )
 from litellm.proxy.pass_through_endpoints import streaming_handler
 from litellm.router import Router
-from litellm.router_protocol import _build_deployment_protocol_context, _RouterDeploymentProtocolContext
+from litellm.router_protocol import build_deployment_protocol_context, _RouterDeploymentProtocolContext
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
 
@@ -75,7 +75,7 @@ def test_anthropic_chat_transform_does_not_serialize_router_protocol_context():
     context = _RouterDeploymentProtocolContext(
         protocol="deepseek_anthropic",
         messages_path="v1/messages",
-        _owner=object(),
+        owner=object(),
     )
     litellm_params = {"_litellm_deployment_protocol_context": context}
     request = AnthropicConfig().transform_request(
@@ -94,7 +94,7 @@ def test_anthropic_chat_transform_does_not_serialize_router_protocol_context():
 
 
 def test_anthropic_chat_legacy_tool_thinking_does_not_disable_reasoning_history():
-    context = _build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
+    context = build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -127,7 +127,7 @@ def test_anthropic_chat_legacy_tool_thinking_does_not_disable_reasoning_history(
 
 
 def test_anthropic_chat_legacy_tool_thinking_leaves_non_tool_reasoning_enabled():
-    context = _build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
+    context = build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -153,7 +153,7 @@ def test_anthropic_chat_legacy_tool_thinking_leaves_non_tool_reasoning_enabled()
 
 
 def test_anthropic_chat_legacy_tool_thinking_preserves_inline_tool_history():
-    context = _build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
+    context = build_deployment_protocol_context({"deepseek_anthropic_tool_thinking": "disabled"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -180,7 +180,7 @@ def test_anthropic_chat_legacy_tool_thinking_preserves_inline_tool_history():
 
 
 def test_anthropic_chat_explicit_disabled_strips_all_reasoning_without_mutating_history():
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    context = build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
     messages = [
         {
@@ -226,7 +226,7 @@ def test_anthropic_chat_explicit_disabled_strips_all_reasoning_without_mutating_
 
 @pytest.mark.parametrize("model", ["deepseek-v4-pro", "anthropic/claude-sonnet-4-5"])
 def test_anthropic_chat_omitted_thinking_defaults_to_enabled_on_first_turn(model):
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    context = build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -241,7 +241,7 @@ def test_anthropic_chat_omitted_thinking_defaults_to_enabled_on_first_turn(model
 
 
 def test_anthropic_chat_omitted_thinking_backfills_reasoningless_tool_history():
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    context = build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
     messages: Final = [
@@ -277,7 +277,7 @@ def test_anthropic_chat_omitted_thinking_backfills_reasoningless_tool_history():
 
 
 def test_anthropic_chat_omitted_thinking_enables_replayable_reasoning_history():
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    context = build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -310,7 +310,7 @@ def test_anthropic_chat_omitted_thinking_enables_replayable_reasoning_history():
 
 
 def test_anthropic_chat_explicit_disabled_strips_reasoning_from_mixed_history():
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    context = build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -343,7 +343,7 @@ def test_anthropic_chat_explicit_disabled_strips_reasoning_from_mixed_history():
 
 
 def test_anthropic_chat_enabled_thinking_allows_reasoningless_non_tool_history():
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    context = build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -362,7 +362,7 @@ def test_anthropic_chat_enabled_thinking_allows_reasoningless_non_tool_history()
 
 
 def test_anthropic_chat_omits_false_stream_only_for_deepseek_context():
-    context = _build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
+    context = build_deployment_protocol_context({"reasoning_protocol": "deepseek_anthropic"})
     assert context is not None
 
     deepseek_request = AnthropicConfig().transform_request(
@@ -387,7 +387,7 @@ def test_anthropic_chat_omits_false_stream_only_for_deepseek_context():
 
 
 def test_anthropic_chat_uses_trusted_reasoning_placeholder():
-    context = _build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "placeholder"})
+    context = build_deployment_protocol_context({"deepseek_anthropic_missing_reasoning": "placeholder"})
     assert context is not None
 
     request = AnthropicConfig().transform_request(
@@ -595,7 +595,7 @@ def test_untrusted_protocol_context_object_does_not_select_deepseek_config():
             _litellm_deployment_protocol_context=_RouterDeploymentProtocolContext(
                 protocol="deepseek_anthropic",
                 messages_path="v1/messages",
-                _owner=object(),
+                owner=object(),
             ),
         )
 
@@ -643,7 +643,7 @@ def test_direct_deepseek_prefix_skips_anthropic_history_sanitizer_before_provide
     from litellm.llms.anthropic.pass_through.messages import handler
 
     with (
-        patch.object(handler, "_sanitize_anthropic_tool_history_with_diagnostics") as sanitize,
+        patch.object(handler, "sanitize_anthropic_tool_history_with_diagnostics") as sanitize,
         patch.object(
             handler.base_llm_http_handler, "anthropic_messages_handler", return_value="dispatched"
         ) as dispatch,
@@ -4704,3 +4704,16 @@ async def test_router_does_not_fallback_after_deepseek_signature_error():
 
     assert getattr(error.value, "_litellm_disable_fallbacks") is True
     assert request_count == {"deepseek": 1, "fallback": 0}
+
+
+@pytest.mark.parametrize("function_call", ["invalid", [], 7, False])
+def test_deepseek_anthropic_messages_rejects_non_object_legacy_function_call(function_call):
+    with pytest.raises(AnthropicError, match="function_call must be an object") as error:
+        DeepSeekAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=[{"role": "assistant", "content": "", "function_call": function_call}],
+            anthropic_messages_optional_request_params={"max_tokens": 100, "thinking": {"type": "disabled"}},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+    assert error.value.status_code == 400

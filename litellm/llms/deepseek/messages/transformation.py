@@ -3,13 +3,18 @@ DeepSeek Anthropic-compatible messages transformation config.
 """
 
 import json
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from copy import deepcopy
-from itertools import groupby
-from typing import Any, Final, Literal, cast
+from itertools import chain, groupby
+from typing import (
+    Final,
+    Literal,
+    cast,  # noqa: TID251  # shared Anthropic converters require SDK types after explicit history validation
+)
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from pydantic import TypeAdapter
 
 import litellm
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
@@ -17,6 +22,7 @@ from litellm.litellm_core_utils.prompt_templates.factory import (
     convert_to_anthropic_tool_invoke,
     convert_to_anthropic_tool_result,
 )
+from litellm.litellm_core_utils.prompt_templates.mid_conversation_system import message_field
 from litellm.llms.anthropic.common_utils import AnthropicError
 from litellm.llms.anthropic.pass_through.messages.streaming_iterator import (
     aclose_if_supported,
@@ -24,11 +30,19 @@ from litellm.llms.anthropic.pass_through.messages.streaming_iterator import (
 from litellm.llms.anthropic.pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
-from litellm.llms.deepseek.common_utils import warn_missing_reasoning_placeholders
+from litellm.llms.deepseek.common_utils import deepseek_mapping, deepseek_sequence, warn_missing_reasoning_placeholders
 from litellm.router_protocol import DeepSeekMissingReasoning
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
+from litellm.types.llms.openai import (
+    ChatCompletionAssistantToolCall,
+    ChatCompletionFunctionMessage,
+    ChatCompletionToolMessage,
+)
 from litellm.types.router import GenericLiteLLMParams
+
+_DEEPSEEK_MAPPING_ADAPTER: Final = TypeAdapter(Mapping[str, object])
+_DEEPSEEK_SEQUENCE_ADAPTER: Final = TypeAdapter(Sequence[object])
 
 _DEEPSEEK_UNSUPPORTED_CONTENT_BLOCK_TYPES: Final = frozenset(
     {
@@ -79,10 +93,10 @@ def _deduplicated_path_segments(path: str) -> tuple[str, ...]:
 
 
 def _without_trailing_segments(segments: tuple[str, ...], values: frozenset[str]) -> tuple[str, ...]:
-    index = len(segments)
-    while index and segments[index - 1] in values:
-        index -= 1
-    return segments[:index]
+    last_retained: Final = next(
+        (index + 1 for index in range(len(segments) - 1, -1, -1) if segments[index] not in values), 0
+    )
+    return segments[:last_retained]
 
 
 def _without_known_messages_suffix(segments: tuple[str, ...]) -> tuple[str, ...]:
@@ -101,7 +115,7 @@ def _without_known_messages_suffix(segments: tuple[str, ...]) -> tuple[str, ...]
 
 def _url_with_path(base_url: str, path_segments: tuple[str, ...]) -> str:
     parsed: Final = urlsplit(base_url)
-    path = "/" + "/".join(path_segments)
+    path: Final = "/" + "/".join(path_segments)
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
@@ -109,15 +123,15 @@ def _complete_messages_url(base_url: str, messages_path: str | None) -> str:
     parsed: Final = urlsplit(base_url)
     base_segments: Final = _deduplicated_path_segments(parsed.path)
     if messages_path == "anthropic/v1/messages":
-        prefix = _without_known_messages_suffix(base_segments)
-        return _url_with_path(base_url, prefix + ("anthropic", "v1", "messages"))
+        anthropic_prefix: Final = _without_known_messages_suffix(base_segments)
+        return _url_with_path(base_url, anthropic_prefix + ("anthropic", "v1", "messages"))
     if messages_path == "v1/messages":
-        prefix = _without_known_messages_suffix(base_segments)
-        return _url_with_path(base_url, prefix + ("v1", "messages"))
+        messages_prefix: Final = _without_known_messages_suffix(base_segments)
+        return _url_with_path(base_url, messages_prefix + ("v1", "messages"))
     if parsed.path.rstrip("/").endswith("/v1/messages"):
         return base_url
 
-    prefix = _without_trailing_segments(base_segments, frozenset({"v1", "beta"}))
+    prefix: Final = _without_trailing_segments(base_segments, frozenset({"v1", "beta"}))
     normalized: Final = prefix if prefix[-1:] == ("anthropic",) else prefix + ("anthropic",)
     return _url_with_path(base_url, normalized + ("v1", "messages"))
 
@@ -126,23 +140,22 @@ def _nonempty_reasoning_content(message: Mapping[str, object]) -> str | None:
     reasoning_content: Final = message.get("reasoning_content")
     if isinstance(reasoning_content, str) and reasoning_content.strip():
         return reasoning_content
-    provider_specific_fields: Final = message.get("provider_specific_fields")
-    if isinstance(provider_specific_fields, Mapping):
+    provider_specific_fields: Final = deepseek_mapping(message.get("provider_specific_fields"))
+    if provider_specific_fields is not None:
         provider_reasoning_content: Final = provider_specific_fields.get("reasoning_content")
         if isinstance(provider_reasoning_content, str) and provider_reasoning_content.strip():
             return provider_reasoning_content
     return None
 
 
-def _sanitize_deepseek_content_block(block: object) -> object:
-    if not isinstance(block, Mapping):
-        return deepcopy(block)
+def _sanitize_deepseek_content_block(raw_block: object) -> object:
+    if not isinstance(raw_block, Mapping):
+        return deepcopy(raw_block)
+    block: Final = _DEEPSEEK_MAPPING_ADAPTER.validate_python(raw_block)
     block_type: Final = block.get("type")
     if block_type in _DEEPSEEK_TOOL_USE_BLOCK_TYPES:
-        return {  # mutable-ok: provider content blocks require concrete JSON objects
-            key: deepcopy(block[key]) for key in _DEEPSEEK_TOOL_USE_BLOCK_FIELDS if key in block
-        }
-    return {  # mutable-ok: provider content blocks require concrete JSON objects
+        return {key: deepcopy(block[key]) for key in _DEEPSEEK_TOOL_USE_BLOCK_FIELDS if key in block}
+    return {
         key: _sanitize_deepseek_content_blocks(value)
         if key == "content" and isinstance(value, list)
         else deepcopy(value)
@@ -151,30 +164,37 @@ def _sanitize_deepseek_content_block(block: object) -> object:
     }
 
 
+def _is_nonempty_deepseek_thinking_block(block: object) -> bool:
+    fields: Final = deepseek_mapping(block)
+    if fields is None or fields.get("type") != "thinking":
+        return False
+    thinking: Final = fields.get("thinking")
+    return isinstance(thinking, str) and bool(thinking.strip())
+
+
 def _sanitize_deepseek_content_blocks(content: Sequence[object]) -> Sequence[object]:
-    return [  # mutable-ok: provider content requires a concrete JSON array
+    return [
         _sanitize_deepseek_content_block(block)
         for block in content
-        if not (isinstance(block, Mapping) and block.get("type") in ("redacted_thinking", "thinking"))
+        if not (
+            (fields := deepseek_mapping(block)) is not None and fields.get("type") in ("redacted_thinking", "thinking")
+        )
     ]
 
 
-def _sanitize_deepseek_response_content_block(block: object, thinking_disabled: bool) -> object | None:
-    if not isinstance(block, Mapping):
-        return deepcopy(block)
+def _sanitize_deepseek_response_content_block(raw_block: object, thinking_disabled: bool) -> object | None:
+    if not isinstance(raw_block, Mapping):
+        return deepcopy(raw_block)
+    block: Final = _DEEPSEEK_MAPPING_ADAPTER.validate_python(raw_block)
     block_type: Final = block.get("type")
     if block_type == "thinking":
         thinking: Final = block.get("thinking")
         signature: Final = block.get("signature")
         return (
-            {  # mutable-ok: Anthropic response blocks require concrete JSON objects
+            {
                 "type": "thinking",
                 "thinking": thinking,
-                **(
-                    {"signature": signature}  # mutable-ok: Anthropic signatures are JSON objects
-                    if isinstance(signature, str)
-                    else {}  # mutable-ok: optional JSON fields are merged from a concrete object
-                ),
+                **({"signature": signature} if isinstance(signature, str) else {}),
             }
             if not thinking_disabled and isinstance(thinking, str) and thinking.strip()
             else None
@@ -184,18 +204,16 @@ def _sanitize_deepseek_response_content_block(block: object, thinking_disabled: 
             return None
         data: Final = block.get("data")
         return (
-            {  # mutable-ok: Anthropic response blocks require concrete JSON objects
+            {
                 "type": "redacted_thinking",
                 "data": deepcopy(data),
             }
             if isinstance(data, str) and data
-            else {"type": "redacted_thinking"}  # mutable-ok: Anthropic response blocks are JSON objects
+            else {"type": "redacted_thinking"}
         )
     if block_type in _DEEPSEEK_TOOL_USE_BLOCK_TYPES:
-        return {  # mutable-ok: Anthropic tool blocks require concrete JSON objects
-            key: deepcopy(block[key]) for key in _DEEPSEEK_RESPONSE_TOOL_USE_BLOCK_FIELDS if key in block
-        }
-    return {  # mutable-ok: Anthropic response blocks require concrete JSON objects
+        return {key: deepcopy(block[key]) for key in _DEEPSEEK_RESPONSE_TOOL_USE_BLOCK_FIELDS if key in block}
+    return {
         key: _sanitize_deepseek_response_content_blocks(value, thinking_disabled=thinking_disabled)
         if key == "content" and isinstance(value, list)
         else deepcopy(value)
@@ -207,42 +225,39 @@ def _sanitize_deepseek_response_content_block(block: object, thinking_disabled: 
 def _sanitize_deepseek_response_content_blocks(
     content: Sequence[object], thinking_disabled: bool
 ) -> list[object]:  # mutable-ok: Anthropic responses expose content as a JSON array
-    return [  # mutable-ok: Anthropic responses expose content as a JSON array
+    return [
         sanitized_block
         for block in content
         if (sanitized_block := _sanitize_deepseek_response_content_block(block, thinking_disabled)) is not None
     ]
 
 
-def _sanitize_deepseek_stream_payload(payload: object, thinking_disabled: bool) -> object | None:
-    if isinstance(payload, list):
+def _sanitize_deepseek_stream_payload(raw_payload: object, thinking_disabled: bool) -> object | None:
+    if isinstance(raw_payload, list):
         return tuple(
             sanitized_value
-            for value in payload
+            for value in _DEEPSEEK_SEQUENCE_ADAPTER.validate_python(raw_payload)
             if (sanitized_value := _sanitize_deepseek_stream_payload(value, thinking_disabled)) is not None
         )
-    if not isinstance(payload, Mapping):
-        return deepcopy(payload)
+    if not isinstance(raw_payload, Mapping):
+        return deepcopy(raw_payload)
+    payload: Final = _DEEPSEEK_MAPPING_ADAPTER.validate_python(raw_payload)
     event_type: Final = payload.get("type")
     if event_type in ("thinking", "redacted_thinking") or event_type in _DEEPSEEK_TOOL_USE_BLOCK_TYPES:
         return _sanitize_deepseek_response_content_block(payload, thinking_disabled=thinking_disabled)
     if event_type == "content_block_start":
-        content_block: Final = payload.get("content_block")
-        if isinstance(content_block, Mapping):
+        content_block: Final = deepseek_mapping(payload.get("content_block"))
+        if content_block is not None:
             block_type: Final = content_block.get("type")
             thinking: Final = content_block.get("thinking")
             signature: Final = content_block.get("signature")
             sanitized_block: Final = (
-                {"type": "text", "text": ""}  # mutable-ok: SSE content blocks require concrete JSON objects
+                {"type": "text", "text": ""}
                 if thinking_disabled and block_type in ("thinking", "redacted_thinking")
-                else {  # mutable-ok: SSE content blocks require concrete JSON objects
+                else {
                     "type": "thinking",
                     "thinking": thinking if isinstance(thinking, str) else "",
-                    **(
-                        {"signature": signature}  # mutable-ok: Anthropic signatures are JSON objects
-                        if isinstance(signature, str)
-                        else {}  # mutable-ok: optional JSON fields are merged from a concrete object
-                    ),
+                    **({"signature": signature} if isinstance(signature, str) else {}),
                 }
                 if block_type == "thinking"
                 else _sanitize_deepseek_response_content_block(
@@ -251,8 +266,8 @@ def _sanitize_deepseek_stream_payload(payload: object, thinking_disabled: bool) 
                 )
             )
             return (
-                {  # mutable-ok: SSE events require concrete JSON objects
-                    **{  # mutable-ok: SSE event fields require concrete JSON objects
+                {
+                    **{
                         key: deepcopy(value)
                         for key, value in payload.items()
                         if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS and key != "content_block"
@@ -263,18 +278,18 @@ def _sanitize_deepseek_stream_payload(payload: object, thinking_disabled: bool) 
                 else None
             )
     if event_type == "content_block_delta":
-        delta: Final = payload.get("delta")
-        if isinstance(delta, Mapping) and delta.get("type") in ("thinking_delta", "signature_delta"):
+        delta: Final = deepseek_mapping(payload.get("delta"))
+        if delta is not None and delta.get("type") in ("thinking_delta", "signature_delta"):
             if thinking_disabled:
                 return None
             delta_type: Final = delta.get("type")
-            return {  # mutable-ok: SSE deltas require concrete JSON objects
-                **{  # mutable-ok: SSE event fields require concrete JSON objects
+            return {
+                **{
                     key: deepcopy(value)
                     for key, value in payload.items()
                     if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS and key != "delta"
                 },
-                "delta": {  # mutable-ok: SSE deltas require concrete JSON objects
+                "delta": {
                     key: deepcopy(value)
                     for key, value in delta.items()
                     if key == "type"
@@ -282,7 +297,7 @@ def _sanitize_deepseek_stream_payload(payload: object, thinking_disabled: bool) 
                     or (delta_type == "signature_delta" and key == "signature")
                 },
             }
-    return {  # mutable-ok: SSE events require concrete JSON objects
+    return {
         key: _sanitize_deepseek_stream_payload(value, thinking_disabled=thinking_disabled)
         for key, value in payload.items()
         if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS
@@ -295,7 +310,7 @@ def _sanitize_deepseek_sse_event(event: bytes, thinking_disabled: bool) -> bytes
     if not data_lines:
         return event
     try:
-        payload: Final = json.loads(b"\n".join(data_lines))
+        payload: Final[object] = json.loads(b"\n".join(data_lines))
     except (TypeError, ValueError):
         return event
     sanitized_payload: Final = _sanitize_deepseek_stream_payload(
@@ -338,31 +353,30 @@ async def _sanitize_deepseek_messages_stream(
         await aclose_if_supported(completion_stream)
 
 
-def _without_reasoning_content_fields(message: Mapping[str, object]) -> dict[str, object]:
-    return {  # mutable-ok: provider messages require concrete JSON objects
-        key: deepcopy(value) for key, value in message.items() if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS
-    }
+def _without_reasoning_content_fields(message: Mapping[str, object]) -> Mapping[str, object]:
+    return {key: deepcopy(value) for key, value in message.items() if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS}
 
 
-def _sanitize_non_assistant_deepseek_message(message: Mapping[str, object]) -> dict[str, object]:
+def _sanitize_non_assistant_deepseek_message(message: Mapping[str, object]) -> Mapping[str, object]:
     transformed_message: Final = _without_reasoning_content_fields(message)
     content: Final = transformed_message.get("content")
     if not isinstance(content, list):
         return transformed_message
-    return {  # mutable-ok: provider messages require concrete JSON objects
+    return {
         **transformed_message,
         "content": _sanitize_deepseek_content_blocks(content),
     }
 
 
 def _is_valid_deepseek_tool_call(tool_call: object) -> bool:
-    if not isinstance(tool_call, Mapping) or tool_call.get("type", "function") != "function":
+    fields: Final = deepseek_mapping(tool_call)
+    if fields is None or fields.get("type", "function") != "function":
         return False
-    tool_call_id: Final = tool_call.get("id")
+    tool_call_id: Final = fields.get("id")
     if tool_call_id is not None and (not isinstance(tool_call_id, str) or not tool_call_id):
         return False
-    function: Final = tool_call.get("function")
-    if not isinstance(function, Mapping):
+    function: Final = deepseek_mapping(fields.get("function"))
+    if not function is not None:
         return False
     name: Final = function.get("name")
     arguments: Final = function.get("arguments")
@@ -372,21 +386,26 @@ def _is_valid_deepseek_tool_call(tool_call: object) -> bool:
 def _deepseek_tool_call_blocks(tool_calls: Sequence[object], message_index: int) -> Sequence[object]:
     if not all(_is_valid_deepseek_tool_call(tool_call) for tool_call in tool_calls):
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool_calls contain invalid entries")
-    normalized_tool_calls: Final = [  # mutable-ok: shared Anthropic converter requires a concrete list
-        {  # mutable-ok: shared Anthropic converter requires OpenAI tool-call objects
-            "id": tool_call.get("id") or f"legacy_tool_call_{message_index}_{call_index}",
+    normalized_tool_calls: Final = [
+        {
+            "id": fields.get("id") or f"legacy_tool_call_{message_index}_{call_index}",
             "type": "function",
-            "function": deepcopy(tool_call.get("function")),
+            "function": deepcopy(fields.get("function")),
         }
         for call_index, tool_call in enumerate(tool_calls)
-        if isinstance(tool_call, Mapping)
+        if (fields := deepseek_mapping(tool_call)) is not None
     ]
     try:
-        converted_blocks: Final = convert_to_anthropic_tool_invoke(normalized_tool_calls)
+        converted_blocks: Final = convert_to_anthropic_tool_invoke(
+            cast(  # cast-ok: tool call roles, names, IDs and argument types are validated above
+                list[ChatCompletionAssistantToolCall],
+                normalized_tool_calls,
+            )
+        )
     except Exception as exc:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool_calls contain invalid arguments") from exc
-    return [  # mutable-ok: provider content requires a concrete JSON array
-        {  # mutable-ok: provider tool_use blocks require concrete JSON objects
+    return [
+        {
             **deepcopy(block),
             "id": normalized_tool_calls[block_index]["id"],
         }
@@ -394,10 +413,10 @@ def _deepseek_tool_call_blocks(tool_calls: Sequence[object], message_index: int)
     ]
 
 
-def _as_deepseek_mapping(value: object) -> Mapping[str, object] | None:
-    if not isinstance(value, Mapping):
+def _as_deepseek_mapping(raw_value: object) -> Mapping[str, object] | None:
+    if not isinstance(raw_value, Mapping):
         return None
-    return cast(Mapping[str, object], value)  # cast-ok: provider payload objects have JSON string keys
+    return deepseek_mapping(raw_value)
 
 
 def _matching_deepseek_tool_call(tool_calls: Sequence[object], tool_use_id: object) -> Mapping[str, object] | None:
@@ -432,7 +451,7 @@ def _repair_deepseek_tool_use_block(block: object, tool_calls: Sequence[object],
     matching_tool_call: Final = _matching_deepseek_tool_call(tool_calls, typed_block.get("id"))
     if matching_tool_call is None:
         return deepcopy(typed_block)
-    typed_function: Final = _as_deepseek_mapping(matching_tool_call.get("function"))
+    typed_function: Final = deepseek_mapping(_as_deepseek_mapping(matching_tool_call.get("function")))
     matching_name: Final = typed_function.get("name") if typed_function is not None else None
     matching_input: Final = (
         _deepseek_tool_call_input(matching_tool_call, message_index) if "input" in missing_fields else None
@@ -446,67 +465,67 @@ def _repair_deepseek_tool_use_block(block: object, tool_calls: Sequence[object],
         ),
         *((("input", deepcopy(matching_input)),) if "input" in missing_fields and matching_input is not None else ()),
     )
-    return {  # mutable-ok: provider tool_use blocks require concrete JSON objects
-        key: value for key, value in (*original_items, *repaired_items)
-    }
+    return {key: value for key, value in (*original_items, *repaired_items)}
 
 
 def _normalize_deepseek_assistant_tool_history(
     message: Mapping[str, object], message_index: int
 ) -> Mapping[str, object]:
     raw_tool_calls: Final = message.get("tool_calls")
-    raw_function_call: Final = message.get("function_call")
+    raw_function_call: Final[object] = message.get("function_call")
     if raw_tool_calls is not None and not isinstance(raw_tool_calls, list):
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool_calls must be a list")
     if raw_function_call is not None and not isinstance(raw_function_call, Mapping):
         raise _deepseek_history_validation_error("DeepSeek Anthropic function_call must be an object")
+    function_call_fields: Final = deepseek_mapping(raw_function_call)
     legacy_tool_call: Final = (
-        {  # mutable-ok: shared Anthropic converter requires an OpenAI tool-call object
+        {
             "id": f"legacy_function_call_{message_index}",
             "type": "function",
-            "function": deepcopy(
-                dict(raw_function_call)  # mutable-ok: converter requires a concrete function-call object
-            ),
+            "function": deepcopy(dict(function_call_fields)),
         }
-        if isinstance(raw_function_call, Mapping)
+        if function_call_fields is not None
         else None
     )
     tool_calls: Final = (
-        (*raw_tool_calls, legacy_tool_call)
+        (*deepseek_sequence(raw_tool_calls), legacy_tool_call)
         if isinstance(raw_tool_calls, list) and legacy_tool_call is not None
-        else tuple(raw_tool_calls)
+        else tuple(deepseek_sequence(raw_tool_calls))
         if isinstance(raw_tool_calls, list)
         else (legacy_tool_call,)
         if legacy_tool_call is not None
         else ()
     )
-    transformed_message: Final = {  # mutable-ok: provider messages require concrete JSON objects
+    transformed_message: Final = {
         key: deepcopy(value) for key, value in message.items() if key not in ("tool_calls", "function_call")
     }
     if not tool_calls:
         return transformed_message
     raw_content: Final = transformed_message.get("content")
     content_blocks: Final = (
-        tuple(_repair_deepseek_tool_use_block(block, tool_calls, message_index) for block in raw_content)
+        tuple(
+            _repair_deepseek_tool_use_block(block, tool_calls, message_index)
+            for block in deepseek_sequence(raw_content)
+        )
         if isinstance(raw_content, list)
-        else ({"type": "text", "text": raw_content},)  # mutable-ok: provider text block is a JSON object
+        else ({"type": "text", "text": raw_content},)
         if isinstance(raw_content, str) and raw_content.strip()
         else ()
     )
     existing_tool_ids: Final = frozenset(
-        block.get("id")
+        fields.get("id")
         for block in content_blocks
-        if isinstance(block, Mapping) and block.get("type") in _DEEPSEEK_TOOL_USE_BLOCK_TYPES
+        if (fields := deepseek_mapping(block)) is not None and fields.get("type") in _DEEPSEEK_TOOL_USE_BLOCK_TYPES
     )
     new_tool_calls: Final = tuple(
         tool_call
         for tool_call in tool_calls
-        if not (isinstance(tool_call, Mapping) and tool_call.get("id") in existing_tool_ids)
+        if not ((fields := deepseek_mapping(tool_call)) is not None and fields.get("id") in existing_tool_ids)
     )
     converted_tool_blocks: Final = _deepseek_tool_call_blocks(new_tool_calls, message_index)
-    return {  # mutable-ok: provider messages require concrete JSON objects
+    return {
         **transformed_message,
-        "content": [  # mutable-ok: provider content requires a concrete JSON array
+        "content": [
             *content_blocks,
             *converted_tool_blocks,
         ],
@@ -527,20 +546,25 @@ def _normalize_deepseek_tool_result(
     tool_call_id: Final = _legacy_function_result_call_id(messages, message_index)
     if tool_call_id is None:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool result is missing tool_call_id")
-    result_message: Final = {  # mutable-ok: shared Anthropic converter requires a concrete tool-result object
+    result_message: Final = {
         "role": "tool" if role == "tool" else "function",
         "tool_call_id": tool_call_id,
         "content": deepcopy(message.get("content", "")),
     }
     try:
-        result_block: Final = convert_to_anthropic_tool_result(result_message)
+        result_block: Final = convert_to_anthropic_tool_result(
+            cast(  # cast-ok: role and call ID are normalized before shared content validation
+                ChatCompletionToolMessage | ChatCompletionFunctionMessage,
+                result_message,
+            )
+        )
     except Exception as exc:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool result is invalid") from exc
-    return {  # mutable-ok: provider messages require concrete JSON objects
+    return {
         "role": "user",
-        "content": [  # mutable-ok: provider content requires a concrete JSON array
+        "content": [
             _sanitize_deepseek_content_block(
-                {  # mutable-ok: provider tool_result blocks require concrete JSON objects
+                {
                     **result_block,
                     "tool_use_id": tool_call_id,
                 }
@@ -579,11 +603,9 @@ def _merged_deepseek_tool_result_group(messages: Iterable[Mapping[str, object]])
     if len(group) < 2:
         return group
     return (
-        {  # mutable-ok: provider message requires a concrete JSON object
+        {
             **group[0],
-            "content": [  # mutable-ok: provider message requires a concrete JSON array
-                block for message in group for block in _message_blocks(message, "content")
-            ],
+            "content": list(chain.from_iterable(_message_blocks(message, "content") for message in group)),
         },
     )
 
@@ -592,9 +614,10 @@ def _merge_deepseek_tool_result_messages(
     messages: Sequence[Mapping[str, object]],
 ) -> tuple[Mapping[str, object], ...]:
     return tuple(
-        message
-        for is_result, group in groupby(messages, _is_deepseek_tool_result_message)
-        for message in (_merged_deepseek_tool_result_group(group) if is_result else tuple(group))
+        chain.from_iterable(
+            _merged_deepseek_tool_result_group(group) if is_result else tuple(group)
+            for is_result, group in groupby(messages, _is_deepseek_tool_result_message)
+        )
     )
 
 
@@ -669,15 +692,16 @@ def _validate_deepseek_tool_history_message(
         )
 
 
-def _unsigned_content_block(block: object) -> tuple[object | None, bool, bool, bool]:
-    if not isinstance(block, Mapping):
-        return deepcopy(block), False, False, False
+def _unsigned_content_block(raw_block: object) -> tuple[object | None, bool, bool, bool]:
+    if not isinstance(raw_block, Mapping):
+        return deepcopy(raw_block), False, False, False
+    block: Final = _DEEPSEEK_MAPPING_ADAPTER.validate_python(raw_block)
     block_type: Final = block.get("type")
     if block_type == "thinking":
         thinking: Final = block.get("thinking")
         return (
             (
-                {  # mutable-ok: provider thinking history requires a concrete JSON object
+                {
                     "type": "thinking",
                     "thinking": thinking,
                 },
@@ -693,12 +717,10 @@ def _unsigned_content_block(block: object) -> tuple[object | None, bool, bool, b
     return _sanitize_deepseek_content_block(block), block_type in _DEEPSEEK_TOOL_USE_BLOCK_TYPES, False, False
 
 
-def _unsigned_content_blocks(content: list[object]) -> tuple[list[object], bool, bool, bool]:
+def _unsigned_content_blocks(content: Sequence[object]) -> tuple[Sequence[object], bool, bool, bool]:
     block_results: Final = tuple(_unsigned_content_block(block) for block in content)
     return (
-        [  # mutable-ok: provider content history requires a concrete JSON array
-            sanitized for sanitized, _, _, _ in block_results if sanitized is not None
-        ],
+        [sanitized for sanitized, _, _, _ in block_results if sanitized is not None],
         any(has_tool_use for _, has_tool_use, _, _ in block_results),
         any(has_redacted_thinking for _, _, has_redacted_thinking, _ in block_results),
         any(has_reasoning for _, _, _, has_reasoning in block_results),
@@ -713,9 +735,9 @@ def _content_block_tree(
     block: object, depth: int = 0, parent_type: str | None = None
 ) -> tuple[tuple[object, int, str | None], ...]:
     typed_block: Final = _as_deepseek_mapping(block)
-    if not isinstance(block, Mapping) or depth >= 1:
+    if typed_block is None or depth >= 1:
         return ((block, depth, parent_type),)
-    nested_content: Final = block.get("content")
+    nested_content: Final = typed_block.get("content")
     block_type: Final = typed_block.get("type") if typed_block is not None else None
     return (
         (block, depth, parent_type),
@@ -733,25 +755,24 @@ def _content_blocks(
     content: Sequence[object], depth: int = 0, parent_type: str | None = None
 ) -> tuple[tuple[object, int, str | None], ...]:
     return tuple(
-        nested_block
-        for block in content
-        for nested_block in _content_block_tree(block, depth=depth, parent_type=parent_type)
+        chain.from_iterable(_content_block_tree(block, depth=depth, parent_type=parent_type) for block in content)
     )
 
 
-def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], model: str | None = None) -> None:
-    unsupported_types: Final = sorted(
-        {
-            block_type
-            for message in messages
-            for field in ("content", "thinking_blocks")
-            for content in (message.get(field),)
-            if isinstance(content, list)
-            for block, depth, parent_type in _content_blocks(content)
-            if isinstance(block, Mapping)
-            for block_type in (block.get("type"),)
-            if isinstance(block_type, str)
-            and (
+def _message_content_tree(message: Mapping[str, object]) -> Iterator[tuple[str, object, int, str | None]]:
+    for field in ("content", "thinking_blocks"):
+        for block, depth, parent in _content_blocks(_message_blocks(message, field)):
+            yield field, block, depth, parent
+
+
+def _unsupported_deepseek_block_types(messages: Sequence[Mapping[str, object]]) -> Iterator[str]:
+    for message in messages:
+        for field, raw_block, depth, parent_type in _message_content_tree(message):
+            block = _as_deepseek_mapping(raw_block)
+            block_type = block.get("type") if block is not None else None
+            if not isinstance(block_type, str):
+                continue
+            if (
                 block_type in _DEEPSEEK_UNSUPPORTED_CONTENT_BLOCK_TYPES
                 or (
                     block_type == "image"
@@ -762,9 +783,12 @@ def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], 
                     )
                 )
                 or (block_type == "redacted_thinking" and (message.get("role") != "assistant" or depth > 0))
-            )
-        }
-    )
+            ):
+                yield block_type
+
+
+def _validate_deepseek_content_blocks(messages: Sequence[Mapping[str, object]], model: str | None = None) -> None:
+    unsupported_types: Final = sorted(frozenset(_unsupported_deepseek_block_types(messages)))
     if unsupported_types:
         raise litellm.utils.UnsupportedParamsError(
             message=(
@@ -792,13 +816,8 @@ def _invalid_deepseek_tool_use_field(block: object) -> str | None:
 
 
 def _validate_deepseek_tool_use_blocks(messages: Sequence[Mapping[str, object]]) -> None:
-    invalid_fields: Final = tuple(
-        invalid_field
-        for message in messages
-        for field in ("content", "thinking_blocks")
-        for block, _, _ in _content_blocks(_message_blocks(message, field))
-        if (invalid_field := _invalid_deepseek_tool_use_field(block)) is not None
-    )
+    blocks: Final = chain.from_iterable(_message_content_tree(message) for message in messages)
+    invalid_fields: Final = tuple(filter(None, (_invalid_deepseek_tool_use_field(block) for _, block, _, _ in blocks)))
     if invalid_fields:
         raise _deepseek_history_validation_error(
             f"DeepSeek Anthropic tool_use block is missing or has invalid {invalid_fields[0]}"
@@ -813,7 +832,7 @@ def _sidecar_reasoning_blocks(message: Mapping[str, object]) -> tuple[Sequence[o
     reasoning_blocks: Final = tuple(
         block
         for block in transformed_blocks
-        if isinstance(block, Mapping) and block.get("type") in {"thinking", "redacted_thinking"}
+        if (fields := deepseek_mapping(block)) is not None and fields.get("type") in {"thinking", "redacted_thinking"}
     )
     return reasoning_blocks, has_redacted_thinking, has_reasoning
 
@@ -822,10 +841,8 @@ def _deepseek_history_message(
     message: Mapping[str, object],
     require_reasoning: bool,
     missing_reasoning: DeepSeekMissingReasoning | None,
-) -> dict:
-    transformed_message: Final = deepcopy(
-        dict(message)  # mutable-ok: history normalization requires a private working copy
-    )
+) -> Mapping[str, object]:
+    transformed_message: Final = deepcopy(dict(message))
     if transformed_message.get("role") != "assistant":
         return _sanitize_non_assistant_deepseek_message(transformed_message)
 
@@ -879,13 +896,15 @@ def _deepseek_history_message(
         content
     )
     content_without_inline_reasoning: Final = [
-        block for block in transformed_content if not (isinstance(block, Mapping) and block.get("type") == "thinking")
+        block
+        for block in transformed_content
+        if not ((fields := deepseek_mapping(block)) is not None and fields.get("type") == "thinking")
     ]
     selected_content: Final = (
         content_without_inline_reasoning
         if not require_reasoning
-        else [  # mutable-ok: provider content requires a concrete JSON array
-            {  # mutable-ok: provider thinking block is a JSON object
+        else [
+            {
                 "type": "thinking",
                 "thinking": reasoning_content,
             },
@@ -931,7 +950,7 @@ def _deepseek_history(
     messages: Sequence[Mapping[str, object]],
     require_reasoning: bool,
     missing_reasoning: DeepSeekMissingReasoning | None,
-) -> list[dict]:
+) -> Sequence[Mapping[str, object]]:
     transformed: Final = [
         _deepseek_history_message(
             message,
@@ -946,7 +965,7 @@ def _deepseek_history(
 
 def _message_blocks(message: Mapping[str, object], field: str) -> Sequence[object]:
     value: Final = message.get(field)
-    return value if isinstance(value, list) else ()
+    return deepseek_sequence(value)
 
 
 def _chat_message_has_tool_history(message: Mapping[str, object]) -> bool:
@@ -956,7 +975,7 @@ def _chat_message_has_tool_history(message: Mapping[str, object]) -> bool:
     if isinstance(message.get("function_call"), Mapping):
         return True
     return any(
-        isinstance(block, Mapping) and block.get("type") in {"tool_use", "server_tool_use"}
+        isinstance(block, Mapping) and message_field(block, "type") in {"tool_use", "server_tool_use"}
         for block in _message_blocks(message, "content")
     )
 
@@ -966,62 +985,48 @@ def deepseek_messages_have_tool_history(messages: Iterable[Mapping[str, object]]
 
 
 def _prepare_deepseek_chat_message(
-    message: dict,
+    message: Mapping[str, object],
     require_reasoning: bool,
     missing_reasoning: DeepSeekMissingReasoning | None,
-) -> dict:
-    transformed_message = deepcopy(message)
-    if transformed_message.get("role") != "assistant":
-        return _sanitize_non_assistant_deepseek_message(transformed_message)
-
-    content: Final = transformed_message.get("content")
-    if isinstance(content, list):
-        transformed_content, content_has_tool_use, content_has_redacted_thinking, content_has_reasoning = (
-            _unsigned_content_blocks(content)
-        )
-        transformed_message["content"] = transformed_content
-    else:
-        content_has_tool_use = False
-        content_has_redacted_thinking = False
-        content_has_reasoning = False
-
-    raw_thinking_blocks: Final = transformed_message.get("thinking_blocks")
-    if isinstance(raw_thinking_blocks, list):
-        thinking_blocks, _, blocks_have_redacted_thinking, blocks_have_reasoning = _unsigned_content_blocks(
-            raw_thinking_blocks
-        )
-    else:
-        thinking_blocks = []
-        blocks_have_redacted_thinking = False
-        blocks_have_reasoning = False
-
-    has_reasoning = content_has_reasoning or blocks_have_reasoning
-    has_redacted_thinking: Final = content_has_redacted_thinking or blocks_have_redacted_thinking
+) -> Mapping[str, object]:
+    copied_message: Final = deepcopy(dict(message))
+    if copied_message.get("role") != "assistant":
+        return _sanitize_non_assistant_deepseek_message(copied_message)
+    content: Final = copied_message.get("content")
+    transformed_content, content_has_tool_use, content_has_redacted_thinking, content_has_reasoning = (
+        _unsigned_content_blocks(_DEEPSEEK_SEQUENCE_ADAPTER.validate_python(content))
+        if isinstance(content, list)
+        else ((), False, False, False)
+    )
+    raw_thinking_blocks: Final = copied_message.get("thinking_blocks")
+    thinking_blocks, _, blocks_have_redacted_thinking, blocks_have_reasoning = (
+        _unsigned_content_blocks(_DEEPSEEK_SEQUENCE_ADAPTER.validate_python(raw_thinking_blocks))
+        if isinstance(raw_thinking_blocks, list)
+        else ((), False, False, False)
+    )
     reasoning_content: Final = _nonempty_reasoning_content(message)
-    if require_reasoning and reasoning_content is not None:
-        transformed_message["content"] = (
-            [
-                block
-                for block in transformed_message.get("content", [])
-                if not (isinstance(block, Mapping) and block.get("type") == "thinking")
-            ]
-            if isinstance(transformed_message.get("content"), list)
-            else transformed_message.get("content")
-        )
-        thinking_blocks = [{"type": "thinking", "thinking": reasoning_content}]
-        has_reasoning = True
-
-    content_for_request: Final = transformed_message.get("content")
-    if not require_reasoning and isinstance(content_for_request, list):
-        transformed_message["content"] = [  # mutable-ok: provider content requires a concrete JSON array
+    prefer_reasoning_content: Final = require_reasoning and reasoning_content is not None
+    selected_thinking: Final = (
+        [{"type": "thinking", "thinking": reasoning_content}] if prefer_reasoning_content else thinking_blocks
+    )
+    selected_content: Final = (
+        [
             block
-            for block in content_for_request
-            if not (isinstance(block, Mapping) and block.get("type") == "thinking")
+            for block in transformed_content
+            if not ((fields := deepseek_mapping(block)) is not None and fields.get("type") == "thinking")
         ]
-    thinking_blocks_for_request: Final = thinking_blocks if require_reasoning else ()
+        if prefer_reasoning_content or not require_reasoning
+        else transformed_content
+    )
+    normalized_message: Final = {
+        **copied_message,
+        **({"content": selected_content} if isinstance(content, list) else {}),
+    }
+    has_reasoning: Final = content_has_reasoning or blocks_have_reasoning or prefer_reasoning_content
+    has_redacted_thinking: Final = content_has_redacted_thinking or blocks_have_redacted_thinking
+    thinking_blocks_for_request: Final = selected_thinking if require_reasoning else ()
     has_reasoning_for_request: Final = require_reasoning and has_reasoning
-
-    has_tool_history: Final = content_has_tool_use or _chat_message_has_tool_history(transformed_message)
+    has_tool_history: Final = content_has_tool_use or _chat_message_has_tool_history(normalized_message)
     if has_tool_history and has_redacted_thinking and require_reasoning and not has_reasoning_for_request:
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history cannot replay redacted thinking")
     use_placeholder: Final = (
@@ -1036,19 +1041,15 @@ def _prepare_deepseek_chat_message(
     ):
         raise _deepseek_history_validation_error("DeepSeek Anthropic tool history requires non-empty reasoning")
     final_thinking_blocks: Final = (
-        [  # mutable-ok: provider thinking history requires a concrete JSON array
-            {"type": "thinking", "thinking": " "},  # mutable-ok: provider thinking block is a JSON object
-            *thinking_blocks_for_request,
-        ]
+        [{"type": "thinking", "thinking": " "}, *thinking_blocks_for_request]
         if use_placeholder
         else thinking_blocks_for_request
     )
-
-    transformed_message = _without_reasoning_content_fields(transformed_message)
-    if final_thinking_blocks:
-        transformed_message["thinking_blocks"] = final_thinking_blocks
-    else:
-        transformed_message.pop("thinking_blocks", None)
+    cleaned_message: Final = _without_reasoning_content_fields(normalized_message)
+    transformed_message: Final = {
+        **{key: value for key, value in cleaned_message.items() if key != "thinking_blocks"},
+        **({"thinking_blocks": final_thinking_blocks} if final_thinking_blocks else {}),
+    }
     replayable_content: Final = transformed_message.get("content")
     has_visible_content: Final = (
         bool(replayable_content.strip())
@@ -1066,12 +1067,12 @@ def _legacy_function_call_id(message_index: int) -> str:
     return f"legacy_function_call_{message_index}"
 
 
-def _upgrade_legacy_function_call(message: dict, message_index: int) -> dict:
-    function_call: Final = message.get("function_call")
-    if message.get("role") != "assistant" or not isinstance(function_call, Mapping):
+def _upgrade_legacy_function_call(message: Mapping[str, object], message_index: int) -> Mapping[str, object]:
+    function_call: Final = deepseek_mapping(message.get("function_call"))
+    if message.get("role") != "assistant" or not function_call is not None:
         return message
     existing_tool_calls: Final = message.get("tool_calls")
-    tool_calls: Final = existing_tool_calls if isinstance(existing_tool_calls, list) else []
+    tool_calls: Final = deepseek_sequence(existing_tool_calls)
     return {
         **{key: value for key, value in message.items() if key != "function_call"},
         "tool_calls": [
@@ -1088,27 +1089,26 @@ def _upgrade_legacy_function_call(message: dict, message_index: int) -> dict:
 def _matching_legacy_function_result_call_id(
     message: Mapping[str, object], result_name: object, message_index: int
 ) -> str | None:
-    function_call: Final = message.get("function_call")
-    if isinstance(function_call, Mapping):
+    function_call: Final = deepseek_mapping(message.get("function_call"))
+    if function_call is not None:
         function_name: Final = function_call.get("name")
         if not isinstance(result_name, str) or function_name == result_name:
             return _legacy_function_call_id(message_index)
     tool_calls: Final = message.get("tool_calls")
     if not isinstance(tool_calls, list):
         return None
-    return next(
-        (
-            tool_id
-            for tool_call in tool_calls
-            if isinstance(tool_call, Mapping)
-            for function in (tool_call.get("function"),)
-            if isinstance(function, Mapping)
-            if not isinstance(result_name, str) or function.get("name") == result_name
-            for tool_id in (tool_call.get("id"),)
-            if isinstance(tool_id, str) and tool_id
-        ),
-        None,
-    )
+    return next(filter(None, (_legacy_tool_call_result_id(tool_call, result_name) for tool_call in tool_calls)), None)
+
+
+def _legacy_tool_call_result_id(raw_tool_call: object, result_name: object) -> str | None:
+    tool_call: Final = _as_deepseek_mapping(raw_tool_call)
+    if tool_call is None:
+        return None
+    function: Final = deepseek_mapping(tool_call.get("function"))
+    if function is None or (isinstance(result_name, str) and function.get("name") != result_name):
+        return None
+    tool_id: Final = tool_call.get("id")
+    return tool_id if isinstance(tool_id, str) and tool_id else None
 
 
 def _legacy_function_result_call_id(messages: Sequence[Mapping[str, object]], message_index: int) -> str | None:
@@ -1128,17 +1128,17 @@ def _legacy_function_result_call_id(messages: Sequence[Mapping[str, object]], me
     return None
 
 
-def _upgrade_legacy_function_result(message: dict, tool_call_id: str | None) -> dict:
+def _upgrade_legacy_function_result(message: Mapping[str, object], tool_call_id: str | None) -> Mapping[str, object]:
     if message.get("role") != "function" or tool_call_id is None:
         return message
     return {**message, "role": "tool", "tool_call_id": tool_call_id}
 
 
 def prepare_deepseek_chat_history(
-    messages: list[dict],
+    messages: Sequence[Mapping[str, object]],
     require_reasoning: bool = True,
     missing_reasoning: DeepSeekMissingReasoning | None = None,
-) -> list[dict]:
+) -> Sequence[Mapping[str, object]]:
     _validate_deepseek_content_blocks(messages)
     prepared_messages: Final = [
         _prepare_deepseek_chat_message(
@@ -1159,23 +1159,24 @@ def prepare_deepseek_chat_history(
     return upgraded
 
 
-def _normalized_tool_choice(tool_choice: object) -> object:
-    if isinstance(tool_choice, str):
+def _normalized_tool_choice(raw_tool_choice: object) -> object:
+    if isinstance(raw_tool_choice, str):
         return {
             "auto": {"type": "auto"},
             "none": {"type": "none"},
             "required": {"type": "any"},
             "any": {"type": "any"},
-        }.get(tool_choice, tool_choice)
-    if not isinstance(tool_choice, Mapping):
-        return deepcopy(tool_choice)
+        }.get(raw_tool_choice, raw_tool_choice)
+    if not isinstance(raw_tool_choice, Mapping):
+        return deepcopy(raw_tool_choice)
+    tool_choice: Final = _DEEPSEEK_MAPPING_ADAPTER.validate_python(raw_tool_choice)
     choice: Final = deepcopy(dict(tool_choice))
     choice_type: Final = choice.get("type")
     if choice_type == "required":
         return {**choice, "type": "any"}
     if choice_type == "function":
-        function: Final = choice.get("function")
-        if isinstance(function, Mapping) and isinstance(function.get("name"), str):
+        function: Final = deepseek_mapping(choice.get("function"))
+        if function is not None and isinstance(function.get("name"), str):
             return {
                 **{key: value for key, value in choice.items() if key != "function"},
                 "type": "tool",
@@ -1198,13 +1199,13 @@ def _normalize_deepseek_reasoning_effort(effort: object) -> str | None:
             return effort
 
 
-def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> dict:
+def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> Mapping[str, object]:
     raw_reasoning_effort: Final = request_params.get("reasoning_effort")
     normalized_reasoning_effort: Final = _normalize_deepseek_reasoning_effort(raw_reasoning_effort)
     without_reasoning_effort: Final = {
         key: deepcopy(value) for key, value in request_params.items() if key != "reasoning_effort"
     }
-    raw_output_config: Final = without_reasoning_effort.get("output_config")
+    raw_output_config: Final = deepseek_mapping(without_reasoning_effort.get("output_config"))
     raw_effort: Final = raw_output_config.get("effort") if isinstance(raw_output_config, Mapping) else None
     normalized_effort: Final = _normalize_deepseek_reasoning_effort(raw_effort)
     output_config_from_request: Final = (
@@ -1235,7 +1236,7 @@ def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> 
                 "thinking": {"type": "disabled"},
             }
         if normalized_reasoning_effort in _DEEPSEEK_OUTPUT_EFFORTS:
-            return {  # mutable-ok: provider request parameters require concrete JSON objects
+            return {
                 **normalized_output_config,
                 "thinking": {"type": "enabled"},
             }
@@ -1247,7 +1248,7 @@ def _without_adaptive_reasoning_params(request_params: Mapping[str, object]) -> 
             "thinking": {"type": "disabled"},
         }
     if thinking_type in _DEEPSEEK_ENABLED_THINKING_TYPES:
-        return {  # mutable-ok: provider request parameters require concrete JSON objects
+        return {
             **normalized_output_config,
             "thinking": {"type": "enabled"},
         }
@@ -1263,7 +1264,7 @@ def default_deepseek_anthropic_thinking_to_enabled(
     normalized_model: Final = model.rsplit("/", maxsplit=1)[-1].lower()
     if normalized_model.startswith(_DEEPSEEK_LEGACY_REASONING_MODEL_PREFIXES):
         return request_params
-    return {  # mutable-ok: provider request requires concrete JSON containers
+    return {
         **request_params,
         "thinking": {"type": "enabled"},
     }
@@ -1271,12 +1272,12 @@ def default_deepseek_anthropic_thinking_to_enabled(
 
 def _normalize_tool_choice_for_thinking(request_params: Mapping[str, object]) -> Mapping[str, object]:
     thinking: Final = request_params.get("thinking")
-    if not (isinstance(thinking, Mapping) and thinking.get("type") == "enabled"):
+    if not (isinstance(thinking, Mapping) and message_field(thinking, "type") == "enabled"):
         return request_params
     tool_choice: Final = request_params.get("tool_choice")
     if not isinstance(tool_choice, Mapping):
         return request_params
-    choice_type: Final = tool_choice.get("type")
+    choice_type: Final = message_field(tool_choice, "type")
     if choice_type in ("auto", "none"):
         return request_params
     if choice_type in ("any", "tool"):
@@ -1286,7 +1287,7 @@ def _normalize_tool_choice_for_thinking(request_params: Mapping[str, object]) ->
 
 def omit_false_stream_for_deepseek_anthropic(
     request_params: Mapping[str, object],
-) -> dict[str, object]:
+) -> Mapping[str, object]:
     return {key: value for key, value in request_params.items() if key != "stream" or value is not False}
 
 
@@ -1319,7 +1320,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
     @staticmethod
     def _translate_adaptive_effort_for_non_adaptive_model(
-        model: str, optional_params: dict, max_tokens: int | None, custom_llm_provider: str
+        model: str, optional_params: Mapping[str, object], max_tokens: int | None, custom_llm_provider: str
     ) -> None:
         return
 
@@ -1338,14 +1339,14 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
     def validate_anthropic_messages_environment(
         self,
-        headers: dict,
+        headers: dict[str, str],
         model: str,
-        messages: list[Any],
-        optional_params: dict,
-        litellm_params: dict,
+        messages: Sequence[Mapping[str, object]],
+        optional_params: Mapping[str, object],
+        litellm_params: Mapping[str, object],
         api_key: str | None = None,
         api_base: str | None = None,
-    ) -> tuple[dict, str | None]:
+    ) -> tuple[dict[str, str], str | None]:  # mutable-ok: provider environment interface returns mutable HTTP headers
         dynamic_api_key: Final = self.get_api_key(api_key=api_key)
 
         if "x-api-key" not in headers and "authorization" not in headers and dynamic_api_key is not None:
@@ -1356,50 +1357,46 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         if "content-type" not in headers:
             headers["content-type"] = "application/json"
 
-        headers = self._update_headers_with_anthropic_beta(
+        updated_headers: Final = self._update_headers_with_anthropic_beta(
             headers=headers,
-            optional_params=optional_params,
+            optional_params=dict(optional_params),
             custom_llm_provider=self.custom_llm_provider or "deepseek",
-            messages=messages,
+            messages=[dict(message) for message in messages],
         )
 
-        return headers, api_base
+        return TypeAdapter(dict[str, str]).validate_python(updated_headers), api_base
 
     def get_complete_url(
         self,
         api_base: str | None,
         api_key: str | None,
         model: str,
-        optional_params: dict,
-        litellm_params: dict,
+        optional_params: Mapping[str, object],
+        litellm_params: Mapping[str, object],
         stream: bool | None = None,
     ) -> str:
         base_url = self.get_api_base(api_base=api_base).rstrip("/")
         return _complete_messages_url(base_url, self._messages_path)
 
     @staticmethod
-    def _sanitize_tools_for_deepseek(tools: Any) -> object:
+    def _sanitize_tools_for_deepseek(tools: object) -> object:
         if not isinstance(tools, list):
             return tools
-
-        sanitized_tools: Final = []
-        for tool in tools:
-            if isinstance(tool, dict) and tool.get("type") == "custom":
-                sanitized_tool = dict(tool)
-                sanitized_tool.pop("type", None)
-                sanitized_tools.append(sanitized_tool)
-            else:
-                sanitized_tools.append(tool)
-        return sanitized_tools
+        return [
+            {key: value for key, value in mapped.items() if key != "type"}
+            if (mapped := deepseek_mapping(tool)) is not None and mapped.get("type") == "custom"
+            else tool
+            for tool in _DEEPSEEK_SEQUENCE_ADAPTER.validate_python(tools)
+        ]
 
     def transform_anthropic_messages_request(
         self,
         model: str,
-        messages: list[dict],
-        anthropic_messages_optional_request_params: dict,
+        messages: Sequence[Mapping[str, object]],
+        anthropic_messages_optional_request_params: Mapping[str, object],
         litellm_params: GenericLiteLLMParams,
-        headers: dict,
-    ) -> dict:
+        headers: dict[str, str],
+    ) -> dict[str, object]:  # mutable-ok: provider request interface returns mutable JSON dictionaries
         _validate_deepseek_content_blocks(messages, model=model)
         normalized_messages: Final = _merge_deepseek_tool_result_messages(
             _normalize_deepseek_native_tool_history(messages)
@@ -1420,8 +1417,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             )
         )
         request_params: Final = _normalize_tool_choice_for_thinking(request_params_with_thinking_default)
-        thinking: Final = request_params.get("thinking")
-        require_reasoning: Final = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
+        thinking: Final = deepseek_mapping(request_params.get("thinking"))
+        require_reasoning: Final = thinking is not None and thinking.get("type") == "enabled"
         transformed_messages: Final = _deepseek_history(
             normalized_messages,
             require_reasoning=require_reasoning,
@@ -1429,18 +1426,21 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         )
         _validate_deepseek_tool_use_blocks(transformed_messages)
         _validate_deepseek_tool_history(transformed_messages)
-        anthropic_messages_request: Final = super().transform_anthropic_messages_request(
+        raw_anthropic_messages_request: Final[object] = super().transform_anthropic_messages_request(
             model=model,
-            messages=transformed_messages,
-            anthropic_messages_optional_request_params=request_params,
+            messages=[dict(message) for message in transformed_messages],
+            anthropic_messages_optional_request_params=dict(request_params),
             litellm_params=litellm_params,
             headers=headers,
+        )
+        anthropic_messages_request: Final = TypeAdapter(dict[str, object]).validate_python(
+            raw_anthropic_messages_request
         )
         normalized_anthropic_messages_request: Final = omit_false_stream_for_deepseek_anthropic(
             {**anthropic_messages_request, **({"thinking": thinking} if thinking is not None else {})}
         )
         if "tools" not in normalized_anthropic_messages_request:
-            return normalized_anthropic_messages_request
+            return dict(normalized_anthropic_messages_request)
         return {
             **normalized_anthropic_messages_request,
             "tools": self._sanitize_tools_for_deepseek(normalized_anthropic_messages_request["tools"]),
@@ -1450,17 +1450,17 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         self,
         model: str,
         httpx_response: httpx.Response,
-        request_body: dict,
+        request_body: Mapping[str, object],
         litellm_logging_obj: LiteLLMLoggingObj,
     ) -> AsyncIterator[bytes]:
         completion_stream: Final[AsyncIterator[bytes]] = super().get_async_streaming_response_iterator(
             model=model,
             httpx_response=httpx_response,
-            request_body=request_body,
+            request_body=dict(request_body),
             litellm_logging_obj=litellm_logging_obj,
         )
-        thinking: Final[object] = request_body.get("thinking")
-        thinking_disabled: Final = isinstance(thinking, Mapping) and thinking.get("type") == "disabled"
+        thinking: Final = deepseek_mapping(request_body.get("thinking"))
+        thinking_disabled: Final = thinking is not None and thinking.get("type") == "disabled"
         return _sanitize_deepseek_messages_stream(completion_stream, thinking_disabled=thinking_disabled)
 
     def transform_anthropic_messages_response(
@@ -1474,16 +1474,16 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             raw_response=raw_response,
             logging_obj=logging_obj,
         )
-        model_call_details: Final = getattr(logging_obj, "model_call_details", None)
+        model_call_details: Final = deepseek_mapping(getattr(logging_obj, "model_call_details", None))
         request_thinking: Final = (
-            model_call_details.get("thinking") if isinstance(model_call_details, Mapping) else None
+            deepseek_mapping(model_call_details.get("thinking")) if model_call_details is not None else None
         )
-        thinking_enabled: Final = isinstance(request_thinking, Mapping) and request_thinking.get("type") == "enabled"
-        thinking_disabled: Final = isinstance(request_thinking, Mapping) and request_thinking.get("type") == "disabled"
+        thinking_enabled: Final = request_thinking is not None and request_thinking.get("type") == "enabled"
+        thinking_disabled: Final = request_thinking is not None and request_thinking.get("type") == "disabled"
         reasoning_content: Final = raw_response_data.get("reasoning_content")
-        provider_specific_fields: Final = raw_response_data.get("provider_specific_fields")
+        provider_specific_fields: Final = deepseek_mapping(raw_response_data.get("provider_specific_fields"))
         provider_reasoning_content: Final = (
-            provider_specific_fields.get("reasoning_content") if isinstance(provider_specific_fields, Mapping) else None
+            provider_specific_fields.get("reasoning_content") if provider_specific_fields is not None else None
         )
         normalized_reasoning_content: Final = (
             reasoning_content
@@ -1501,13 +1501,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             if isinstance(content, list)
             else ()
         )
-        has_thinking: Final = any(
-            isinstance(block, Mapping)
-            and block.get("type") == "thinking"
-            and isinstance(block.get("thinking"), str)
-            and bool(block.get("thinking", "").strip())
-            for block in content_blocks
-        )
+        has_thinking: Final = any(_is_nonempty_deepseek_thinking_block(block) for block in content_blocks)
         if (
             thinking_enabled
             and isinstance(normalized_reasoning_content, str)
@@ -1529,7 +1523,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     def max_retry_on_anthropic_messages_http_error(self) -> int:
         return 1
 
-    def should_retry_anthropic_messages_on_http_error(self, e: httpx.HTTPStatusError, litellm_params: dict) -> bool:
+    def should_retry_anthropic_messages_on_http_error(
+        self, e: httpx.HTTPStatusError, litellm_params: Mapping[str, object]
+    ) -> bool:
         return False
 
     def should_disable_anthropic_messages_fallbacks_on_http_error(self, e: httpx.HTTPStatusError) -> bool:

@@ -211,11 +211,13 @@ def create_container(
 
         # get llm provider logic
         # Pass credential params explicitly since they're named args, not in kwargs
-        litellm_params: Final = GenericLiteLLMParams(
-            api_key=api_key,
-            api_base=api_base,
-            api_version=api_version,
-            **kwargs,
+        litellm_params: Final = GenericLiteLLMParams.model_validate(
+            dict(
+                api_key=api_key,
+                api_base=api_base,
+                api_version=api_version,
+                **kwargs,
+            )
         )
         # get provider config
         container_provider_config: BaseContainerConfig | None = ProviderConfigManager.get_provider_container_config(
@@ -429,11 +431,13 @@ def list_containers(
 
         # get llm provider logic
         # Pass credential params explicitly since they're named args, not in kwargs
-        litellm_params: Final = GenericLiteLLMParams(
-            api_key=api_key,
-            api_base=api_base,
-            api_version=api_version,
-            **kwargs,
+        litellm_params: Final = GenericLiteLLMParams.model_validate(
+            dict(
+                api_key=api_key,
+                api_base=api_base,
+                api_version=api_version,
+                **kwargs,
+            )
         )
         # get provider config
         container_provider_config: BaseContainerConfig | None = ProviderConfigManager.get_provider_container_config(
@@ -620,11 +624,13 @@ def retrieve_container(
 
         # get llm provider logic
         # Pass credential params explicitly since they're named args, not in kwargs
-        litellm_params = GenericLiteLLMParams(
-            api_key=api_key,
-            api_base=api_base,
-            api_version=api_version,
-            **kwargs,
+        litellm_params = GenericLiteLLMParams.model_validate(
+            dict(
+                api_key=api_key,
+                api_base=api_base,
+                api_version=api_version,
+                **kwargs,
+            )
         )
 
         # Decode container ID and extract provider info
@@ -835,11 +841,13 @@ def delete_container(
 
         # get llm provider logic
         # Pass credential params explicitly since they're named args, not in kwargs
-        litellm_params = GenericLiteLLMParams(
-            api_key=api_key,
-            api_base=api_base,
-            api_version=api_version,
-            **kwargs,
+        litellm_params = GenericLiteLLMParams.model_validate(
+            dict(
+                api_key=api_key,
+                api_base=api_base,
+                api_version=api_version,
+                **kwargs,
+            )
         )
 
         # Decode container ID and extract provider info
@@ -1064,11 +1072,13 @@ def list_container_files(
 
         # get llm provider logic
         # Pass credential params explicitly since they're named args, not in kwargs
-        litellm_params = GenericLiteLLMParams(
-            api_key=api_key,
-            api_base=api_base,
-            api_version=api_version,
-            **kwargs,
+        litellm_params = GenericLiteLLMParams.model_validate(
+            dict(
+                api_key=api_key,
+                api_base=api_base,
+                api_version=api_version,
+                **kwargs,
+            )
         )
 
         # Decode container ID and extract provider info
@@ -1315,11 +1325,13 @@ def upload_container_file(
 
         # get llm provider logic
         # Pass credential params explicitly since they're named args, not in kwargs
-        litellm_params = GenericLiteLLMParams(
-            api_key=api_key,
-            api_base=api_base,
-            api_version=api_version,
-            **kwargs,
+        litellm_params = GenericLiteLLMParams.model_validate(
+            dict(
+                api_key=api_key,
+                api_base=api_base,
+                api_version=api_version,
+                **kwargs,
+            )
         )
 
         # Decode container ID and extract provider info

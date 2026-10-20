@@ -11,6 +11,7 @@ from typing_extensions import TypedDict
 import litellm
 from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.asyncify import run_async_function
+from litellm.litellm_core_utils.prompt_templates.mid_conversation_system import message_field
 from litellm.llms.anthropic.pass_through.adapters.transformation import (
     AnthropicAdapter,
 )
@@ -330,18 +331,16 @@ class LiteLLMMessagesToCompletionTransformationHandler:
             return True
         effective_thinking: Final = completion_kwargs.get("thinking")
         if isinstance(effective_thinking, Mapping):
-            return effective_thinking.get("type") == "disabled"
+            return message_field(effective_thinking, "type") == "disabled"
         reasoning_effort: Final = completion_kwargs.get("reasoning_effort")
         if isinstance(reasoning_effort, str):
             return reasoning_effort in ("", "none")
         if isinstance(reasoning_effort, Mapping):
-            effort: Final = reasoning_effort.get("effort")
+            effort: Final = message_field(reasoning_effort, "effort")
             return not isinstance(effort, str) or effort in ("", "none")
         model: Final = completion_kwargs.get("model")
         normalized_model: Final = model.rsplit("/", maxsplit=1)[-1].lower() if isinstance(model, str) else ""
-        if normalized_model.startswith(("deepseek-v4", "claude-")):
-            return False
-        return True
+        return not normalized_model.startswith(("deepseek-v4", "claude-"))
 
     @staticmethod
     def _route_openai_thinking_to_responses_api_if_needed(
@@ -595,8 +594,8 @@ class LiteLLMMessagesToCompletionTransformationHandler:
             if key == "litellm_logging_obj" and value is not None and isinstance(value, LiteLLMLoggingObject):
                 from litellm.types.utils import CallTypes
 
-                setattr(value, "call_type", CallTypes.anthropic_messages.value)
-                setattr(value, "stream_options", completion_kwargs.get("stream_options"))
+                value.call_type = CallTypes.anthropic_messages.value
+                value.stream_options = completion_kwargs.get("stream_options")
             if key not in excluded_keys and key not in completion_kwargs and value is not None:
                 completion_kwargs[key] = value
 

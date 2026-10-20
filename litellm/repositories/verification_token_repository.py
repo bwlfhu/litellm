@@ -82,7 +82,7 @@ class KeyBudgetReset:
     next_reset_at: datetime | None
 
 
-class _ResetTokenResult(BaseModel):
+class _ResetTokenResult(BaseModel, frozen=True):
     token: str
 
 

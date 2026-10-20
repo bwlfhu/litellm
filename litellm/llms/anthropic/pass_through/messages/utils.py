@@ -139,8 +139,8 @@ def prepare_native_messages(
     presanitized: bool = False,
 ) -> tuple[list[dict[str, JsonValue]], str | list[dict[str, JsonValue]] | None]:
     from litellm.llms.anthropic.pass_through.messages.handler import (
-        _sanitize_anthropic_tool_history_with_diagnostics,
-        _uses_deepseek_anthropic_messages,
+        sanitize_anthropic_tool_history_with_diagnostics,
+        uses_deepseek_anthropic_messages,
     )
 
     stripped: Final = strip_empty_content_blocks_from_anthropic_messages(messages) if not presanitized else messages
@@ -148,8 +148,8 @@ def prepare_native_messages(
     call_id: Final = kwargs.get("litellm_call_id") or getattr(logging_obj, "litellm_call_id", None)
     normalized: Final = (
         stripped
-        if presanitized or _uses_deepseek_anthropic_messages(model, custom_llm_provider, kwargs)
-        else _sanitize_anthropic_tool_history_with_diagnostics(
+        if presanitized or uses_deepseek_anthropic_messages(model, custom_llm_provider, kwargs)
+        else sanitize_anthropic_tool_history_with_diagnostics(
             messages=stripped, model=model, call_id=call_id if isinstance(call_id, str) else None
         )
     )

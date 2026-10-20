@@ -9,7 +9,7 @@ See https://help.aliyun.com/zh/model-studio/billing-for-model-studio
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, cast
+from typing import Final
 
 from litellm.litellm_core_utils.llm_cost_calc.tiered_pricing import select_tier_for_input, tier_rate
 from litellm.litellm_core_utils.llm_cost_calc.utils import (
@@ -60,24 +60,22 @@ def _flat_rate(model_info: ModelInfo, cost_key: str, fallback_cost_key: str) -> 
     return float(value)
 
 
-_THINKING_RATE_KEYS: Final = (
-    ("input_cost_per_token", "input_cost_per_token_thinking"),
-    ("cache_read_input_token_cost", "cache_read_input_token_cost_thinking"),
-    ("output_cost_per_token", "output_cost_per_token_thinking"),
-)
-
-
 def _with_thinking_rates(model_info: ModelInfo, breakdown: TokenBreakdown) -> ModelInfo:
     if breakdown.reasoning_tokens == 0:
         return model_info
-    overrides: Final = {
-        base_key: model_info.get(thinking_key)
-        for base_key, thinking_key in _THINKING_RATE_KEYS
-        if model_info.get(thinking_key) is not None
-    }
-    if not overrides:
+    input_rate: Final = model_info.get("input_cost_per_token_thinking")
+    cache_rate: Final = model_info.get("cache_read_input_token_cost_thinking")
+    output_rate: Final = model_info.get("output_cost_per_token_thinking")
+    if input_rate is None and cache_rate is None and output_rate is None:
         return model_info
-    return cast("ModelInfo", {**model_info, **overrides})
+    rates: Final = model_info.copy()
+    if input_rate is not None:
+        rates["input_cost_per_token"] = input_rate
+    if cache_rate is not None:
+        rates["cache_read_input_token_cost"] = cache_rate
+    if output_rate is not None:
+        rates["output_cost_per_token"] = output_rate
+    return rates
 
 
 def _flat_rates(model_info: ModelInfo) -> TokenRates:

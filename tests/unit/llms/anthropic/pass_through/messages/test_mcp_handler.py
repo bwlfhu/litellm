@@ -18,7 +18,7 @@ from litellm.llms.anthropic.pass_through.messages.mcp_handler import (
     _extract_tool_use_blocks,
 )
 from litellm.llms.deepseek.messages.transformation import DeepSeekAnthropicMessagesConfig
-from litellm.router_protocol import _build_deployment_protocol_context
+from litellm.router_protocol import build_deployment_protocol_context
 
 MCP_REFERENCE = {
     "type": "mcp",
@@ -64,7 +64,7 @@ async def test_anthropic_messages_handler_routes_litellm_proxy_mcp_to_the_gatewa
 
 @pytest.mark.asyncio
 async def test_anthropic_messages_handler_preserves_trusted_protocol_context_for_mcp_recursion():
-    protocol_context = _build_deployment_protocol_context(
+    protocol_context = build_deployment_protocol_context(
         {
             "deepseek_anthropic_messages_path": "v1/messages",
             "deepseek_anthropic_tool_thinking": "disabled",
@@ -93,7 +93,7 @@ async def test_anthropic_messages_handler_preserves_trusted_protocol_context_for
 async def test_anthropic_messages_with_mcp_preserves_protocol_context_on_recursive_call():
     from litellm.llms.anthropic.pass_through.messages import mcp_handler
 
-    protocol_context = _build_deployment_protocol_context({"deepseek_anthropic_messages_path": "v1/messages"})
+    protocol_context = build_deployment_protocol_context({"deepseek_anthropic_messages_path": "v1/messages"})
     assert protocol_context is not None
     recursive_call = AsyncMock(return_value={"stop_reason": "end_turn", "content": []})
 
@@ -113,7 +113,7 @@ async def test_anthropic_messages_with_mcp_preserves_protocol_context_on_recursi
 async def test_mcp_recursive_protocol_context_stops_at_provider_boundary():
     from litellm.llms.anthropic.pass_through.messages import handler, mcp_handler
 
-    protocol_context = _build_deployment_protocol_context({"deepseek_anthropic_messages_path": "v1/messages"})
+    protocol_context = build_deployment_protocol_context({"deepseek_anthropic_messages_path": "v1/messages"})
     assert protocol_context is not None
     logging_obj = Logging(
         model="claude-test",

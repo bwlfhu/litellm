@@ -198,9 +198,9 @@ class _Increment(_Op[float]):
 
     def enqueue(self, pipe: _RedisPipeline) -> int:
         name: Final = self._redis_cache.check_and_fix_namespace(key=self._key)
-        if self._redis_cache._is_key_spend_counter(name):
+        if self._redis_cache.is_key_spend_counter(name):
             pipe.eval(
-                *self._redis_cache._spend_counter_write_command(
+                *self._redis_cache.spend_counter_write_command(
                     name,
                     self._value,
                     "increment",
@@ -243,9 +243,9 @@ class _Set(_Op[None]):
     def enqueue(self, pipe: _RedisPipeline) -> int:
         ttl: Final = self._redis_cache.get_ttl(ttl=self._ttl)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # untyped cache API
         name: Final = self._redis_cache.check_and_fix_namespace(key=self._key)
-        if self._redis_cache._is_key_spend_counter(name):
+        if self._redis_cache.is_key_spend_counter(name):
             pipe.eval(
-                *self._redis_cache._spend_counter_write_command(
+                *self._redis_cache.spend_counter_write_command(
                     name,
                     float(str(self._value)),
                     "set",
@@ -279,8 +279,8 @@ class _Delete(_Op[None]):
 
     def enqueue(self, pipe: _RedisPipeline) -> int:
         name: Final = self._redis_cache.check_and_fix_namespace(key=self._key)
-        if self._redis_cache._is_key_spend_counter(name):
-            pipe.delete(name, self._redis_cache._spend_counter_generation_key(name))
+        if self._redis_cache.is_key_spend_counter(name):
+            pipe.delete(name, self._redis_cache.spend_counter_generation_key(name))
         else:
             pipe.delete(name)
         return 1

@@ -3073,7 +3073,7 @@ async def _repair_stale_spend_counter(counter_key: str, db_spend: float) -> floa
     """
     if (
         counter_key.startswith("spend:key:")
-        and not SpendCounterReseed._is_key_or_team_window_counter(counter_key)
+        and not SpendCounterReseed.is_key_or_team_window_counter(counter_key)
         and spend_counter_cache.redis_cache is not None
     ):
         try:
@@ -3091,7 +3091,7 @@ async def _repair_stale_spend_counter(counter_key: str, db_spend: float) -> floa
                 return repaired
             current_counter: Final = await spend_counter_cache.redis_cache.async_get_cache(key=counter_key)
             return float(current_counter) if current_counter is not None else None
-        except Exception:
+        except Exception:  # noqa: BLE001  # Redis and DB outages must return an unverifiable counter
             verbose_proxy_logger.debug("Unable to repair key spend counter %s", counter_key, exc_info=True)
             return None
 
@@ -3107,7 +3107,7 @@ async def _repair_stale_spend_counter(counter_key: str, db_spend: float) -> floa
     if spend_counter_cache.redis_cache is not None:
         forget_spend_counter(counter_key)
         try:
-            repaired: Final = await spend_counter_cache.redis_cache.async_set_max(key=counter_key, value=db_spend)
+            await spend_counter_cache.redis_cache.async_set_max(key=counter_key, value=db_spend)
         except Exception:
             verbose_proxy_logger.debug(
                 "Unable to repair stale spend counter %s in Redis",
@@ -4688,9 +4688,9 @@ def _write_health_state_to_router_cache(
                 exception_status=exception_status,
                 deployment=model_id,
                 time_to_cooldown=(
-                    llm_router._get_valid_deployment_cooldown_time(deployment)
+                    llm_router.get_valid_deployment_cooldown_time(deployment)
                     if (deployment := llm_router.get_deployment(model_id=model_id)) is not None
-                    and llm_router._get_valid_deployment_cooldown_time(deployment) is not None
+                    and llm_router.get_valid_deployment_cooldown_time(deployment) is not None
                     else llm_router.cooldown_time
                 ),
             )

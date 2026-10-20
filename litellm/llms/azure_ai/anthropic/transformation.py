@@ -65,7 +65,7 @@ class AzureAnthropicConfig(AnthropicConfig):
             # Ensure api_key is included if provided
             if api_key and "api_key" not in litellm_params:
                 litellm_params = {**litellm_params, "api_key": api_key}
-            litellm_params_obj = GenericLiteLLMParams(**litellm_params)
+            litellm_params_obj = GenericLiteLLMParams.model_validate(dict(**litellm_params))
         else:
             litellm_params_obj = litellm_params or GenericLiteLLMParams()
             # Set api_key if provided and not already set

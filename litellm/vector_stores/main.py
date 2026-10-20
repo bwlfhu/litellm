@@ -206,7 +206,7 @@ def create(
         _is_async: Final = kwargs.pop("acreate", False) is True
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         ## MOCK RESPONSE LOGIC
         if litellm_params.mock_response and isinstance(litellm_params.mock_response, dict):
@@ -405,7 +405,7 @@ def search(
                 pass
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(vector_store_id=vector_store_id, **kwargs))
 
         ## MOCK RESPONSE LOGIC
         if litellm_params.mock_response and isinstance(litellm_params.mock_response, (str, builtins.list)):
@@ -568,7 +568,7 @@ def retrieve(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("aretrieve", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         if custom_llm_provider is None:
             custom_llm_provider = "openai"
@@ -712,7 +712,7 @@ def list(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("alist", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         if custom_llm_provider is None:
             custom_llm_provider = "openai"
@@ -864,7 +864,7 @@ def update(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("aupdate", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         if custom_llm_provider is None:
             custom_llm_provider = "openai"
@@ -1007,7 +1007,7 @@ def delete(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("adelete", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         if custom_llm_provider is None:
             custom_llm_provider = "openai"

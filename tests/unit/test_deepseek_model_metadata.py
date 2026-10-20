@@ -12,6 +12,8 @@ field set to ``True``.
 import json
 import os
 
+import pytest
+
 import litellm
 from litellm.utils import (
     supports_factory,
@@ -124,3 +126,16 @@ class TestBareModelFallback:
         finally:
             if key in litellm.model_cost and original is not None:
                 litellm.model_cost[key]["supports_function_calling"] = original
+
+
+@pytest.mark.parametrize("filename", ["model_prices_and_context_window.json", "litellm/model_prices_and_context_window_backup.json"])
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+@pytest.mark.parametrize("prefix", ["", "deepseek/"])
+def test_deepseek_v4_capacity_contract(filename, model, prefix):
+    # Compatibility values retained from 982f2b9b7a (2026-10-14), based on https://api-docs.deepseek.com/quick_start/pricing
+    from pathlib import Path
+
+    data = json.loads((Path(litellm.__file__).resolve().parent.parent / filename).read_text())
+    entry = data[prefix + model]
+    assert entry["max_input_tokens"] == 1_000_000
+    assert entry["max_output_tokens"] == entry["max_tokens"] == 393_216

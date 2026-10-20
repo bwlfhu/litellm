@@ -36,7 +36,6 @@ import litellm
 from litellm._logging import redact_internal_details_from_client_message, verbose_proxy_logger
 from litellm._uuid import uuid
 from litellm.anthropic_interface.exceptions import (
-    AnthropicErrorResponse,
     AnthropicErrorSseFrame,
     AnthropicExceptionMapping,
     anthropic_error_sse_frame,
@@ -1010,7 +1009,7 @@ def _sse_error_frames(error_obj: Mapping[str, object], *, anthropic_messages: bo
     if anthropic_messages:
         code: Final = error_obj.get("code")
         status_code: Final = int(code) if isinstance(code, (str, int)) and str(code).isdigit() else 500
-        payload: Final[AnthropicErrorResponse] = {
+        payload: Final[Mapping[str, object]] = {
             "type": "error",
             "error": {
                 **error_obj,
@@ -1774,6 +1773,23 @@ def _timing_values(
     if hidden_params.get("_response_ms") is not None or not use_logging_obj or logging_obj is None:
         return hidden_params
     return getattr(logging_obj, "response_timing_metrics", None) or {}
+
+
+async def _post_call_failure_exception(
+    proxy_logging_obj: ProxyLogging,
+    user_api_key_dict: UserAPIKeyAuth,
+    original_exception: Exception,
+    request_data: dict[str, object],  # mutable-ok: failure hooks update the shared request payload
+    serialize_http_errors: bool,
+) -> Exception | None:
+    try:
+        return await proxy_logging_obj.post_call_failure_hook(
+            user_api_key_dict=user_api_key_dict, original_exception=original_exception, request_data=request_data
+        )
+    except HTTPException as hook_error:
+        if not serialize_http_errors:
+            raise
+        return hook_error
 
 
 class ProxyBaseLLMRequestProcessing:
@@ -4082,16 +4098,9 @@ class ProxyBaseLLMRequestProcessing:
             verbose_proxy_logger.exception(
                 "litellm.proxy.proxy_server.async_data_generator(): Exception occured - %s", e
             )
-            try:
-                transformed_exception = await proxy_logging_obj.post_call_failure_hook(
-                    user_api_key_dict=user_api_key_dict,
-                    original_exception=e,
-                    request_data=request_data,
-                )
-            except HTTPException as hook_error:
-                if not serialize_http_errors:
-                    raise
-                transformed_exception = hook_error
+            transformed_exception: Final = await _post_call_failure_exception(
+                proxy_logging_obj, user_api_key_dict, e, request_data, serialize_http_errors
+            )
             if transformed_exception is not None:
                 e = transformed_exception
             verbose_proxy_logger.debug(

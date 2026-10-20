@@ -1636,7 +1636,7 @@ class LiteLLMAnthropicMessagesAdapter:
 
     def translate_streaming_openai_chunk_to_anthropic_content_block(
         self,
-        choices: list[OpenAIStreamingChoice | StreamingChoices],
+        choices: Sequence[OpenAIStreamingChoice | StreamingChoices],
         thinking_disabled: bool = False,
     ) -> tuple[
         Literal["text", "tool_use", "thinking"],
@@ -1708,7 +1708,7 @@ class LiteLLMAnthropicMessagesAdapter:
 
     def _translate_streaming_openai_chunk_to_anthropic(
         self,
-        choices: list[OpenAIStreamingChoice | StreamingChoices],
+        choices: Sequence[OpenAIStreamingChoice | StreamingChoices],
         thinking_disabled: bool = False,
     ) -> tuple[
         StreamingContentBlockDeltaType,

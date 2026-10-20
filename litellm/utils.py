@@ -745,6 +745,9 @@ def _is_gemini_model(model: str | None, custom_llm_provider: str | None) -> bool
     return model is not None and "gemini" in model.lower()
 
 
+is_gemini_model: Final = _is_gemini_model
+
+
 def _remove_thought_signature_from_id(tool_call_id: str, separator: str) -> str:
     """
     Remove thought signature from a tool call ID.
@@ -752,6 +755,9 @@ def _remove_thought_signature_from_id(tool_call_id: str, separator: str) -> str:
     if separator in tool_call_id:
         return tool_call_id.split(separator, 1)[0]
     return tool_call_id
+
+
+remove_thought_signature_from_id: Final = _remove_thought_signature_from_id
 
 
 def _process_assistant_message_tool_calls(msg_copy: dict, thought_signature_separator: str) -> dict:
@@ -1677,7 +1683,7 @@ def post_call_processing(
         raise e
 
 
-_SinglePassItemT = TypeVar("_SinglePassItemT")
+_SinglePassItemT: Final = TypeVar("_SinglePassItemT")
 
 
 def materialize_single_pass_iterable(
@@ -1718,7 +1724,11 @@ def client(original_function):
         # Check if this is an async function. If so only execute the async function
         call_type: Final = _get_call_type_from_public_name(original_function.__name__)
         if call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
-            kwargs["tools"] = materialize_single_pass_iterable(kwargs["tools"])
+            kwargs["tools"] = (
+                materialize_single_pass_iterable(  # rebind-ok: retries must replay the materialized tool iterable
+                    kwargs["tools"]
+                )
+            )
         if _is_async_request(kwargs):
             # [OPTIONAL] CHECK MAX RETRIES / REQUEST
             if max_retries_per_request_hit(kwargs, litellm.num_retries_per_request):
@@ -2007,9 +2017,13 @@ def client(original_function):
 
     @wraps(original_function)
     async def wrapper_async(*args, **kwargs):
-        call_type = original_function.__name__
-        if call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
-            kwargs["tools"] = materialize_single_pass_iterable(kwargs["tools"])
+        raw_call_type: Final = original_function.__name__
+        if raw_call_type in {CallTypes.responses.value, CallTypes.aresponses.value} and "tools" in kwargs:
+            kwargs["tools"] = (
+                materialize_single_pass_iterable(  # rebind-ok: retries must replay the materialized tool iterable
+                    kwargs["tools"]
+                )
+            )
         print_args_passed_to_litellm(original_function, args, kwargs)
         start_time: Final = datetime.datetime.now()
         call_type: Final = _get_call_type_from_public_name(original_function.__name__)
@@ -8462,34 +8476,8 @@ def log_tool_request_shape(
 ) -> None:
     """Log a redacted structural summary when a tool declaration may be missing."""
     diagnostics_enabled: Final = log_when_present and is_tool_diagnostics_enabled()
-    tools_for_diagnostics: Final[object] = tools
     tools_present: Final = tools is not None
-    tool_count: int | None = 0 if tools is None else None
-    tool_types: frozenset[str] = frozenset()
-
-    if isinstance(tools, _ToolShapeMapping):
-        try:
-            tool_count = 0 if isinstance(tools, _SizedToolCollection) and len(tools) == 0 else 1
-        except Exception:
-            tool_count = None
-        tool_type: Final = _tool_shape_get(tools, "type")
-        if isinstance(tool_type, str):
-            tool_types = frozenset((_safe_tool_type_label(tool_type),))
-    elif isinstance(tools, (list, tuple, set, frozenset)):
-        try:
-            tool_collection: Final = cast(  # cast-ok: concrete containers above implement the sized iterable protocol
-                _SizedToolCollection, tools
-            )
-            tool_count = len(tool_collection)
-            tool_types = frozenset(
-                tool_type
-                for tool in tool_collection
-                for tool_type in (_tool_type_from_shape(tool),)
-                if tool_type is not None
-            )
-        except Exception:
-            tool_count = None
-            tool_types = frozenset()
+    tool_count, tool_types = _tool_count_and_types(tools)
 
     summary: Final = {
         "call_id": call_id,
@@ -8501,12 +8489,9 @@ def log_tool_request_shape(
         "tools_present": tools_present,
         "tool_count": tool_count,
         "tool_types": tuple(sorted(tool_types)),
-        "tool_schema_hash": _tool_schema_hash(tools_for_diagnostics) if diagnostics_enabled else None,
+        "tool_schema_hash": _tool_schema_hash(tools) if diagnostics_enabled else None,
     }
-    try:
-        malformed_tool_schemas = _malformed_tool_schema_shapes(tools_for_diagnostics)
-    except Exception:
-        malformed_tool_schemas = ()
+    malformed_tool_schemas: Final = _malformed_tool_schema_shapes(tools)
     if malformed_tool_schemas:
         verbose_logger.warning(
             "Tool request shape contains malformed schemas: %s",
@@ -8525,21 +8510,38 @@ def log_tool_request_shape(
         verbose_logger.debug("Tool request shape: %s", summary)
 
 
+def _tool_count_and_types(tools: object) -> tuple[int | None, frozenset[str]]:
+    if tools is None:
+        return 0, frozenset()
+    try:
+        if isinstance(tools, _ToolShapeMapping):
+            tool_type: Final = _tool_type_from_shape(tools)
+            return (
+                0 if isinstance(tools, _SizedToolCollection) and len(tools) == 0 else 1,
+                frozenset((tool_type,)) if tool_type is not None else frozenset(),
+            )
+        if isinstance(tools, (list, tuple, set, frozenset)):
+            collection: Final = cast(_SizedToolCollection, tools)  # cast-ok: guarded concrete iterable container
+            return len(collection), frozenset(filter(None, map(_tool_type_from_shape, collection)))
+    except Exception:  # noqa: BLE001  # diagnostics must tolerate hostile request objects
+        return None, frozenset()
+    return None, frozenset()
+
+
 def _tool_schema_hash(tools: object) -> str | None:
     try:
-        if isinstance(tools, BaseModel):
-            serializable_tools: object = tools.model_dump()
-        elif isinstance(tools, (list, tuple)):
-            tool_collection: Final = cast(Iterable[object], tools)  # cast-ok: guarded untyped request collection
-            serializable_tools = tuple(
-                tool.model_dump() if isinstance(tool, BaseModel) else tool for tool in tool_collection
-            )
-        elif isinstance(tools, dict):
-            serializable_tools = cast(  # cast-ok: guarded dict from an untyped tool request
-                dict[str, object], tools
-            )
-        else:
+        if not isinstance(tools, (BaseModel, list, tuple, dict)):
             return None
+        serializable_tools: Final[object] = (
+            tools.model_dump()
+            if isinstance(tools, BaseModel)
+            else tuple(
+                tool.model_dump() if isinstance(tool, BaseModel) else tool
+                for tool in cast(Iterable[object], tools)  # cast-ok: guarded list or tuple
+            )
+            if isinstance(tools, (list, tuple))
+            else tools
+        )
         encoded_tools: Final = json.dumps(
             serializable_tools,
             ensure_ascii=True,
@@ -8569,13 +8571,7 @@ def log_anthropic_response_shape(
         if isinstance(content, (list, tuple))
         else ()
     )
-    content_block_types: Final = tuple(
-        block_type
-        for block in content_blocks
-        for raw_block_type in (_tool_shape_get(block, "type") if isinstance(block, _ToolShapeMapping) else None,)
-        if isinstance(raw_block_type, str)
-        for block_type in (_safe_enum_label(raw_block_type, _ANTHROPIC_CONTENT_BLOCK_TYPES),)
-    )
+    content_block_types: Final = tuple(filter(None, map(_anthropic_content_type_from_shape, content_blocks)))
     verbose_logger.info(
         "Anthropic tool response shape: %s",
         {
@@ -8593,6 +8589,13 @@ def log_anthropic_response_shape(
             "tool_use_count": sum(block_type in ("tool_use", "server_tool_use") for block_type in content_block_types),
         },
     )
+
+
+def _anthropic_content_type_from_shape(block: object) -> str | None:
+    if not isinstance(block, _ToolShapeMapping):
+        return None
+    raw_type: Final = _tool_shape_get(block, "type")
+    return _safe_enum_label(raw_type, _ANTHROPIC_CONTENT_BLOCK_TYPES) if isinstance(raw_type, str) else None
 
 
 def _tool_type_from_shape(tool: object) -> str | None:
@@ -8616,35 +8619,28 @@ def _safe_enum_label(value: str, allowed_values: frozenset[str]) -> str:
 def _tool_shape_get(tool: _ToolShapeMapping, key: str) -> object:
     try:
         return tool.get(key)
-    except Exception:
+    except Exception:  # noqa: BLE001  # diagnostics must tolerate hostile request objects
         return None
 
 
-def _malformed_tool_schema_shapes(tools: object) -> tuple[dict[str, str | int], ...]:
+def _malformed_tool_schema_shapes(tools: object) -> tuple[Mapping[str, str | int], ...]:
     if not isinstance(tools, (list, tuple, set, frozenset)):
         return ()
-    return tuple(
-        summary
-        for tool_index, tool in enumerate(tools)
-        for summary in (_malformed_tool_schema_shape(tool=tool, tool_index=tool_index),)
-        if summary is not None
-    )
+    try:
+        collection: Final = cast(_SizedToolCollection, tools)  # cast-ok: guarded concrete iterable container
+        return tuple(filter(None, (_malformed_tool_schema_shape(tool, index) for index, tool in enumerate(collection))))
+    except Exception:  # noqa: BLE001  # malformed request diagnostics must not interrupt provider requests
+        return ()
 
 
-def _malformed_tool_schema_shape(tool: object, tool_index: int) -> dict[str, str | int] | None:
+def _malformed_tool_schema_shape(tool: object, tool_index: int) -> Mapping[str, str | int] | None:
     if not isinstance(tool, _ToolShapeMapping):
         return None
     tool_type: Final = _tool_shape_get(tool, "type")
     function: Final = _tool_shape_get(tool, "function")
-    if tool_type == "function" and isinstance(function, _ToolShapeMapping):
-        parameters = _tool_shape_get(function, "parameters")
-        schema_key = "parameters"
-    elif tool_type == "function":
-        parameters = _tool_shape_get(tool, "parameters")
-        schema_key = "parameters"
-    else:
-        parameters = _tool_shape_get(tool, "input_schema")
-        schema_key = "input_schema"
+    schema_key: Final = "parameters" if tool_type == "function" else "input_schema"
+    schema_container: Final = function if tool_type == "function" and isinstance(function, _ToolShapeMapping) else tool
+    parameters: Final = _tool_shape_get(schema_container, schema_key)
     if not isinstance(parameters, _ToolShapeMapping):
         return None
     root_type: Final = _tool_shape_get(parameters, "type")

@@ -199,7 +199,7 @@ class SpendCounterReseed:
         return float(row.spend or 0.0)
 
     @staticmethod
-    def _is_key_or_team_window_counter(counter_key: str) -> bool:
+    def is_key_or_team_window_counter(counter_key: str) -> bool:
         for prefix in ("spend:key:", "spend:team:"):
             if not counter_key.startswith(prefix):
                 continue
@@ -212,6 +212,8 @@ class SpendCounterReseed:
                 return False
             return True
         return False
+
+    _is_key_or_team_window_counter = is_key_or_team_window_counter
 
     @staticmethod
     async def _read_active_batch(counter_key: str) -> tuple[float | None, bool] | None:

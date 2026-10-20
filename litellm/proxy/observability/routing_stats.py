@@ -9,11 +9,16 @@ import asyncio
 import hashlib
 import math
 import time
-from collections import defaultdict
-from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Set
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, MutableMapping, Sequence, Set
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
-from typing import Final, Protocol, cast
+from itertools import accumulate, chain
+from typing import (
+    Final,
+    Protocol,
+    TypeAlias,
+    cast,  # noqa: TID251  # Redis command protocols and callback containers must retain their runtime identity
+)
 from urllib.parse import urlsplit, urlunsplit
 
 from litellm._logging import verbose_proxy_logger
@@ -23,14 +28,14 @@ from litellm.integrations.custom_logger import CustomLogger
 
 _PREFIX: Final = "litellm:routing-stats:v2"
 _BUCKET_SECONDS: Final = 60
-_RETENTION_SECONDS = 20 * 60
-_ACTIVE_LEASE_SECONDS = 20 * 60
+_RETENTION_SECONDS: Final = 20 * 60
+_ACTIVE_LEASE_SECONDS: Final = 20 * 60
 _LATENCY_BUCKETS_MS: Final = (100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000)
 
 
-RedisValue = str | bytes | int | float
-Timestamp = datetime | int | float
-Metadata = dict[str, str]
+RedisValue: TypeAlias = str | bytes | int | float
+Timestamp: TypeAlias = datetime | int | float
+Metadata: TypeAlias = Mapping[str, str]
 
 
 class RoutingStatsPipeline(Protocol):
@@ -58,7 +63,7 @@ class RoutingStatsRedis(Protocol):
 
     def smembers(self, key: str) -> Awaitable[Set[RedisValue]]: ...
 
-    def zrangebyscore(self, key: str, minimum: int, maximum: str) -> Awaitable[list[RedisValue]]: ...
+    def zrangebyscore(self, key: str, minimum: int, maximum: str) -> Awaitable[Sequence[RedisValue]]: ...
 
     def hgetall(self, key: str) -> Awaitable[Mapping[RedisValue, RedisValue]]: ...
 
@@ -97,9 +102,11 @@ def _sanitize_api_base(api_base: object) -> str:
         parsed: Final = urlsplit(api_base)
         if not parsed.scheme or not parsed.hostname:
             return ""
-        host = parsed.hostname
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
+        host: Final = (
+            f"[{parsed.hostname}]"
+            if ":" in parsed.hostname and not parsed.hostname.startswith("[")
+            else parsed.hostname
+        )
         netloc: Final = host if parsed.port is None else f"{host}:{parsed.port}"
         return urlunsplit((parsed.scheme.lower(), netloc, "", "", ""))
     except ValueError:
@@ -114,7 +121,9 @@ class RoutingStatsStore:
 
     def _async_client(self) -> RoutingStatsRedis:
         """RedisCache deliberately supports both Redis and RedisCluster clients."""
-        return cast(RoutingStatsRedis, self.redis_cache.init_async_client())  # pyright: ignore[reportUnknownMemberType]
+        return cast(  # cast-ok: both Redis clients implement the command protocol
+            RoutingStatsRedis, self.redis_cache.init_async_client()
+        )
 
     def _key(self, *parts: object) -> str:
         return self.redis_cache.check_and_fix_namespace(":".join([_PREFIX, *map(str, parts)]))
@@ -298,64 +307,63 @@ class RoutingStatsStore:
         window_minutes: int,
         channel: str | None = None,
         model_group: str | None = None,
-    ) -> list[dict[str, object]]:
+    ) -> Sequence[Mapping[str, object]]:
         current_bucket: Final = self._bucket()
         buckets: Final = range(current_bucket - window_minutes + 1, current_bucket + 1)
         client: Final = self._async_client()
         token_sets: Final = await asyncio.gather(*(client.smembers(self._index_key(bucket)) for bucket in buckets))
-        tokens: Final = {_decode(token) for token_set in token_sets for token in token_set}
+        bucket_tokens: Final = frozenset(map(_decode, chain.from_iterable(token_sets)))
         active_index_key: Final = self._active_index_key()
         now: Final = int(time.time())
         await client.zremrangebyscore(active_index_key, "-inf", now)
-        tokens.update(_decode(token) for token in await client.zrangebyscore(active_index_key, now + 1, "+inf"))
+        tokens: Final = bucket_tokens.union(map(_decode, await client.zrangebyscore(active_index_key, now + 1, "+inf")))
 
         rows: Final = await asyncio.gather(
             *(self._read_token(client=client, token=token, buckets=buckets) for token in tokens)
         )
-        response: Final[list[dict[str, object]]] = []
-        for row in rows:
-            if row is None:
-                continue
-            if channel is not None and row["channel"] != channel:
-                continue
-            if model_group is not None and row["model_group"] != model_group:
-                continue
-            response.append(row)
-        return sorted(response, key=lambda item: (item["channel"], item["model_group"], item["model_id"]))
+        response: Final = tuple(
+            row
+            for row in rows
+            if row is not None
+            and (channel is None or row["channel"] == channel)
+            and (model_group is None or row["model_group"] == model_group)
+        )
+        return sorted(
+            response, key=lambda item: (str(item["channel"]), str(item["model_group"]), str(item["model_id"]))
+        )
 
     async def _read_token(
         self, client: RoutingStatsRedis, token: str, buckets: Iterable[int]
-    ) -> dict[str, object] | None:
+    ) -> Mapping[str, object] | None:
         bucket_list: Final = list(buckets)
         hash_rows: Final = await asyncio.gather(
             *(client.hgetall(self._bucket_key(bucket, token)) for bucket in bucket_list)
         )
         active_metadata: Final = await client.hgetall(self._active_metadata_key(token))
-        merged: Final[dict[str, float]] = defaultdict(float)
-        latest_metadata: dict[str, str] = {}
-        latest_seen = -1
-        for hash_row in hash_rows:
-            if not hash_row:
-                continue
-            row = {_decode(key): _decode(value) for key, value in hash_row.items()}
-            seen = _as_int(row.get("last_seen_ms"))
-            if seen >= latest_seen:
-                latest_seen = seen
-                latest_metadata = {key: row.get(key, "") for key in ("channel", "model_group", "model_id", "api_base")}
-            for field in ("requests", "success", "failure"):
-                merged[field] += _as_int(row.get(field))
-            merged["latency_sum_ms"] += _as_float(row.get("latency_sum_ms"))
-            for field in (f"latency_le_{bound}" for bound in _LATENCY_BUCKETS_MS):
-                merged[field] += _as_int(row.get(field))
-            merged["latency_le_inf"] += _as_int(row.get("latency_le_inf"))
-
+        decoded_rows: Final = tuple(
+            {_decode(key): _decode(value) for key, value in hash_row.items()} for hash_row in hash_rows if hash_row
+        )
+        fields: Final = (
+            "requests",
+            "success",
+            "failure",
+            "latency_sum_ms",
+            "latency_le_inf",
+            *(f"latency_le_{bound}" for bound in _LATENCY_BUCKETS_MS),
+        )
+        merged: Final = {field: sum(_as_float(row.get(field)) for row in decoded_rows) for field in fields}
         active_requests: Final = await self._active_requests(client=client, token=token)
-        if not latest_metadata and active_metadata:
-            active_row: Final = {_decode(key): _decode(value) for key, value in active_metadata.items()}
-            latest_seen = _as_int(active_row.get("last_seen_ms"))
-            latest_metadata = {
-                key: active_row.get(key, "") for key in ("channel", "model_group", "model_id", "api_base")
-            }
+        latest_row: Final = (
+            max(enumerate(decoded_rows), key=lambda pair: (_as_int(pair[1].get("last_seen_ms")), pair[0]))[1]
+            if decoded_rows
+            else {_decode(key): _decode(value) for key, value in active_metadata.items()}
+        )
+        latest_seen: Final = _as_int(latest_row.get("last_seen_ms"))
+        latest_metadata: Final = (
+            {key: latest_row.get(key, "") for key in ("channel", "model_group", "model_id", "api_base")}
+            if latest_row
+            else {}
+        )
         if not latest_metadata.get("model_id") or (not any(hash_rows) and active_requests == 0):
             return None
         requests: Final = int(merged["requests"])
@@ -383,19 +391,15 @@ class RoutingStatsStore:
         return int(await client.zcard(active_key))
 
     @staticmethod
-    def _percentile(metrics: dict[str, float], count: int, quantile: float) -> int | None:
+    def _percentile(metrics: Mapping[str, float], count: int, quantile: float) -> int | None:
         if count <= 0:
             return None
         target: Final = max(1, math.ceil(count * quantile))
-        running = 0
-        for bound in _LATENCY_BUCKETS_MS:
-            running += metrics[f"latency_le_{bound}"]
-            if running >= target:
-                return bound
-        return None
+        totals: Final = accumulate(metrics[f"latency_le_{bound}"] for bound in _LATENCY_BUCKETS_MS)
+        return next((bound for bound, running in zip(_LATENCY_BUCKETS_MS, totals) if running >= target), None)
 
     @staticmethod
-    def _histogram_max(metrics: dict[str, float]) -> int | None:
+    def _histogram_max(metrics: Mapping[str, float]) -> int | None:
         if metrics["latency_le_inf"] > 0:
             return None
         for bound in reversed(_LATENCY_BUCKETS_MS):
@@ -408,20 +412,22 @@ class RoutingStatsLogger(CustomLogger):
     """Callback that sends deployment-attempt telemetry to Redis in background tasks."""
 
     def __init__(self, redis_cache: RedisCache) -> None:
-        super().__init__(turn_off_message_logging=True)  # pyright: ignore[reportUnknownMemberType]
+        super().__init__(turn_off_message_logging=True)  # pyright: ignore[reportUnknownMemberType]  # logger base retains untyped extension kwargs
         self._store = RoutingStatsStore(redis_cache=redis_cache)
 
     def update_redis_cache(self, redis_cache: RedisCache) -> None:
         self._store = RoutingStatsStore(redis_cache=redis_cache)
 
-    def log_pre_api_call(self, model: str, messages: list[object], kwargs: dict[str, object]) -> None:
+    def log_pre_api_call(self, model: str, messages: Sequence[object], kwargs: Mapping[str, object]) -> None:
         metadata: Final = self._metadata(kwargs)
         if metadata is None:
             return
         litellm_params_raw: Final = kwargs.get("litellm_params")
         if not isinstance(litellm_params_raw, dict):
             return
-        litellm_params: Final = cast(dict[str, object], litellm_params_raw)
+        litellm_params: Final = cast(  # cast-ok: preserve the caller-owned callback attempt ID container
+            MutableMapping[str, object], litellm_params_raw
+        )
         # The input callback runs once per provider handoff. Router retries can
         # select the same deployment and reuse request kwargs, so never reuse a
         # prior attempt identifier based on model id.
@@ -430,33 +436,35 @@ class RoutingStatsLogger(CustomLogger):
         self._schedule(self._store.record_start(metadata=metadata, attempt_id=attempt_id))
 
     def log_success_event(
-        self, kwargs: dict[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
+        self, kwargs: Mapping[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
     ) -> None:
         self._record_terminal(kwargs=kwargs, succeeded=True, start_time=start_time, end_time=end_time)
 
     def log_failure_event(
-        self, kwargs: dict[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
+        self, kwargs: Mapping[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
     ) -> None:
         self._record_terminal(kwargs=kwargs, succeeded=False, start_time=start_time, end_time=end_time)
 
     async def async_log_success_event(
-        self, kwargs: dict[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
+        self, kwargs: Mapping[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
     ) -> None:
         self._record_terminal(kwargs=kwargs, succeeded=True, start_time=start_time, end_time=end_time)
 
     async def async_log_failure_event(
-        self, kwargs: dict[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
+        self, kwargs: Mapping[str, object], response_obj: object, start_time: Timestamp, end_time: Timestamp
     ) -> None:
         self._record_terminal(kwargs=kwargs, succeeded=False, start_time=start_time, end_time=end_time)
 
     def _record_terminal(
-        self, kwargs: dict[str, object], succeeded: bool, start_time: Timestamp, end_time: Timestamp
+        self, kwargs: Mapping[str, object], succeeded: bool, start_time: Timestamp, end_time: Timestamp
     ) -> None:
         metadata: Final = self._metadata(kwargs)
         litellm_params_raw: Final = kwargs.get("litellm_params")
         if metadata is None or not isinstance(litellm_params_raw, dict):
             return
-        litellm_params: Final = cast(dict[str, object], litellm_params_raw)
+        litellm_params: Final = cast(  # cast-ok: preserve the caller-owned callback attempt ID container
+            MutableMapping[str, object], litellm_params_raw
+        )
         attempt_id: Final = litellm_params.get("routing_stats_attempt_id")
         if not isinstance(attempt_id, str):
             return
@@ -471,18 +479,22 @@ class RoutingStatsLogger(CustomLogger):
         )
 
     @staticmethod
-    def _metadata(kwargs: dict[str, object]) -> Metadata | None:
+    def _metadata(kwargs: Mapping[str, object]) -> Metadata | None:
         litellm_params_raw: Final = kwargs.get("litellm_params")
         if not isinstance(litellm_params_raw, dict):
             return None
-        litellm_params: Final = cast(dict[str, object], litellm_params_raw)
+        litellm_params: Final = cast(  # cast-ok: preserve the caller-owned callback attempt ID container
+            MutableMapping[str, object], litellm_params_raw
+        )
         # Router writes this independent snapshot after each deployment
         # selection. Both metadata containers can otherwise contain caller
         # input: Chat routes via `metadata`, Responses via `litellm_metadata`.
         metadata_raw: Final = litellm_params.get("routing_stats_metadata")
         if not isinstance(metadata_raw, dict):
             return None
-        metadata: Final = cast(dict[str, object], metadata_raw)
+        metadata: Final = cast(  # cast-ok: metadata keys are validated individually below
+            Mapping[str, object], metadata_raw
+        )
         model_id: Final = metadata.get("model_id")
         model_group: Final = metadata.get("model_group")
         channel: Final = metadata.get("channel")
@@ -499,7 +511,7 @@ class RoutingStatsLogger(CustomLogger):
     async def _run_background(coroutine: Coroutine[object, object, None]) -> None:
         try:
             await coroutine
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # telemetry failures must not interrupt provider traffic
             # Telemetry is best-effort; Redis must never affect model traffic.
             verbose_proxy_logger.debug("Routing stats write failed: %s", exc)
 
@@ -509,7 +521,7 @@ class RoutingStatsLogger(CustomLogger):
             asyncio.get_running_loop().create_task(cls._run_background(coroutine))
         except RuntimeError:
             coroutine.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # telemetry failures must not interrupt provider traffic
             verbose_proxy_logger.debug("Routing stats scheduling failed: %s", exc)
             coroutine.close()
 
@@ -519,18 +531,20 @@ _routing_stats_logger: RoutingStatsLogger | None = None  # rebind-ok: initialize
 
 def initialize_routing_stats(redis_cache: RedisCache | None) -> None:
     """Register one callback instance when shared coordination Redis is available."""
-    global _routing_stats_logger
+    global _routing_stats_logger  # noqa: PLW0603  # proxy startup owns the process-wide callback singleton
     if redis_cache is None:
         verbose_proxy_logger.warning("Routing stats disabled because coordination Redis is unavailable")
         return
     if _routing_stats_logger is None:
-        _routing_stats_logger = RoutingStatsLogger(redis_cache=redis_cache)
+        _routing_stats_logger = RoutingStatsLogger(
+            redis_cache=redis_cache
+        )  # rebind-ok: startup owns the callback singleton
         import litellm
 
-        litellm.logging_callback_manager.add_litellm_input_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]
-        litellm.logging_callback_manager.add_litellm_success_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]
-        litellm.logging_callback_manager.add_litellm_failure_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]
-        litellm.logging_callback_manager.add_litellm_async_success_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]
-        litellm.logging_callback_manager.add_litellm_async_failure_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]
+        litellm.logging_callback_manager.add_litellm_input_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]  # callback manager registrations have legacy untyped kwargs
+        litellm.logging_callback_manager.add_litellm_success_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]  # callback manager registrations have legacy untyped kwargs
+        litellm.logging_callback_manager.add_litellm_failure_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]  # callback manager registrations have legacy untyped kwargs
+        litellm.logging_callback_manager.add_litellm_async_success_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]  # callback manager registrations have legacy untyped kwargs
+        litellm.logging_callback_manager.add_litellm_async_failure_callback(_routing_stats_logger)  # pyright: ignore[reportUnknownMemberType]  # callback manager registrations have legacy untyped kwargs
     else:
         _routing_stats_logger.update_redis_cache(redis_cache=redis_cache)

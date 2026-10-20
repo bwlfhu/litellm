@@ -134,7 +134,7 @@ def rerank(
     _custom_llm_provider: str | None = None  # rebind-ok: set by the get_llm_provider unpack; read in the except
     try:
         _is_async: Final = kwargs.pop("arerank", False) is True
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         # Params that are unique to specific versions of the client for the rerank call
         unique_version_params: Final = {
             "max_chunks_per_doc": max_chunks_per_doc,

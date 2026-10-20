@@ -199,7 +199,7 @@ def video_generation(
             return response
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         model, custom_llm_provider, _, _ = get_llm_provider(
             model=model or DEFAULT_VIDEO_ENDPOINT_MODEL,
             custom_llm_provider=custom_llm_provider,
@@ -323,7 +323,7 @@ def video_content(
             custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # get provider config
         video_provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
@@ -592,7 +592,7 @@ def video_remix(
             custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # get provider config
         video_remix_provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
@@ -804,7 +804,7 @@ def video_list(
             custom_llm_provider = "openai"
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # get provider config
         video_list_provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
@@ -1025,7 +1025,7 @@ def video_status(
             custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # get provider config
         video_status_provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
@@ -1167,7 +1167,7 @@ def video_create_character(
         if custom_llm_provider is None:
             custom_llm_provider = "openai"
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
             model=None,
@@ -1292,7 +1292,7 @@ def video_get_character(
         if custom_llm_provider is None:
             custom_llm_provider = "openai"
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
             model=None,
@@ -1425,7 +1425,7 @@ def video_edit(
             decoded: Final = decode_video_id_with_provider(video_id)
             custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
             model=None,
@@ -1559,7 +1559,7 @@ def video_extension(
             decoded: Final = decode_video_id_with_provider(video_id)
             custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         provider_config: Final[BaseVideoConfig | None] = ProviderConfigManager.get_provider_video_config(
             model=None,

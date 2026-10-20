@@ -81,7 +81,9 @@ def get_assistants(
     aget_assistants: Final[bool | None] = kwargs.pop("aget_assistants", None)
     if aget_assistants is not None and not isinstance(aget_assistants, bool):
         raise Exception("Invalid value passed in for aget_assistants. Only bool or None allowed")
-    optional_params: Final = GenericLiteLLMParams(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(
+        dict(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)
+    )
     litellm_params_dict: Final = get_litellm_params(**kwargs)
 
     ### TIMEOUT LOGIC ###
@@ -248,7 +250,9 @@ def create_assistants(
     async_create_assistants: Final[bool | None] = kwargs.pop("async_create_assistants", None)
     if async_create_assistants is not None and not isinstance(async_create_assistants, bool):
         raise ValueError("Invalid value passed in for async_create_assistants. Only bool or None allowed")
-    optional_params: Final = GenericLiteLLMParams(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(
+        dict(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)
+    )
     litellm_params_dict: Final = get_litellm_params(**kwargs)
 
     ### TIMEOUT LOGIC ###
@@ -416,7 +420,9 @@ def delete_assistant(
     api_version: str | None = None,
     **kwargs,
 ) -> AssistantDeleted | Coroutine[None, None, AssistantDeleted]:
-    optional_params: Final = GenericLiteLLMParams(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(
+        dict(api_key=api_key, api_base=api_base, api_version=api_version, **kwargs)
+    )
 
     litellm_params_dict: Final = get_litellm_params(**kwargs)
 
@@ -585,7 +591,7 @@ def create_thread(
     ```
     """
     acreate_thread: Final = kwargs.get("acreate_thread", None)
-    optional_params: Final = GenericLiteLLMParams(**kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
     litellm_params_dict: Final = get_litellm_params(**kwargs)
 
     ### TIMEOUT LOGIC ###
@@ -734,7 +740,7 @@ def get_thread(
 ) -> Thread:
     """Get the thread object, given a thread_id"""
     aget_thread: Final = kwargs.pop("aget_thread", None)
-    optional_params: Final = GenericLiteLLMParams(**kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
     litellm_params_dict: Final = get_litellm_params(**kwargs)
     ### TIMEOUT LOGIC ###
     timeout = optional_params.timeout or kwargs.get("request_timeout", 600) or 600
@@ -903,7 +909,7 @@ def add_message(
     a_add_message: Final = kwargs.pop("a_add_message", None)
     _message_data: Final = MessageData(role=role, content=content, attachments=attachments, metadata=metadata)
     litellm_params_dict: Final = get_litellm_params(**kwargs)
-    optional_params: Final = GenericLiteLLMParams(**kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
     message_data: Final = get_optional_params_add_message(
         role=_message_data["role"],
@@ -1061,7 +1067,7 @@ def get_messages(
     **kwargs,
 ) -> SyncCursorPage[OpenAIMessage]:
     aget_messages: Final = kwargs.pop("aget_messages", None)
-    optional_params: Final = GenericLiteLLMParams(**kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
     litellm_params_dict: Final = get_litellm_params(**kwargs)
 
     ### TIMEOUT LOGIC ###
@@ -1252,7 +1258,7 @@ def run_thread(
 ) -> Run:
     """Run a given thread + assistant."""
     arun_thread: Final = kwargs.pop("arun_thread", None)
-    optional_params: Final = GenericLiteLLMParams(**kwargs)
+    optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
     litellm_params_dict: Final = get_litellm_params(**kwargs)
 
     ### TIMEOUT LOGIC ###

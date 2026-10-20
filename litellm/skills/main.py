@@ -165,7 +165,7 @@ def create_skill(
         _is_async: Final = kwargs.pop("acreate_skill", False) is True
 
         # Get LiteLLM parameters
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # Determine provider
         if custom_llm_provider is None:
@@ -358,7 +358,7 @@ def list_skills(
         _is_async: Final = kwargs.pop("alist_skills", False) is True
 
         # Get LiteLLM parameters
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # Determine provider
         if custom_llm_provider is None:
@@ -531,7 +531,7 @@ def get_skill(
         _is_async: Final = kwargs.pop("aget_skill", False) is True
 
         # Get LiteLLM parameters
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # Determine provider
         if custom_llm_provider is None:
@@ -695,7 +695,7 @@ def delete_skill(
         _is_async: Final = kwargs.pop("adelete_skill", False) is True
 
         # Get LiteLLM parameters
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # Determine provider
         if custom_llm_provider is None:

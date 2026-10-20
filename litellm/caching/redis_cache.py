@@ -1239,7 +1239,7 @@ class RedisCache(BaseCache):
             result: Final = (
                 await self._async_write_spend_counter(key=key, value=float(value), operation="set", ttl=ttl, nx=nx)
                 is not None
-                if self._is_key_spend_counter(key)
+                if self.is_key_spend_counter(key)
                 else await _redis_client.set(name=key, value=json.dumps(value), nx=nx, ex=ttl)
             )
             print_verbose(f"Successfully Set ASYNC Redis Cache: key: {key}\nValue {value}\nttl={ttl}")
@@ -1291,9 +1291,9 @@ class RedisCache(BaseCache):
         for cache_key, cache_value in cache_list:
             cache_key = self.check_and_fix_namespace(key=cache_key)
             print_verbose(f"Set ASYNC Redis Cache PIPELINE: key: {cache_key}\nValue {cache_value}\nttl={ttl}")
-            if self._is_key_spend_counter(cache_key):
-                pipe.eval(
-                    *self._spend_counter_write_command(
+            if self.is_key_spend_counter(cache_key):
+                pipe.eval(  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]  # RedisCluster stubs omit queued EVAL
+                    *self.spend_counter_write_command(
                         cache_key,
                         float(str(cache_value)),
                         "set",
@@ -1389,9 +1389,9 @@ class RedisCache(BaseCache):
         try:
             async with self.init_async_client().pipeline(transaction=False) as pipe:
                 for cache_key, json_cache_value, ttl in commands:
-                    if self._is_key_spend_counter(cache_key):
-                        pipe.eval(
-                            *self._spend_counter_write_command(
+                    if self.is_key_spend_counter(cache_key):
+                        pipe.eval(  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]  # RedisCluster stubs omit queued EVAL
+                            *self.spend_counter_write_command(
                                 cache_key,
                                 float(json_cache_value),
                                 "set",
@@ -1566,7 +1566,7 @@ class RedisCache(BaseCache):
                 await self._async_write_spend_counter(
                     key=key, value=value, operation="increment", ttl=_used_ttl, refresh_ttl=refresh_ttl
                 )
-                if self._is_key_spend_counter(key)
+                if self.is_key_spend_counter(key)
                 else await self._incrbyfloat_with_ttl(
                     _redis_client, key=key, value=value, ttl=_used_ttl, refresh_ttl=refresh_ttl
                 )
@@ -1633,7 +1633,7 @@ class RedisCache(BaseCache):
         _redis_client: Final = self.init_async_client()
         _used_ttl: Final = self.get_ttl(ttl=ttl)
         key = self.check_and_fix_namespace(key=key)
-        if self._is_key_spend_counter(key):
+        if self.is_key_spend_counter(key):
             return await self._async_write_spend_counter(
                 key=key, value=value, operation="max", ttl=_used_ttl, expected_generation=expected_generation
             )
@@ -1663,13 +1663,13 @@ class RedisCache(BaseCache):
         count: Final = await _redis_client.eval(_INCREMENT_WITH_FLOOR_LUA, 1, namespaced_key, value, ttl)
         return _LUA_COUNT.validate_python(count)
 
-    def _is_key_spend_counter(self, key: str) -> bool:
+    def is_key_spend_counter(self, key: str) -> bool:
         return key.startswith(self.check_and_fix_namespace(key="spend:key:"))
 
     @staticmethod
     @functools.lru_cache(maxsize=4096)
-    def _spend_counter_generation_key(key: str) -> str:
-        from redis.cluster import key_slot
+    def spend_counter_generation_key(key: str) -> str:
+        from redis.crc import key_slot
 
         marker: Final = f"{key}:generation:{{{key}}}"
         slot: Final = key_slot(key.encode())
@@ -1678,12 +1678,11 @@ class RedisCache(BaseCache):
         # Empty hash tags make Redis hash the entire key, including any appended tag.
         return next(
             candidate
-            for suffix in count()
-            for candidate in (f"{key}:generation:{suffix}",)
+            for candidate in (f"{key}:generation:{suffix}" for suffix in count())
             if key_slot(candidate.encode()) == slot
         )
 
-    def _spend_counter_write_command(
+    def spend_counter_write_command(
         self,
         key: str,
         value: float,
@@ -1692,12 +1691,12 @@ class RedisCache(BaseCache):
         nx: bool = False,
         refresh_ttl: bool = False,
         expected_generation: str | None = None,
-    ) -> tuple[str | int, ...]:
+    ) -> tuple[str, int, str, str, str, str, str, str, str, str, str, str]:
         return (
             _SPEND_COUNTER_WRITE_LUA,
             2,
             key,
-            self._spend_counter_generation_key(key),
+            self.spend_counter_generation_key(key),
             operation,
             str(value),
             str(int(ttl or 0)),
@@ -1718,11 +1717,11 @@ class RedisCache(BaseCache):
         refresh_ttl: bool = False,
         expected_generation: str | None = None,
     ) -> float | None:
-        client: Final = self.init_async_client()
+        client: Final = self._async_commands()
         result: Final = cast(  # cast-ok: Redis eval returns the Lua scalar or nil
             "str | bytes | None",
             await client.eval(
-                *self._spend_counter_write_command(
+                *self.spend_counter_write_command(
                     key,
                     value,
                     operation,
@@ -1738,7 +1737,7 @@ class RedisCache(BaseCache):
     @_redis_circuit_breaker_guard
     async def async_get_spend_counter_generation(self, key: str, prepare_reset: bool = True) -> str | None:
         """Snapshot a reset generation and bound its lifetime while DB work is pending."""
-        client: Final = self.init_async_client()
+        client: Final = self._async_commands()
         namespaced_key: Final = self.check_and_fix_namespace(key=key)
         lua: Final = (
             _SPEND_COUNTER_MARK_PENDING_LUA + "return mark_pending(ARGV[1])"
@@ -1748,7 +1747,7 @@ class RedisCache(BaseCache):
         result: Final = cast(  # cast-ok: Redis eval returns the Lua scalar or nil
             "str | bytes | None",
             await client.eval(
-                lua, 2, namespaced_key, self._spend_counter_generation_key(namespaced_key), str(uuid.uuid4())
+                lua, 2, namespaced_key, self.spend_counter_generation_key(namespaced_key), str(uuid.uuid4())
             ),
         )
         return result.decode() if isinstance(result, bytes) else result
@@ -1761,7 +1760,7 @@ class RedisCache(BaseCache):
         expected_generation: str,
         ttl: int | None = None,
     ) -> float | None:
-        _redis_client: Final = self.init_async_client()
+        _redis_client: Final = self._async_commands()
         _used_ttl: Final = self.get_ttl(ttl=ttl)
         namespaced_key: Final = self.check_and_fix_namespace(key=key)
         lua: Final = _SPEND_COUNTER_MARK_PENDING_LUA + (
@@ -1782,7 +1781,7 @@ class RedisCache(BaseCache):
                 lua,
                 2,
                 namespaced_key,
-                self._spend_counter_generation_key(namespaced_key),
+                self.spend_counter_generation_key(namespaced_key),
                 str(value),
                 str(int(_used_ttl or 0)),
                 expected_generation,
@@ -2038,9 +2037,7 @@ class RedisCache(BaseCache):
 
     @_redis_circuit_breaker_guard
     async def async_batch_get_cache_strict(self, key_list: Sequence[str]) -> Mapping[str, object]:
-        keys: Final = [
-            self.check_and_fix_namespace(key=key) for key in key_list
-        ]  # mutable-ok: Redis and Cluster bulk-read overrides require a list
+        keys: Final = [self.check_and_fix_namespace(key=key) for key in key_list]
         results: Final = await self._async_run_redis_mget_operation(keys=keys)
         return MappingProxyType(
             {key: self._get_cache_logic(cached_response=value) for key, value in zip(key_list, results, strict=True)}
@@ -2200,8 +2197,8 @@ class RedisCache(BaseCache):
     async def async_delete_cache(self, key: str):
         _redis_client: Final = self._async_commands()
         key = self.check_and_fix_namespace(key=key)
-        if self._is_key_spend_counter(key):
-            return await _redis_client.delete(key, self._spend_counter_generation_key(key))
+        if self.is_key_spend_counter(key):
+            return await _redis_client.delete(key, self.spend_counter_generation_key(key))
         # keys is str
         return await _redis_client.delete(key)
 
@@ -2221,9 +2218,9 @@ class RedisCache(BaseCache):
             print_verbose(
                 f"Increment ASYNC Redis Cache PIPELINE: key: {cache_key}\nValue {increment_op['increment_value']}\nttl={increment_op['ttl']}"
             )
-            if self._is_key_spend_counter(cache_key):
-                pipe.eval(
-                    *self._spend_counter_write_command(
+            if self.is_key_spend_counter(cache_key):
+                pipe.eval(  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]  # RedisCluster stubs omit queued EVAL
+                    *self.spend_counter_write_command(
                         cache_key,
                         increment_op["increment_value"],
                         "increment",
@@ -2340,7 +2337,7 @@ class RedisCache(BaseCache):
         if _used_ttl is None:
             return False
         namespaced_key: Final = self.check_and_fix_namespace(key=key)
-        if self._is_key_spend_counter(namespaced_key):
+        if self.is_key_spend_counter(namespaced_key):
             return (
                 await self._async_write_spend_counter(
                     namespaced_key,

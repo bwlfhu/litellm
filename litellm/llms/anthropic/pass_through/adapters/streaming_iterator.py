@@ -245,29 +245,17 @@ class _CombinedChunkSplitter:
         return {"reasoning_content": thinking_text}
 
     @staticmethod
-    def _split(chunk: Any) -> list[Any]:
-        """Split wire-incompatible combinations into ordered logical chunks."""
-        finish_chunk: Any | None = None
-        if _CombinedChunkSplitter._is_combined(chunk):
-            # Content chunk: keep the delta payload, clear the finish_reason.
-            content_chunk = copy.deepcopy(chunk)
-            content_chunk.choices[0].finish_reason = None
-            _CombinedChunkSplitter._clear_usage(content_chunk)
-
-            # Finish chunk: keep finish_reason (and usage), clear the delta payload.
-            finish_chunk = copy.deepcopy(chunk)
-            finish_delta: Final = finish_chunk.choices[0].delta
-            finish_delta.content = None
-            if hasattr(finish_delta, "tool_calls"):
-                finish_delta.tool_calls = None
-            if hasattr(finish_delta, "reasoning_content"):
-                finish_delta.reasoning_content = None
-            if hasattr(finish_delta, "thinking_blocks"):
-                finish_delta.thinking_blocks = None
-        else:
-            content_chunk = chunk
-
-        return [content_chunk, *([finish_chunk] if finish_chunk is not None else [])]
+    def _split(chunk: "ModelResponseStream") -> "tuple[ModelResponseStream, ...]":
+        if not _CombinedChunkSplitter._is_combined(chunk):
+            return (chunk,)
+        content_chunk: Final = copy.deepcopy(chunk)
+        content_chunk.choices[0].finish_reason = None
+        _CombinedChunkSplitter._clear_usage(content_chunk)
+        finish_chunk: Final = copy.deepcopy(chunk)
+        finish_delta: Final = finish_chunk.choices[0].delta
+        for field in ("content", "tool_calls", "reasoning_content", "thinking_blocks"):
+            setattr(finish_delta, field, None)
+        return content_chunk, finish_chunk
 
     def __iter__(self) -> "Iterator[ModelResponseStream]":
         return self
@@ -1159,13 +1147,11 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         # replayed as history and Anthropic rejects it (LIT-6357). A signed
         # entry opens the block so the client receives the replay signature.
         thinking_blocks: Final = getattr(delta, "thinking_blocks", None)
-        if (
+        return not (
             not self.thinking_disabled
             and thinking_blocks
             and any(isinstance(b, dict) and not is_empty_unsigned_thinking_block(b) for b in thinking_blocks)
-        ):
-            return False
-        return True
+        )
 
     def _should_start_new_content_block(self, chunk: "ModelResponseStream") -> bool:
         """

@@ -139,7 +139,7 @@ async def acreate_realtime_client_secret(
     )
     model_name = (req.session.model if req.session is not None else None) or req.model or "gpt-4o-realtime-preview"
     litellm_logging_obj: Final[LiteLLMLogging] = kwargs.get("litellm_logging_obj")
-    litellm_params: Final = GenericLiteLLMParams(**kwargs)
+    litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
     (
         model_name,
@@ -207,7 +207,7 @@ async def acreate_realtime_transcription_session(
     )
     model_name = req.resolved_model() or "gpt-realtime-whisper"
     litellm_logging_obj: Final[LiteLLMLogging] = kwargs.get("litellm_logging_obj")
-    litellm_params: Final = GenericLiteLLMParams(**kwargs)
+    litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
     (
         model_name,
@@ -268,7 +268,7 @@ async def arealtime_calls(
 ):
     model_name = model or "gpt-4o-realtime-preview"
     litellm_logging_obj: Final[LiteLLMLogging] = kwargs.get("litellm_logging_obj")
-    litellm_params: Final = GenericLiteLLMParams(**kwargs)
+    litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
     (
         model_name,
@@ -371,7 +371,7 @@ async def _arealtime(
         headers.update(extra_headers)
     litellm_logging_obj: Final[LiteLLMLogging] = kwargs.get("litellm_logging_obj")
     user: Final = kwargs.get("user", None)
-    litellm_params: Final = GenericLiteLLMParams(**kwargs)
+    litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
     litellm_params_dict: Final = {**get_litellm_params(**kwargs), CallTypes.arealtime.value: True}
 
@@ -435,7 +435,9 @@ async def _arealtime(
             configured_realtime_protocol, query_params=query_params, websocket=websocket
         )
         resolved_azure_ad_token: Final = (
-            None if api_key else get_azure_ad_token(GenericLiteLLMParams(**kwargs, azure_ad_token=azure_ad_token))
+            None
+            if api_key
+            else get_azure_ad_token(GenericLiteLLMParams.model_validate(dict(**kwargs, azure_ad_token=azure_ad_token)))
         )
         await azure_realtime.async_realtime(
             model=model,

@@ -27,7 +27,7 @@ from litellm.caching.redis_cache import RedisCache, RedisCircuitBreakerOpenError
 def test_spend_counter_generation_marker_shares_cluster_slot(key: str) -> None:
     from redis.cluster import key_slot
 
-    assert key_slot(key.encode()) == key_slot(RedisCache._spend_counter_generation_key(key).encode())
+    assert key_slot(key.encode()) == key_slot(RedisCache.spend_counter_generation_key(key).encode())
 
 
 @pytest.fixture

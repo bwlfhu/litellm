@@ -773,7 +773,7 @@ def image_edit(
             extra_headers = dict(merged_extra_headers)
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         model, custom_llm_provider, _, _ = get_llm_provider(
             model=model or DEFAULT_IMAGE_ENDPOINT_MODEL,
             custom_llm_provider=custom_llm_provider,

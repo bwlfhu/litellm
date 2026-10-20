@@ -352,7 +352,7 @@ class AzureAIAgentsConfig(BaseConfig):
             # Create a GenericLiteLLMParams with the scope override for Azure Foundry Agents
             azure_auth_params: Final = dict(litellm_params) if litellm_params else {}
             azure_auth_params["azure_scope"] = "https://ai.azure.com/.default"
-            api_key = get_azure_ad_token(GenericLiteLLMParams(**azure_auth_params))
+            api_key = get_azure_ad_token(GenericLiteLLMParams.model_validate(dict(**azure_auth_params)))
 
         if api_key is None:
             raise ValueError(

@@ -127,7 +127,7 @@ def create(
 
         _prepare_registry_credentials(vector_store_id=vector_store_id, kwargs=kwargs)
 
-        litellm_params: Final = GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(vector_store_id=vector_store_id, **kwargs))
 
         provider_config: Final = ProviderConfigManager.get_provider_vector_store_files_config(
             provider=LlmProviders(custom_llm_provider)
@@ -256,7 +256,7 @@ def list(
 
         _prepare_registry_credentials(vector_store_id=vector_store_id, kwargs=kwargs)
 
-        litellm_params: Final = GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(vector_store_id=vector_store_id, **kwargs))
 
         provider_config: Final = ProviderConfigManager.get_provider_vector_store_files_config(
             provider=LlmProviders(custom_llm_provider)
@@ -366,7 +366,7 @@ def retrieve(
 
         _prepare_registry_credentials(vector_store_id=vector_store_id, kwargs=kwargs)
 
-        litellm_params: Final = GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(vector_store_id=vector_store_id, **kwargs))
 
         provider_config: Final = ProviderConfigManager.get_provider_vector_store_files_config(
             provider=LlmProviders(custom_llm_provider)
@@ -474,7 +474,7 @@ def retrieve_content(
 
         _prepare_registry_credentials(vector_store_id=vector_store_id, kwargs=kwargs)
 
-        litellm_params: Final = GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(vector_store_id=vector_store_id, **kwargs))
 
         provider_config: Final = ProviderConfigManager.get_provider_vector_store_files_config(
             provider=LlmProviders(custom_llm_provider)
@@ -588,7 +588,7 @@ def update(
 
         _prepare_registry_credentials(vector_store_id=vector_store_id, kwargs=kwargs)
 
-        litellm_params: Final = GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(vector_store_id=vector_store_id, **kwargs))
 
         provider_config: Final = ProviderConfigManager.get_provider_vector_store_files_config(
             provider=LlmProviders(custom_llm_provider)
@@ -703,7 +703,7 @@ def delete(
 
         _prepare_registry_credentials(vector_store_id=vector_store_id, kwargs=kwargs)
 
-        litellm_params: Final = GenericLiteLLMParams(vector_store_id=vector_store_id, **kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(vector_store_id=vector_store_id, **kwargs))
 
         provider_config: Final = ProviderConfigManager.get_provider_vector_store_files_config(
             provider=LlmProviders(custom_llm_provider)

@@ -269,7 +269,7 @@ def create(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("acreate_interaction", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # Routing logic:
         # - agent provided (no model, or model accidentally set to agent name) → gemini
@@ -416,7 +416,7 @@ def get(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("aget_interaction", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         interactions_api_config: Final = get_provider_interactions_api_config(
             provider=custom_llm_provider,
@@ -520,7 +520,7 @@ def delete(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("adelete_interaction", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         interactions_api_config: Final = get_provider_interactions_api_config(
             provider=custom_llm_provider,
@@ -622,7 +622,7 @@ def cancel(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("acancel_interaction", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         interactions_api_config: Final = get_provider_interactions_api_config(
             provider=custom_llm_provider,

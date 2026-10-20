@@ -172,7 +172,7 @@ def create_fine_tuning_job(
     """
     try:
         _is_async: Final = kwargs.pop("acreate_fine_tuning_job", False) is True
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # handle hyperparameters
         hyperparameters = hyperparameters or {}  # original hyperparameters
@@ -383,7 +383,7 @@ def cancel_fine_tuning_job(
 
     """
     try:
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         ### TIMEOUT LOGIC ###
         timeout = optional_params.timeout or kwargs.get("request_timeout", 600) or 600
         # set timeout for 10 minutes by default
@@ -537,7 +537,7 @@ def list_fine_tuning_jobs(
     - limit: Optional[int] = None, Number of fine-tuning jobs to retrieve. Defaults to 20
     """
     try:
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         ### TIMEOUT LOGIC ###
         timeout = optional_params.timeout or kwargs.get("request_timeout", 600) or 600
         # set timeout for 10 minutes by default
@@ -687,7 +687,7 @@ def retrieve_fine_tuning_job(
     Get info about a fine-tuning job.
     """
     try:
-        optional_params: Final = GenericLiteLLMParams(**kwargs)
+        optional_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         ### TIMEOUT LOGIC ###
         timeout = optional_params.timeout or kwargs.get("request_timeout", 600) or 600
         # set timeout for 10 minutes by default

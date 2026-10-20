@@ -176,7 +176,7 @@ def create(
         if base_environment is not None:
             kwargs["base_environment"] = base_environment
         kwargs.setdefault("custom_llm_provider", custom_llm_provider)
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         logging_obj: Final = _make_logging_obj(kwargs, name, custom_llm_provider, "create_agent", {})
         config: Final = _get_agents_api_config(custom_llm_provider)
         return agents_http_handler.create_agent(
@@ -251,7 +251,7 @@ def list(
     try:
         _is_async: Final = kwargs.pop("alist_agents", False) is True
         kwargs.setdefault("custom_llm_provider", custom_llm_provider)
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         logging_obj: Final = _make_logging_obj(kwargs, "", custom_llm_provider, "list_agents", {})
         config: Final = _get_agents_api_config(custom_llm_provider)
         return agents_http_handler.list_agents(
@@ -327,7 +327,7 @@ def get(
     try:
         _is_async: Final = kwargs.pop("aget_agent", False) is True
         kwargs.setdefault("custom_llm_provider", custom_llm_provider)
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         logging_obj: Final = _make_logging_obj(kwargs, name, custom_llm_provider, "get_agent", {"name": name})
         config: Final = _get_agents_api_config(custom_llm_provider)
         return agents_http_handler.get_agent(
@@ -404,7 +404,7 @@ def delete(
     try:
         _is_async: Final = kwargs.pop("adelete_agent", False) is True
         kwargs.setdefault("custom_llm_provider", custom_llm_provider)
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         logging_obj: Final = _make_logging_obj(kwargs, name, custom_llm_provider, "delete_agent", {"name": name})
         config: Final = _get_agents_api_config(custom_llm_provider)
         return agents_http_handler.delete_agent(
@@ -481,7 +481,7 @@ def list_versions(
     try:
         _is_async: Final = kwargs.pop("alist_agent_versions", False) is True
         kwargs.setdefault("custom_llm_provider", custom_llm_provider)
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         logging_obj: Final = _make_logging_obj(kwargs, name, custom_llm_provider, "list_agent_versions", {"name": name})
         config: Final = _get_agents_api_config(custom_llm_provider)
         return agents_http_handler.list_agent_versions(

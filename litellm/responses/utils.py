@@ -2,10 +2,12 @@ import base64
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import reduce
-from typing import Any, Final, Optional, TypeVar, Union, cast, get_type_hints, overload
+from typing import Any, Final, Optional, TypeGuard, Union, cast, get_type_hints, overload
 
 from pydantic import BaseModel, TypeAdapter
-from typing_extensions import TypeIs  # noqa: TID251  # narrows untyped wire payloads without a runtime conversion
+from typing_extensions import (  # narrows untyped wire payloads without a runtime conversion
+    TypeIs,  # noqa: TID251  # preserve caller-owned dict identity while normalizing IDs
+)
 
 import litellm
 from litellm._logging import verbose_logger
@@ -41,7 +43,9 @@ def _output_token_detail(details: object, field: str) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _is_object_sequence(value: object) -> TypeIs[Sequence[object]]:  # guard-ok: a list is a Sequence of anything
+def _is_object_sequence(
+    value: object,
+) -> TypeGuard[Sequence[object]]:  # guard-ok: only the positive list branch narrows the wire collection
     return isinstance(value, list)
 
 
@@ -70,9 +74,6 @@ def _as_input_text_part(part: object) -> object:
     if isinstance(part, dict) and part.get("type") == "text":
         return {**part, "type": "input_text"}
     return part
-
-
-_RequestInputT: Final = TypeVar("_RequestInputT")
 
 
 class ResponsesAPIRequestUtils:
@@ -534,7 +535,35 @@ class ResponsesAPIRequestUtils:
         return response
 
     @staticmethod
-    def restore_encrypted_content_item_ids_in_input(request_input: _RequestInputT) -> _RequestInputT:
+    @overload
+    def restore_encrypted_content_item_ids_in_input(request_input: str) -> str: ...
+
+    @staticmethod
+    @overload
+    def restore_encrypted_content_item_ids_in_input(request_input: ResponseInputParam) -> ResponseInputParam: ...
+
+    @staticmethod
+    @overload
+    def restore_encrypted_content_item_ids_in_input(
+        request_input: str | ResponseInputParam,
+    ) -> str | ResponseInputParam: ...
+
+    @staticmethod
+    @overload
+    def restore_encrypted_content_item_ids_in_input(
+        request_input: list[object],
+    ) -> list[object]: ...  # mutable-ok: the public list input contract returns a shallow list copy
+
+    @staticmethod
+    @overload
+    def restore_encrypted_content_item_ids_in_input(request_input: None) -> None: ...
+
+    @staticmethod
+    @overload
+    def restore_encrypted_content_item_ids_in_input(request_input: object) -> object: ...
+
+    @staticmethod
+    def restore_encrypted_content_item_ids_in_input(request_input: object) -> object:
         """Decode litellm-encoded item IDs in request input back to original IDs.
 
         Called before forwarding the request to the upstream provider so the
@@ -544,12 +573,12 @@ class ResponsesAPIRequestUtils:
         1. Items with encoded IDs (encitem_...)
         2. Items with wrapped encrypted_content (litellm_enc:...)
         """
-        if not isinstance(request_input, list):
+        if not _is_object_sequence(request_input):
             return request_input
 
-        restored_input: Final = [dict(item) if isinstance(item, dict) else item for item in request_input]
+        restored_input: Final = [dict(item) if _is_object_dict(item) else item for item in request_input]
         for item in restored_input:
-            if isinstance(item, dict):
+            if _is_object_dict(item):
                 item_id = item.get("id")
                 if item_id and isinstance(item_id, str):
                     decoded = ResponsesAPIRequestUtils.decode_encrypted_item_id(item_id)
@@ -576,11 +605,11 @@ class ResponsesAPIRequestUtils:
         from litellm.litellm_core_utils.prompt_templates.factory import (
             THOUGHT_SIGNATURE_SEPARATOR,
         )
-        from litellm.utils import _is_gemini_model, _remove_thought_signature_from_id
+        from litellm.utils import is_gemini_model, remove_thought_signature_from_id
 
-        if _is_gemini_model(model=model, custom_llm_provider=custom_llm_provider):
+        if is_gemini_model(model=model, custom_llm_provider=custom_llm_provider):
             return call_id
-        return _remove_thought_signature_from_id(call_id, THOUGHT_SIGNATURE_SEPARATOR)
+        return remove_thought_signature_from_id(call_id, THOUGHT_SIGNATURE_SEPARATOR)
 
     @staticmethod
     def _provider_uses_openai_response_item_ids(
@@ -649,17 +678,29 @@ class ResponsesAPIRequestUtils:
         return not item_id.startswith("msg_")
 
     @staticmethod
-    def _normalize_replayed_item_ids_in_input(
-        request_input: Any,
+    @overload
+    def normalize_replayed_item_ids_in_input(
+        request_input: str | ResponseInputParam, model: str | None, custom_llm_provider: str | None
+    ) -> str | ResponseInputParam: ...
+
+    @staticmethod
+    @overload
+    def normalize_replayed_item_ids_in_input(
+        request_input: object, model: str | None, custom_llm_provider: str | None
+    ) -> object: ...
+
+    @staticmethod
+    def normalize_replayed_item_ids_in_input(
+        request_input: object,
         model: str | None,
         custom_llm_provider: str | None,
-    ) -> Any:
-        if not isinstance(request_input, list):
+    ) -> object:
+        if not _is_object_sequence(request_input):
             return request_input
 
-        normalized_input: Final = [dict(item) if isinstance(item, dict) else item for item in request_input]
+        normalized_input: Final = [dict(item) if _is_object_dict(item) else item for item in request_input]
         for item in normalized_input:
-            if not isinstance(item, dict):
+            if not _is_object_dict(item):
                 continue
 
             item_type = item.get("type")
@@ -720,6 +761,8 @@ class ResponsesAPIRequestUtils:
                     item.pop("status", None)
 
         return normalized_input
+
+    _normalize_replayed_item_ids_in_input = normalize_replayed_item_ids_in_input
 
     _restore_encrypted_content_item_ids_in_input = restore_encrypted_content_item_ids_in_input
 
@@ -1323,36 +1366,75 @@ class ResponsesAPIRequestUtils:
 
 class ResponseAPILoggingUtils:
     @staticmethod
-    def _coerce_response_api_usage(usage_input: object) -> ResponseAPIUsage | None:
-        try:
-            if isinstance(usage_input, ResponseAPIUsage):
-                return usage_input
-            if not isinstance(usage_input, dict):
-                return None
-            normalized_usage: Final = dict(usage_input)
-            if normalized_usage.get("input_tokens_details") is None and "input_token_details" in normalized_usage:
-                normalized_usage["input_tokens_details"] = normalized_usage["input_token_details"]
-            if normalized_usage.get("output_tokens_details") is None and "output_token_details" in normalized_usage:
-                normalized_usage["output_tokens_details"] = normalized_usage["output_token_details"]
-            if normalized_usage.get("total_tokens") is None:
-                input_tokens: Final = normalized_usage.get("input_tokens")
-                output_tokens: Final = normalized_usage.get("output_tokens")
-                if input_tokens is not None and output_tokens is not None:
-                    normalized_usage["total_tokens"] = input_tokens + output_tokens
-            return ResponseAPIUsage(**normalized_usage)
-        except Exception:
+    def coerce_response_api_usage(usage_input: object) -> ResponseAPIUsage | None:
+        if isinstance(usage_input, ResponseAPIUsage):
+            return usage_input
+        if not isinstance(usage_input, Mapping):
             return None
+        try:
+            raw: Final = TypeAdapter(Mapping[str, object]).validate_python(usage_input)
+            input_tokens: Final = raw.get("input_tokens")
+            output_tokens: Final = raw.get("output_tokens")
+            total: Final = raw.get("total_tokens")
+            normalized: Final = {
+                **raw,
+                **(
+                    {"input_tokens_details": raw["input_token_details"]}
+                    if raw.get("input_tokens_details") is None and "input_token_details" in raw
+                    else {}
+                ),
+                **(
+                    {"output_tokens_details": raw["output_token_details"]}
+                    if raw.get("output_tokens_details") is None and "output_token_details" in raw
+                    else {}
+                ),
+                **(
+                    {"total_tokens": input_tokens + output_tokens}
+                    if total is None
+                    and isinstance(input_tokens, (int, float))
+                    and isinstance(output_tokens, (int, float))
+                    else {}
+                ),
+            }
+            return TypeAdapter(ResponseAPIUsage).validate_python(normalized)
+        except Exception:  # noqa: BLE001  # malformed optional usage must not interrupt logging
+            return None
+
+    _coerce_response_api_usage = coerce_response_api_usage
 
     @staticmethod
     def is_response_api_usage(usage: Mapping[str, object] | ResponseAPIUsage) -> bool:
         """returns True if usage is from OpenAI Response API"""
         if isinstance(usage, ResponseAPIUsage):
             return True
-        if "input_tokens" in usage and "output_tokens" in usage:
-            return True
-        return False
+        return "input_tokens" in usage and "output_tokens" in usage
 
     _is_response_api_usage = is_response_api_usage
+
+    @staticmethod
+    def _normalized_usage_mapping(usage: Mapping[str, object]) -> Mapping[str, object]:
+        input_tokens: Final = usage.get("input_tokens")
+        output_tokens: Final = usage.get("output_tokens")
+        return {
+            **usage,
+            **(
+                {"input_tokens_details": usage["input_token_details"]}
+                if usage.get("input_tokens_details") is None and "input_token_details" in usage
+                else {}
+            ),
+            **(
+                {"output_tokens_details": usage["output_token_details"]}
+                if usage.get("output_tokens_details") is None and "output_token_details" in usage
+                else {}
+            ),
+            **(
+                {"total_tokens": input_tokens + output_tokens}
+                if usage.get("total_tokens") is None
+                and isinstance(input_tokens, int)
+                and isinstance(output_tokens, int)
+                else {}
+            ),
+        }
 
     @staticmethod
     def transform_response_api_usage_to_chat_usage(
@@ -1377,24 +1459,13 @@ class ResponseAPILoggingUtils:
             )
         if isinstance(usage_input, Usage):
             return usage_input
-        if isinstance(usage_input, dict) and not ResponseAPILoggingUtils.is_response_api_usage(usage_input):
-            return Usage(**usage_input)
-        response_api_usage: ResponseAPIUsage
-        if isinstance(usage_input, dict):
-            usage_input = dict(usage_input)  # shallow copy; avoid mutating caller
-            # Realtime *_token_details → *_tokens_details when unset.
-            if usage_input.get("input_tokens_details") is None and "input_token_details" in usage_input:
-                usage_input["input_tokens_details"] = usage_input["input_token_details"]
-            if usage_input.get("output_tokens_details") is None and "output_token_details" in usage_input:
-                usage_input["output_tokens_details"] = usage_input["output_token_details"]
-            if usage_input.get("total_tokens") is None:
-                input_tokens: Final = usage_input.get("input_tokens")
-                output_tokens: Final = usage_input.get("output_tokens")
-                if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-                    usage_input["total_tokens"] = input_tokens + output_tokens
-            response_api_usage = ResponseAPIUsage(**usage_input)
-        else:
-            response_api_usage = usage_input
+        if isinstance(usage_input, Mapping) and not ResponseAPILoggingUtils.is_response_api_usage(usage_input):
+            return Usage.model_validate(usage_input)
+        response_api_usage: Final = (
+            ResponseAPIUsage.model_validate(ResponseAPILoggingUtils._normalized_usage_mapping(usage_input))
+            if isinstance(usage_input, Mapping)
+            else usage_input
+        )
         prompt_tokens: Final[int] = response_api_usage.input_tokens or 0
         completion_tokens: Final[int] = response_api_usage.output_tokens or 0
         prompt_tokens_details: PromptTokensDetailsWrapper | None = None

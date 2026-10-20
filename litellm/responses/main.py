@@ -1285,7 +1285,7 @@ def responses(
         )
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
         try:
             effective_extra_headers: Final = (
                 add_provider_affinity_header(
@@ -1494,7 +1494,7 @@ def responses(
 
         # Decode any litellm-encoded encrypted-content item IDs back to their original IDs
         input = ResponsesAPIRequestUtils.restore_encrypted_content_item_ids_in_input(input)
-        input = ResponsesAPIRequestUtils._normalize_replayed_item_ids_in_input(
+        input = ResponsesAPIRequestUtils.normalize_replayed_item_ids_in_input(
             request_input=input,
             model=model,
             custom_llm_provider=custom_llm_provider,
@@ -1633,7 +1633,7 @@ def delete_responses(
         _is_async: Final = kwargs.pop("adelete_responses", False) is True
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # get custom llm provider from response_id
         decoded_response_id: Final[DecodedResponseId] = ResponsesAPIRequestUtils.decode_responses_api_response_id(
@@ -1805,7 +1805,7 @@ def get_responses(
         _is_async: Final = kwargs.pop("aget_responses", False) is True
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # get custom llm provider from response_id
         decoded_response_id: Final[DecodedResponseId] = ResponsesAPIRequestUtils.decode_responses_api_response_id(
@@ -1954,7 +1954,7 @@ def list_input_items(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("alist_input_items", False) is True
 
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         decoded_response_id: Final = ResponsesAPIRequestUtils.decode_responses_api_response_id(response_id=response_id)
         response_id = decoded_response_id.get("response_id") or response_id
@@ -2100,7 +2100,7 @@ def cancel_responses(
         _is_async: Final = kwargs.pop("acancel_responses", False) is True
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         # get custom llm provider from response_id
         decoded_response_id: Final[DecodedResponseId] = ResponsesAPIRequestUtils.decode_responses_api_response_id(
@@ -2273,7 +2273,7 @@ def compact_responses(
         _is_async: Final = kwargs.pop("acompact_responses", False) is True
 
         # get llm provider logic
-        litellm_params: Final = GenericLiteLLMParams(**kwargs)
+        litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
 
         model, custom_llm_provider = _resolve_model_provider_for_responses(
             model=model,
@@ -2448,7 +2448,7 @@ async def _aresponses_websocket(
     """
     litellm_logging_obj: Final[LiteLLMLoggingObj] = kwargs.get("litellm_logging_obj")
     user: Final = kwargs.get("user", None)
-    litellm_params: Final = GenericLiteLLMParams(**kwargs)
+    litellm_params: Final = GenericLiteLLMParams.model_validate(dict(**kwargs))
     litellm_params_dict: Final = get_litellm_params(**kwargs)
 
     (

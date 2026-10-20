@@ -5,7 +5,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -147,14 +147,8 @@ def _get_status_deployments(llm_router: object, model: str | None) -> tuple[tupl
     if not isinstance(raw_deployments, list):
         return ()
     deployments: Final = _OBJECTS_ADAPTER.validate_python(raw_deployments)
-    identities: Final = tuple(
-        identity
-        for deployment in deployments
-        for deployment_mapping in (_as_mapping(deployment),)
-        if deployment_mapping is not None
-        for identity in (_deployment_identity(deployment=deployment_mapping, model=model),)
-        if identity is not None
-    )
+    mappings: Final = tuple(filter(None, map(_as_mapping, deployments)))
+    identities: Final = tuple(filter(None, (_deployment_identity(deployment=entry, model=model) for entry in mappings)))
     return tuple(dict.fromkeys(identities))
 
 
@@ -228,13 +222,13 @@ def _build_model_status_item(
 
 @router.get(
     "/observability/routing-stats",
-    tags=["observability"],  # mutable-ok: FastAPI's route registration API requires a list
+    tags=["observability"],
 )
 async def get_routing_stats(
+    user_api_key_dict: Annotated[UserAPIKeyAuth, Depends(user_api_key_auth)],
     window: Literal["1m", "5m", "15m"] = Query(default="5m"),
     channel: str | None = Query(default=None),
     model_group: str | None = Query(default=None),
-    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ) -> RoutingStatsResponse:
     """Return current deployment routing aggregates from coordination Redis."""
     if not user_api_key_has_admin_view(user_api_key_dict):
@@ -263,11 +257,11 @@ async def get_routing_stats(
 
 @router.get(
     "/observability/model-status",
-    tags=["observability"],  # mutable-ok: FastAPI's route registration API requires a list
+    tags=["observability"],
 )
 async def get_model_status(
+    user_api_key_dict: Annotated[UserAPIKeyAuth, Depends(user_api_key_auth)],
     model: str | None = Query(default=None, min_length=1),
-    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ) -> ModelStatusResponse:
     """Return active model exceptions stored in the Router's Redis cache."""
     if not user_api_key_has_admin_view(user_api_key_dict):
@@ -317,19 +311,20 @@ async def get_model_status(
     health_cache: Final = getattr(getattr(llm_router, "health_state_cache", None), "staleness_threshold", 0.0)
     staleness_threshold: Final = _as_float(health_cache) or 0.0
     items: Final = tuple(
-        item
-        for deployment_id, model_group in deployments
-        for item in (
-            _build_model_status_item(
-                deployment_id=deployment_id,
-                model_group=model_group,
-                cooldown_value=status_values.get(CooldownCache.get_cooldown_cache_key(deployment_id)),
-                health_value=health_values.get(deployment_id),
-                now=now,
-                staleness_threshold=staleness_threshold,
+        filter(
+            None,
+            (
+                _build_model_status_item(
+                    deployment_id=deployment_id,
+                    model_group=model_group,
+                    cooldown_value=status_values.get(CooldownCache.get_cooldown_cache_key(deployment_id)),
+                    health_value=health_values.get(deployment_id),
+                    now=now,
+                    staleness_threshold=staleness_threshold,
+                )
+                for deployment_id, model_group in deployments
             ),
         )
-        if item is not None
     )
     return ModelStatusResponse(
         source="redis",

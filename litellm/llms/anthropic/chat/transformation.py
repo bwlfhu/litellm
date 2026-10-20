@@ -1989,17 +1989,25 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 prepare_deepseek_chat_history,
             )
 
-            optional_params = omit_false_stream_for_deepseek_anthropic(
-                default_deepseek_anthropic_thinking_to_enabled(optional_params, model=model)
+            optional_params = dict(
+                omit_false_stream_for_deepseek_anthropic(
+                    default_deepseek_anthropic_thinking_to_enabled(optional_params, model=model)
+                )
             )
             thinking: Final = optional_params.get("thinking")
             thinking_enabled: Final = isinstance(thinking, dict) and thinking.get("type") == "enabled"
-            messages = prepare_deepseek_chat_history(
-                messages,
-                require_reasoning=thinking_enabled,
-                missing_reasoning=protocol_context.missing_reasoning or "placeholder",
+            messages = cast(  # cast-ok: shared Anthropic bridge must retain validated unsigned thinking and opaque tool payloads
+                list[AllMessageValues],
+                list(
+                    prepare_deepseek_chat_history(
+                        messages,
+                        require_reasoning=thinking_enabled,
+                        missing_reasoning=protocol_context.missing_reasoning or "placeholder",
+                    )
+                ),
             )
 
+        protocol_thinking: Final[object] = optional_params.get("thinking")
         if "tools" not in optional_params and messages is not None and has_tool_call_blocks(messages):
             optional_params["tools"], _ = self._map_tools(add_dummy_tool(custom_llm_provider="anthropic"))
 
@@ -2179,8 +2187,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
 
         self._apply_output_config(data=data, model=model, optional_params=optional_params)
 
-        if protocol_context is not None and isinstance(thinking, Mapping) and thinking.get("type") == "disabled":
-            return {**data, "thinking": dict(thinking)}
+        if (
+            protocol_context is not None
+            and isinstance(protocol_thinking, Mapping)
+            and protocol_thinking.get("type") == "disabled"
+        ):
+            return {**data, "thinking": dict(protocol_thinking)}
         return data
 
     def _apply_output_config(self, data: dict, model: str, optional_params: dict) -> None:

@@ -236,6 +236,9 @@ else:
     LiteLLMLoggingObj = Any
 
 
+_DISABLE_FALLBACKS_ATTRIBUTE: Final = "_litellm_disable_fallbacks"
+
+
 class _RealtimeClientWebSocket(Protocol):
     async def send_text(self, data: str) -> None: ...
 
@@ -785,7 +788,7 @@ class BaseLLMHTTPHandler:
                 endpoint="/chat/completions",
                 model=model,
                 custom_llm_provider=custom_llm_provider,
-                call_id=logging_obj.litellm_call_id if isinstance(logging_obj.litellm_call_id, str) else None,
+                call_id=logging_obj.litellm_call_id,
             )
             signed: Final = cast(  # cast-ok: sign_request is declared as a bare dict
                 "tuple[dict[str, object], bytes | None]",
@@ -2198,7 +2201,7 @@ class BaseLLMHTTPHandler:
                     logging_obj.model_call_details.update(request_body)
                     continue
                 if provider_config.should_disable_anthropic_messages_fallbacks_on_http_error(e):
-                    setattr(e, "_litellm_disable_fallbacks", True)
+                    setattr(e, _DISABLE_FALLBACKS_ATTRIBUTE, True)
                 raise self._handle_error(e=e, provider_config=provider_config)
             except Exception as e:
                 _log_anthropic_stream_timing(
@@ -2633,15 +2636,17 @@ class BaseLLMHTTPHandler:
             **response_api_optional_request_params,
             **{key: value for key, value in modified_kwargs.items() if key in optional_param_names},
         }
-        updated_litellm_params: Final = GenericLiteLLMParams(
-            **{
-                **dict(litellm_params),
+        updated_litellm_params: Final = GenericLiteLLMParams.model_validate(
+            dict(
                 **{
-                    key: value
-                    for key, value in modified_kwargs.items()
-                    if key not in optional_param_names and key not in {"model", "input", "custom_llm_provider"}
-                },
-            }
+                    **dict(litellm_params),
+                    **{
+                        key: value
+                        for key, value in modified_kwargs.items()
+                        if key not in optional_param_names and key not in {"model", "input", "custom_llm_provider"}
+                    },
+                }
+            )
         )
         return (
             str(modified_kwargs["model"]) if "model" in modified_kwargs else model,
@@ -6489,10 +6494,10 @@ class BaseLLMHTTPHandler:
             )
         except Exception as mapped_error:  # noqa: BLE001  # providers may raise instead of returning their error
             if getattr(e, "_litellm_disable_fallbacks", False):
-                setattr(mapped_error, "_litellm_disable_fallbacks", True)
+                setattr(mapped_error, _DISABLE_FALLBACKS_ATTRIBUTE, True)
             raise
         if getattr(e, "_litellm_disable_fallbacks", False):
-            setattr(provider_error, "_litellm_disable_fallbacks", True)
+            setattr(provider_error, _DISABLE_FALLBACKS_ATTRIBUTE, True)
         if not isinstance(received_status_code, int):
             provider_error.status_code_is_synthesized = True
         raise provider_error

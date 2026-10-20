@@ -246,7 +246,9 @@ async def create_vector_store_in_db(
     # query through the router at request time, so the credentials stay
     # on the deployment and never reach the database.
     if litellm_params:
-        litellm_params_dict: Final = GenericLiteLLMParams(**litellm_params).model_dump(exclude_none=True)
+        litellm_params_dict: Final = GenericLiteLLMParams.model_validate(dict(**litellm_params)).model_dump(
+            exclude_none=True
+        )
         data_to_create["litellm_params"] = safe_dumps(litellm_params_dict)
     else:
         # Provide empty dict if no litellm_params provided
@@ -654,7 +656,9 @@ async def update_vector_store(
         # the user-supplied ``litellm_embedding_model`` reference.
         if "litellm_params" in update_data:
             _input_litellm_params: Final[dict] = update_data.get("litellm_params", {}) or {}
-            litellm_params_dict: Final = GenericLiteLLMParams(**_input_litellm_params).model_dump(exclude_none=True)
+            litellm_params_dict: Final = GenericLiteLLMParams.model_validate(dict(**_input_litellm_params)).model_dump(
+                exclude_none=True
+            )
             update_data["litellm_params"] = safe_dumps(litellm_params_dict)
 
         # Update in database

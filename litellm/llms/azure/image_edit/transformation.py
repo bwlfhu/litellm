@@ -62,7 +62,7 @@ class AzureImageEditConfig(OpenAIImageEditConfig):
           the same ``litellm_params.api_key``, so the precedence only matters
           for direct callers of this method.
         """
-        params: Final = GenericLiteLLMParams(**(litellm_params or {}))
+        params: Final = GenericLiteLLMParams.model_validate(dict(**(litellm_params or {})))
         if api_key is not None and params.api_key is None:
             params.api_key = api_key
         return BaseAzureLLM.base_validate_azure_environment(headers=headers, litellm_params=params)

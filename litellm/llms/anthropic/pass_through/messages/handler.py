@@ -7,7 +7,7 @@
 
 import asyncio
 import contextvars
-from collections.abc import AsyncIterator, Coroutine, Iterator
+from collections.abc import AsyncIterator, Coroutine, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Any, Final, cast
 
@@ -69,7 +69,7 @@ def _responses_mode_is_lost_by_prefix_strip(
     )
 
 
-def _uses_deepseek_anthropic_messages(model: str, custom_llm_provider: str | None, kwargs: dict) -> bool:
+def uses_deepseek_anthropic_messages(model: str, custom_llm_provider: str | None, kwargs: Mapping[str, object]) -> bool:
     return (
         custom_llm_provider == "deepseek"
         or (custom_llm_provider is None and model.startswith("deepseek/"))
@@ -77,12 +77,12 @@ def _uses_deepseek_anthropic_messages(model: str, custom_llm_provider: str | Non
     )
 
 
-def _sanitize_anthropic_tool_history_with_diagnostics(
+def sanitize_anthropic_tool_history_with_diagnostics(
     *,
-    messages: list[object],
+    messages: Sequence[object],
     model: str,
     call_id: str | None,
-) -> list[object]:
+) -> Sequence[object]:
     sanitized_messages, scanned_id_count, rewritten_id_count = sanitize_tool_use_ids_in_anthropic_messages_with_stats(
         messages
     )
@@ -507,11 +507,13 @@ def anthropic_messages_handler(
     kwargs.pop("_deepseek_anthropic_messages_path", None)
     kwargs.pop("_deepseek_anthropic_tool_thinking", None)
     kwargs.pop("_deepseek_anthropic_missing_reasoning", None)
-    litellm_params: Final = GenericLiteLLMParams(
-        **kwargs,
-        api_key=api_key,
-        api_base=api_base,
-        custom_llm_provider=custom_llm_provider,
+    litellm_params: Final = GenericLiteLLMParams.model_validate(
+        dict(
+            **kwargs,
+            api_key=api_key,
+            api_base=api_base,
+            custom_llm_provider=custom_llm_provider,
+        )
     )
     (
         model,
@@ -595,7 +597,7 @@ def anthropic_messages_handler(
             tool_thinking=protocol_context.tool_thinking,
             missing_reasoning=protocol_context.missing_reasoning,
         )
-    elif custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
+    elif custom_llm_provider in [provider.value for provider in LlmProviders]:
         anthropic_messages_provider_config = ProviderConfigManager.get_provider_anthropic_messages_config(
             model=model,
             provider=litellm.LlmProviders(custom_llm_provider),

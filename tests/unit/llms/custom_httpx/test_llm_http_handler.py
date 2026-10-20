@@ -58,7 +58,7 @@ from litellm.responses.streaming_iterator import (
     BaseResponsesAPIStreamingIterator,
     MockResponsesAPIStreamingIterator,
 )
-from litellm.router_protocol import _build_deployment_protocol_context
+from litellm.router_protocol import build_deployment_protocol_context
 from litellm.types.integrations.custom_logger import AgenticLoopPlan, AgenticLoopRequestPatch
 from litellm.types.llms.openai import HttpxBinaryResponseContent, ResponsesAPIResponse
 from litellm.types.router import GenericLiteLLMParams
@@ -2159,7 +2159,7 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
 
     captured_kwargs: dict = {}
     sentinel_response = object()
-    protocol_context = _build_deployment_protocol_context(
+    protocol_context = build_deployment_protocol_context(
         {
             "deepseek_anthropic_messages_path": "v1/messages",
             "deepseek_anthropic_missing_reasoning": "placeholder",
@@ -2216,7 +2216,7 @@ async def test_async_anthropic_messages_handler_passes_api_key_to_agentic_hooks(
 @pytest.mark.parametrize("patch_model", ["anthropic/deepseek-v4-pro", "deepseek-v4-pro"])
 async def test_anthropic_agentic_followup_preserves_trusted_deployment_protocol_context(patch_model: str):
     handler = BaseLLMHTTPHandler()
-    protocol_context = _build_deployment_protocol_context(
+    protocol_context = build_deployment_protocol_context(
         {
             "deepseek_anthropic_messages_path": "v1/messages",
             "deepseek_anthropic_tool_thinking": "disabled",
@@ -2286,7 +2286,7 @@ async def test_anthropic_agentic_followup_clears_deployment_context_on_target_sw
     patch_model, patch_provider, patch_api_base
 ):
     handler = BaseLLMHTTPHandler()
-    protocol_context = _build_deployment_protocol_context(
+    protocol_context = build_deployment_protocol_context(
         {
             "deepseek_anthropic_messages_path": "v1/messages",
             "deepseek_anthropic_tool_thinking": "disabled",

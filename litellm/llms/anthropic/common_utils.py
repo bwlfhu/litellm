@@ -8,7 +8,14 @@ import re
 from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, ClassVar, Final, Literal, TypeVar, cast
+from typing import (
+    Any,
+    ClassVar,
+    Final,
+    Literal,
+    TypeVar,
+    cast,  # noqa: TID251  # preserve caller-owned message and block identities in the legacy sanitizer
+)
 from urllib.parse import quote
 
 import httpx
@@ -1809,8 +1816,8 @@ def _sanitize_tool_use_ids_in_anthropic_message(message: object) -> tuple[object
 
 
 def sanitize_tool_use_ids_in_anthropic_messages_with_stats(
-    messages: list[object],
-) -> tuple[list[object], int, int]:
+    messages: Sequence[object],
+) -> tuple[Sequence[object], int, int]:
     sanitized_messages: Final = tuple(_sanitize_tool_use_ids_in_anthropic_message(message) for message in messages)
     return (
         [message for message, _, _ in sanitized_messages],
