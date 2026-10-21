@@ -67,7 +67,8 @@ USER root
 COPY --from=uvbin /uv /usr/local/bin/uv
 COPY --from=uvbin /uvx /usr/local/bin/uvx
 
-RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
+RUN for attempt in 1 2 3; do \
+    apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache \
     bash \
     gcc \
     python-3.13 \
@@ -77,7 +78,8 @@ RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-
     openssl-dev \
     nodejs \
     npm \
-    libsndfile
+    libsndfile && exit 0; \
+    done; exit 1
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy \
@@ -133,8 +135,9 @@ RUN sed -i 's/\r$//' docker/entrypoint.sh && chmod +x docker/entrypoint.sh && \
     sed -i 's/\r$//' docker/prod_entrypoint.sh && chmod +x docker/prod_entrypoint.sh
 
 FROM $LITELLM_BUILD_IMAGE AS liteadmin-builder
+ARG APK_REPOSITORY
 COPY --from=uvbin /uv /usr/local/bin/uv
-RUN apk add --no-cache python-3.13
+RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache python-3.13
 ADD --checksum=sha256:2f7ae5cdd9d91731c0990e74a58239dc3e3fd2bf28dab23b55eafcdc47aaf87e \
     https://github.com/BerriAI/litellm-admin-agent/archive/ef501e94bc9fbacb9233b922abf71427f030408c.tar.gz /tmp/liteadmin.tar.gz
 RUN mkdir /tmp/liteadmin && tar xzf /tmp/liteadmin.tar.gz --strip-components=1 -C /tmp/liteadmin && \
