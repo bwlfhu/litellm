@@ -22,7 +22,9 @@ ARG APK_REPOSITORY
 ARG PGBOUNCER_VERSION
 ARG PGBOUNCER_SHA256
 USER root
-RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache build-base pkgconf libevent-dev openssl-dev curl
+RUN for attempt in 1 2 3; do \
+    apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache build-base pkgconf libevent-dev openssl-dev curl && exit 0; \
+    done; exit 1
 WORKDIR /build
 RUN curl -fsSL -o pgbouncer.tar.gz "https://www.pgbouncer.org/downloads/files/${PGBOUNCER_VERSION}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz" && \
     echo "${PGBOUNCER_SHA256}  pgbouncer.tar.gz" | sha256sum -c - && \
@@ -136,8 +138,13 @@ RUN sed -i 's/\r$//' docker/entrypoint.sh && chmod +x docker/entrypoint.sh && \
 
 FROM $LITELLM_BUILD_IMAGE AS liteadmin-builder
 ARG APK_REPOSITORY
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 COPY --from=uvbin /uv /usr/local/bin/uv
-RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache python-3.13
+RUN for attempt in 1 2 3; do \
+    apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache python-3.13 && exit 0; \
+    done; exit 1
 ADD --checksum=sha256:2f7ae5cdd9d91731c0990e74a58239dc3e3fd2bf28dab23b55eafcdc47aaf87e \
     https://github.com/BerriAI/litellm-admin-agent/archive/ef501e94bc9fbacb9233b922abf71427f030408c.tar.gz /tmp/liteadmin.tar.gz
 RUN echo "2f7ae5cdd9d91731c0990e74a58239dc3e3fd2bf28dab23b55eafcdc47aaf87e  /tmp/liteadmin.tar.gz" | sha256sum -c - && \
@@ -149,6 +156,9 @@ RUN echo "2f7ae5cdd9d91731c0990e74a58239dc3e3fd2bf28dab23b55eafcdc47aaf87e  /tmp
 # Runtime stage
 FROM $LITELLM_RUNTIME_IMAGE AS runtime
 ARG APK_REPOSITORY
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 ARG LITELLM_RELEASE_TAG=""
 ENV LITELLM_RELEASE_TAG=${LITELLM_RELEASE_TAG}
 
@@ -161,7 +171,9 @@ USER root
 RUN echo "https://packages.wolfi.dev/os" >> /etc/apk/repositories
 
 # node (without npm) is required by the prisma CLI at runtime
-RUN apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache bash openssl tzdata nodejs python-3.13 libsndfile libevent
+RUN for attempt in 1 2 3; do \
+    apk --repositories-file /dev/null --repository "${APK_REPOSITORY}" add --no-cache bash openssl tzdata nodejs python-3.13 libsndfile libevent && exit 0; \
+    done; exit 1
 COPY --from=pgbouncer-builder /usr/local/bin/pgbouncer /usr/local/bin/pgbouncer
 
 WORKDIR /app
