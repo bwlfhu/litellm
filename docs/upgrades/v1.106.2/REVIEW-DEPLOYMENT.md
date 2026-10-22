@@ -55,3 +55,26 @@
 独立从全部五份生产请求原始证据提取 call ID、Messages ID 和 Responses ID，再只读查询实际生产 SpendLogs，返回恰好 18 条、18 个不同 call ID、全部 status=success、全部有正费用及 token，费用合计 0.00317868 USD，与主会话 `production-accounting-summary.json` 一致。发布测试 key 剩余为零，不存在本组成功请求的重复费用记录
 
 最终部署核对结论：当前生产的四个可用副本已经运行本次最终 1.106.2 定制镜像，运行源码、配置保留、协议请求、UI/原管理登录及费用持久化均有验证证据，未发现需要回滚的发布阻断项。此结论不宣称 code1 上游余额问题已恢复、不宣称全部依赖安全问题清零，也不把短请求验证扩展为所有旧 Harness 长会话或 XML 溢出案例已经完全解决
+
+## 发布后普通业务异常边界
+
+按要求继续读取四份 `litellm-7c544f69bb-*-startup.private.log`，共 36 处 Traceback，四 Pod 分别 8、8、8、12。它们不是 36 个独立业务故障，重复日志与异常包装不能直接当作请求数或错误率
+
+| Traceback 所处路径 | 记录数 | 已能确认及尚不能确认的范围 |
+| --- | --- | --- |
+| Responses WebSocket 握手 | 20 | 终端异常均为 `websockets.exceptions.InvalidStatus`，后端握手返回 HTTP 401。失败发生于出站 `websockets.connect`，可以确认后端拒绝握手；不能仅凭 401 判断是上游鉴权规则、线路/凭据选择、协议兼容还是本机发送行为造成 |
+| Responses 流错误和 fallback 包装 | 10 | `_maybe_raise_for_error_event` 将收到的 error/response.failed 映射为 `MidStreamFallbackError`，含 upstream_error、过载、HTTP/2 stream failed、temporarily unavailable 等错误。日志同时打印 InternalServerError 是包装关系，不能重复计数。已有数据证明流中收到错误，尚不足以逐例断言网络、本机与上游的最终根因 |
+| HTTP 响应错误 | 3 | `MaskedHTTPStatusError` 显示出站 `/v1/responses` 返回 HTTP 403，说明确有失败的业务路径。这三条生产日志不能直接套用首次候选账户余额不足的结论 |
+| 路由选择失败 | 3 | `RouterRateLimitError` 具体内容为 no deployments available。可以确认路由当时无可选部署，可能是 cooldown/阻断/其他健康筛选；该类名不等同于已证明用户或上游超过配额，不能笼统写为正常限流 |
+
+独立 AST 比较定制基线和最终源码，`async_responses_websocket`、OpenAI Responses 的 `validate_environment`/`supports_native_websocket`、流的 `_maybe_raise_for_error_event`/`_map_error_event_exception` 完全相同。主会话另核对 websockets/httpx/httpcore/uvicorn 锁定版本未变。旧 1.106.0 的四份 `production-final-observe-litellm-7654c87d46-*.log` 已出现同类 MidStreamFallbackError/InternalServerError，其中包括 overloaded；因此这些类名本身不是新版本回归证据
+
+但是旧观察样本没有这组 WebSocket 401 的可比请求，且新发布的 18 次验收只覆盖 SSE/HTTP，没有执行 WebSocket 成功验收。因此当前既无明确证据证明本次升级引入本机回归，也不能排除路由、鉴权或其他未覆盖场景的本机问题，不应将全部异常归因上游或宣布线上零业务错误。是否存在版本回归需要相同线路、凭据、模型和请求的旧/新版本 WebSocket 对照，当前没有执行该扩展实验
+
+只读 SQL 也确认正常业务时窗内有 failure 费用日志，发布请求全部成功不能外推为全部业务请求成功。短窗口流量构成不同，本报告不以总量变化推断错误率提升、下降或升级收益
+
+## 待提交文档复核
+
+已只读复核 `CURRENT_BASELINE.md`、`docs/upgrades/v1.106.2/PRODUCTION_RELEASE.zh-CN.md` 及 `VALIDATION.json`。版本/源码/digest、四副本状态、18 次生产验收及费用、213 无新增迁移、备份未恢复演练、管理登录保留、旧失败测试记录及 gunicorn 限制，与已核对证据一致
+
+文档明确保留 Responses WebSocket 401 原因未定、SSE 成功不代表 WebSocket 验证通过，未声称全部业务异常属于上游。建议将概括性的“路由限流”更精确地写为“路由无可用部署”，以匹配这三条生产 Traceback。未发现需要阻止本次提交的事实性问题；后续若补写长期稳定性或 WebSocket 已恢复结论，必须新增相应证据

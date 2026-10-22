@@ -24,7 +24,7 @@ DeepSeek 原生 Messages、真实推理和工具历史、图片、Responses 桥�
 
 协议归因沿用 2026-10-16 更正：直连 Messages 的 `thinking: {type: "disabled"}` 对照有效，旧 Chat 请求不能用于证明上游 Messages 关闭思考无效。短请求成功不能证明所有旧 XML/SSE 故障已恢复
 
-首次候选 code1 请求因上游余额不足返回 403，失败证据保留。成功验收使用其他可用线路，不表示该上游账户已恢复。发布观察还包含业务的过载、路由限流、Responses WebSocket 上游握手 401 及通用流错误，不能宣称线上零错误。WebSocket 握手实现和相关 websockets/httpx 版本未变，仍不能仅凭这些日志认定或排除升级回归
+首次候选 code1 请求因上游余额不足返回 403，失败证据保留。成功验收使用其他可用线路，不表示该上游账户已恢复。发布观察还包含业务的过载、路由无可用部署、Responses WebSocket 上游握手 401 及通用流错误，不能宣称线上零错误。WebSocket 握手实现和相关 websockets/httpx 版本未变，仍不能仅凭这些日志认定或排除升级回归
 
 aiohttp 已更新到 3.14.5，包含已核对的安全修复，yarl 更新到 1.25.1。gunicorn 仍为 23.0.0，相关公告限制尚未解决；实际代理使用 LiteLLM/uvicorn，安装版本本身不等于已证明公网可利用。diskcache 没有安装。本次不宣称全依赖漏洞清零，正式 1.107.0 在本次核对时尚未发布
 

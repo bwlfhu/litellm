@@ -74,6 +74,6 @@ Messages 逐帧验证 event 等于 data.type，包含 message_stop，无 Chat [D
 
 应用回滚目标为上一版 v1.106.0-custom.f025726ea5，digest sha256:448177134508cc45d41a8831d40455a696d1dec1ecb4923fb0be10f396480d98，同步恢复 source/build 注解。两个版本 schema 相同，不应恢复备份覆盖正常新写入，不能跨越上一轮迁移直接退回 1.99.1
 
-短时观察存在普通业务的上游过载、路由限流、Responses WebSocket 上游握手 401 及通用流错误。WebSocket 握手实现、websockets 15.0.1、httpx 0.28.1 和 httpcore 1.0.9 相对上一版未变；SSE Responses 成功不等于 WebSocket 验证成功。发布请求成功不等于零业务错误，现有证据不足以把全部错误归为上游或认定、排除升级回归。长期稳定性和原始长会话仍需分别观察
+短时观察存在普通业务的上游过载、路由无可用部署、Responses WebSocket 上游握手 401 及通用流错误。WebSocket 握手实现、websockets 15.0.1、httpx 0.28.1 和 httpcore 1.0.9 相对上一版未变；SSE Responses 成功不等于 WebSocket 验证成功。发布请求成功不等于零业务错误，现有证据不足以把全部错误归为上游或认定、排除升级回归。长期稳定性和原始长会话仍需分别观察
 
 重新拉取远程、确认维护分支是升级分支祖先后，正常 fast-forward 推送维护分支及实施分支，不使用 force。当前基线见 [CURRENT_BASELINE.md](../../../CURRENT_BASELINE.md)，原始证据为 `/home/allcam/projects/litellm-v11062-evidence`
