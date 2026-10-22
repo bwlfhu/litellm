@@ -7,6 +7,7 @@ from pydantic import JsonValue
 from litellm.integrations.anthropic_cache_control_hook import AnthropicCacheControlHook
 from litellm.llms.anthropic.common_utils import (
     flatten_unencrypted_web_search_results_in_anthropic_messages,
+    sanitize_tool_use_ids_in_anthropic_messages,
     strip_empty_content_blocks_from_anthropic_messages,
 )
 from litellm.llms.anthropic.pass_through.utils import is_reasoning_auto_summary_enabled

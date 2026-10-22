@@ -1524,7 +1524,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return 1
 
     def should_retry_anthropic_messages_on_http_error(
-        self, e: httpx.HTTPStatusError, litellm_params: Mapping[str, object]
+        self, e: httpx.HTTPStatusError, litellm_params: Mapping[str, object], request_body: object = None
     ) -> bool:
         return False
 

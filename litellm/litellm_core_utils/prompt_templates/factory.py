@@ -2795,7 +2795,11 @@ def anthropic_messages_pt(
                         if (
                             (message_type := message_field(m, "type")) == "thinking"
                             and isinstance(thinking_block, str)
-                            and (bool(thinking_block.strip()) if preserve_unsigned_thinking_blocks else not is_unsignable_thinking_block(m))
+                            and (
+                                bool(thinking_block.strip())
+                                if preserve_unsigned_thinking_blocks
+                                else not is_unsignable_thinking_block(m)
+                            )
                         ):  # don't pass empty text blocks. anthropic api raises errors.
                             anthropic_message: ChatCompletionThinkingBlock | AnthropicMessagesTextParam = cast(
                                 ChatCompletionThinkingBlock, m
