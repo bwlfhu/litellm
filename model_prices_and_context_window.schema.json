@@ -260,6 +260,10 @@
           "minimum": 0,
           "description": "Priority service-tier rate for the same-named base field."
         },
+        "cache_read_input_token_cost_thinking": {
+          "type": "number",
+          "minimum": 0
+        },
         "cache_read_input_token_cost_ultrafast": {
           "type": "number",
           "minimum": 0
@@ -484,6 +488,10 @@
           "type": "number",
           "minimum": 0,
           "description": "Priority service-tier rate for the same-named base field."
+        },
+        "input_cost_per_token_thinking": {
+          "type": "number",
+          "minimum": 0
         },
         "input_cost_per_token_ultrafast": {
           "type": "number",
@@ -869,6 +877,10 @@
           "type": "number",
           "minimum": 0,
           "description": "Priority service-tier rate for the same-named base field."
+        },
+        "output_cost_per_token_thinking": {
+          "type": "number",
+          "minimum": 0
         },
         "output_cost_per_token_ultrafast": {
           "type": "number",
