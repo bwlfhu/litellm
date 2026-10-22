@@ -1,0 +1,87 @@
+{
+  "release": "1.106.2",
+  "formal_1_107_0_released_at_check": false,
+  "official_source": "49943cd52ea46aacf8db2e5cb2b890d580fe9bb4",
+  "custom_source": "9991444d4d815cd7c0ac0892904001a3eeb75728",
+  "image_digest": "sha256:eb84297cc6ca38dfc9cdcbc67a280db73cfbe7566f8d9b57875300a19c13cbd2",
+  "replicas": 4,
+  "ready": 4,
+  "restarts": 0,
+  "verified_at": "2026-10-22T10:05:22.944457+00:00",
+  "runtime_files_per_pod": 78,
+  "packages": {
+    "litellm": "1.106.2",
+    "litellm-proxy-extras": "0.4.108",
+    "aiohttp": "3.14.5",
+    "yarl": "1.25.1",
+    "gunicorn": "23.0.0",
+    "diskcache": null
+  },
+  "schema_migrations": {
+    "total": 213,
+    "new_in_release": 0,
+    "all_checksums_match": true,
+    "invalid_indexes": 0
+  },
+  "deployment_config_unchanged": true,
+  "service_unchanged": true,
+  "schema_updates_disabled": true,
+  "make_check": "PASS",
+  "regression_initial": {
+    "passed": 15325,
+    "failed": 3,
+    "skipped": 2
+  },
+  "affected_price_tests_after_fix": {
+    "passed": 105,
+    "failed": 0
+  },
+  "protocol_independent_tests": {
+    "passed": 1201
+  },
+  "postgres_batch_integration": {
+    "passed": 3,
+    "deselected": 9
+  },
+  "candidate_real_requests": {
+    "passed": 6,
+    "upstream_insufficient_balance_failed": 1
+  },
+  "production_real_requests": {
+    "per_pod_passed": 12,
+    "ingress_passed": 6
+  },
+  "production_accounting": {
+    "successful_requests": 18,
+    "persisted_records": 18,
+    "unique_call_ids": 18,
+    "all_positive_costs": true,
+    "total_usd": 0.0031786799999999997,
+    "test_keys_remaining": 0
+  },
+  "ui_and_login": {
+    "ui_status": 200,
+    "static_asset_status": 200,
+    "admin_login_status": 200,
+    "role": "proxy_admin",
+    "retained_env_login": true,
+    "created_new_admin": false,
+    "tls_verified": true
+  },
+  "cleanup": {
+    "candidate_deployment_deleted": true,
+    "candidate_service_deleted": true,
+    "candidate_secret_deleted": true,
+    "candidate_database_deleted": true,
+    "shared_validation_resources_preserved": true
+  },
+  "limits": [
+    "gunicorn 23.0.0 advisory not fixed by this official release",
+    "code1 upstream insufficient balance not resolved",
+    "full backup restore not rerun this release",
+    "existing Harness long sessions not replayed",
+    "ordinary production errors observed; not all attributed",
+    "short release verification is not long-term stability evidence",
+    "Responses WebSocket upstream handshake HTTP 401 observed; cause not established; SSE success does not validate WebSocket"
+  ]
+}
