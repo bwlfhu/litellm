@@ -2113,7 +2113,9 @@ def test_langtrace_callback_exports_to_api_trace_with_x_api_key(
 ) -> None:
     """The exporter must post to Langtrace's complete /api/trace path with the key in x-api-key,
     without leaking it into the process-wide OTEL_EXPORTER_OTLP_TRACES_HEADERS."""
+    import requests_mock
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.trace.export import SpanExportResult
 
     from litellm.integrations.opentelemetry import OpenTelemetry
     from litellm.litellm_core_utils import litellm_logging as logging_module
@@ -2135,8 +2137,12 @@ def test_langtrace_callback_exports_to_api_trace_with_x_api_key(
         assert type(logger) is OpenTelemetry and logger.callback_name == "langtrace"
         exporter: Final = logger._get_span_processor().span_exporter
         assert isinstance(exporter, OTLPSpanExporter)
-        assert exporter._endpoint == expected_endpoint
-        assert exporter._headers == {"x-api-key": api_key}
+        with requests_mock.Mocker() as collector:
+            collector.post(expected_endpoint, status_code=200)
+            assert exporter.export(()) is SpanExportResult.SUCCESS
+        assert [(request.url, request.headers.get("x-api-key")) for request in collector.request_history] == [
+            (expected_endpoint, api_key)
+        ]
         assert "OTEL_EXPORTER_OTLP_TRACES_HEADERS" not in os.environ
     finally:
         logging_module._in_memory_loggers.clear()
@@ -3319,6 +3325,21 @@ def test_get_request_tags_from_metadata_and_litellm_metadata():
     assert "custom-tag" in tags
     assert "User-Agent: litellm" in tags
     assert "User-Agent: litellm/1.0.0" in tags
+
+
+@pytest.mark.parametrize("unusable_metadata_tags", [123, "tag", {"tag": True}, []])
+def test_get_request_tags_falls_back_to_litellm_metadata_when_metadata_tags_are_unusable(unusable_metadata_tags):
+    from litellm.litellm_core_utils.litellm_logging import StandardLoggingPayloadSetup
+
+    tags = StandardLoggingPayloadSetup._get_request_tags(
+        litellm_params={
+            "metadata": {"tags": unusable_metadata_tags},
+            "litellm_metadata": {"tags": ["litellm-metadata-tag"]},
+        },
+        proxy_server_request={},
+    )
+
+    assert tags == ["litellm-metadata-tag"]
 
 
 def test_get_request_tags_does_not_mutate_original_tags():
