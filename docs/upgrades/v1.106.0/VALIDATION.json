@@ -76,7 +76,7 @@
     "真实上游模型及DeepSeek Harness端到端验收",
     "生产发布与观察窗口"
   ],
-  "raw_evidence_directory": "/home/allcam/projects/litellm-v1106-evidence",
+  "raw_evidence_directory": null,
   "manifest_final_hash_verification": {
     "tracked_entries_checked": 110,
     "result": "PASS",

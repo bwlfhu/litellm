@@ -52,7 +52,7 @@
 
 `production-ui-login-check.json` 记录 UI HTML 200、静态资产 200、现有 admin 登录 200 且角色为 proxy_admin，保留环境凭据登录，没有创建新的 admin，TLS 证书验证启用
 
-独立从全部五份生产请求原始证据提取 call ID、Messages ID 和 Responses ID，再只读查询实际生产 SpendLogs，返回恰好 18 条、18 个不同 call ID、全部 status=success、全部有正费用及 token，费用合计 0.00317868 USD，与主会话 `production-accounting-summary.json` 一致。发布测试 key 剩余为零，不存在本组成功请求的重复费用记录
+发布期间从五份生产请求样本提取 call ID、Messages ID 和 Responses ID，再只读查询实际生产 SpendLogs，返回恰好 18 条、18 个不同 call ID、全部 status=success、全部有正费用及 token，费用合计 0.00317868 USD。发布测试 key 剩余为零，不存在本组成功请求的重复费用记录
 
 最终部署核对结论：当前生产的四个可用副本已经运行本次最终 1.106.2 定制镜像，运行源码、配置保留、协议请求、UI/原管理登录及费用持久化均有验证证据，未发现需要回滚的发布阻断项。此结论不宣称 code1 上游余额问题已恢复、不宣称全部依赖安全问题清零，也不把短请求验证扩展为所有旧 Harness 长会话或 XML 溢出案例已经完全解决
 

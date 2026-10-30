@@ -51,7 +51,7 @@
 | 完整质量门禁 | 最终源码 efee6c541f 完整 make check 为 PASS；以 v1.106.0 为基线，Ruff、类型、纪律、测试质量、UI 及 API 同步检查均通过，不提高阈值 |
 | 三组独立子代理审查 | 协议/SSE、Responses、迁移完整性及路由预算计费逐项审查全部通过，无剩余源码阻断；报告与清单归档在 docs/upgrades/v1.106.0 |
 
-证据目录为 `/home/allcam/projects/litellm-v1106-evidence`，各轮失败记录保留。`regressions-acceptance-files.json` 固定最终扩大回归的测试文件范围，XML 记录用例和跳过数。上述单元验证使用合成输入，不冒充真实模型调用
+发布期间的原始数据和各轮失败记录已清理。测试范围和结果摘要保留在本文件与 `docs/upgrades/v1.106.0`，上述单元验证使用合成输入，不冒充真实模型调用
 
 质量门禁命令为 `BASE_REF=v1.106.0 UV_NO_INSTALL_PROJECT=1 make check`。不安装当前项目的环境开关只避免开发环境自动进入 Maturin 构建，不关闭 lint 或类型检查。官方 1.106.0 已采用按基线规则计数的门禁；原指南提到的 `make lint-budget-update` 在该官方版本不存在，已实际尝试确认，因此保留官方门禁和 cap 原值，并按官方基线验证增量，未制造替代放宽预算
 

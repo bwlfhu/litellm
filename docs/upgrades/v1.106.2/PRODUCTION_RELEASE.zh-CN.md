@@ -68,7 +68,7 @@ Messages 逐帧验证 event 等于 data.type，包含 message_stop，无 Chat [D
 
 四实例分别核对最终 imageID、LiteLLM 1.106.2、extras 0.4.108、aiohttp 3.14.5、yarl 1.25.1、78 个定制文件哈希、Rust 实际调用及离线引擎，全部通过。Deployment 除批准镜像和注解外 spec 完全相等，Service spec 完全相等，四副本 Ready、零重启
 
-管理环境凭据登录继续启用，不新增 Proxy Admin，官方提示横幅会继续存在。业务抓取保持关闭。本次候选 Deployment、Service、Secret、专用数据库和测试 key 已清理，共享验证资源保留。原始请求、配置密钥、备份和日志只存权限受限证据目录
+管理环境凭据登录继续启用，不新增 Proxy Admin，官方提示横幅会继续存在。业务抓取保持关闭。本次候选 Deployment、Service、Secret、专用数据库和测试 key 已清理，共享验证资源保留。原始请求、配置密钥、备份和日志在发布完成后清理
 
 ## 回滚及观察边界
 
@@ -76,4 +76,4 @@ Messages 逐帧验证 event 等于 data.type，包含 message_stop，无 Chat [D
 
 短时观察存在普通业务的上游过载、路由无可用部署、Responses WebSocket 上游握手 401 及通用流错误。WebSocket 握手实现、websockets 15.0.1、httpx 0.28.1 和 httpcore 1.0.9 相对上一版未变；SSE Responses 成功不等于 WebSocket 验证成功。发布请求成功不等于零业务错误，现有证据不足以把全部错误归为上游或认定、排除升级回归。长期稳定性和原始长会话仍需分别观察
 
-重新拉取远程、确认维护分支是升级分支祖先后，正常 fast-forward 推送维护分支及实施分支，不使用 force。当前基线见 [CURRENT_BASELINE.md](../../../CURRENT_BASELINE.md)，原始证据为 `/home/allcam/projects/litellm-v11062-evidence`
+重新拉取远程、确认维护分支是升级分支祖先后，正常 fast-forward 推送维护分支及实施分支，不使用 force。当前基线见 [CURRENT_BASELINE.md](../../../CURRENT_BASELINE.md)。原始发布数据在完成脱敏结论后已清理
