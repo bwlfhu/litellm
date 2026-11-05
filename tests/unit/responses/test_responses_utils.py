@@ -1,15 +1,48 @@
-from importlib import import_module
 import base64
+import json
+from importlib import import_module
+from typing import Final
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 import litellm
 from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
 from litellm.responses.utils import ResponseAPILoggingUtils, ResponsesAPIRequestUtils
 from litellm.types.llms.openai import ResponseAPIUsage, ResponsesAPIOptionalRequestParams
 from litellm.types.utils import Usage
+
+
+@pytest.mark.parametrize("item_type", ("function_call_output", "custom_tool_call_output"))
+def test_restore_encrypted_tool_output_preserves_ciphertext_and_caller_input(item_type: str) -> None:
+    ciphertext: Final = "opaque-tool-result"
+    wrapped: Final = ResponsesAPIRequestUtils.wrap_encrypted_content_with_model_id(ciphertext, "deployment-1")
+    items: Final = [
+        {
+            "type": item_type,
+            "call_id": "call_probe",
+            "output": [
+                {"type": "input_text", "text": "status"},
+                {"type": "encrypted_content", "encrypted_content": wrapped},
+            ],
+        }
+    ]
+    original: Final = json.dumps(items, sort_keys=True)
+
+    restored: Final = ResponsesAPIRequestUtils.restore_encrypted_content_item_ids_in_input(items)
+
+    assert restored == [
+        {
+            "type": item_type,
+            "call_id": "call_probe",
+            "output": [
+                {"type": "input_text", "text": "status"},
+                {"type": "encrypted_content", "encrypted_content": ciphertext},
+            ],
+        }
+    ]
+    assert json.dumps(items, sort_keys=True) == original
+    assert ResponsesAPIRequestUtils.restore_encrypted_content_item_ids_in_input(restored) == restored
 
 
 class TestResponsesAPIRequestUtils:

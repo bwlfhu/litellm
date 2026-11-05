@@ -129,20 +129,17 @@ class ResponsesAPIRequestUtils:
 
     @classmethod
     def get_collaboration_model_id_from_item(cls, item: Mapping[str, object]) -> str | None:
-        if item.get("type") == "agent_message":
-            content_raw: Final = item.get("content")
-            content: Final = cast(list[object], content_raw) if isinstance(content_raw, list) else None
-            if isinstance(content, list):
-                for block in content:
-                    if not _is_object_dict(block) or block.get("type") != "encrypted_content":
-                        continue
-                    encrypted_content = block.get("encrypted_content")
-                    if not isinstance(encrypted_content, str):
-                        continue
-                    model_id, _ = cls.unwrap_encrypted_content_with_model_id(encrypted_content)
-                    if model_id is not None:
-                        return model_id
-                return None
+        for field in ("content", "output"):
+            if not _is_object_sequence(parts := item.get(field)):
+                continue
+            for block in parts:
+                if not _is_object_dict(block) or block.get("type") != "encrypted_content":
+                    continue
+                if not isinstance(encrypted_content := block.get("encrypted_content"), str):
+                    continue
+                model_id, _ = cls.unwrap_encrypted_content_with_model_id(encrypted_content)
+                if model_id is not None:
+                    return model_id
         arguments: Final = item.get("arguments")
         if not cls._is_collaboration_function_call(item) or not isinstance(arguments, str):
             return None
@@ -176,6 +173,16 @@ class ResponsesAPIRequestUtils:
             return
         parsed["message"] = unwrapped
         item["arguments"] = json.dumps(parsed, separators=(",", ":"))
+
+    @classmethod
+    def _restore_encrypted_content_block(cls, block: object) -> object:
+        if not _is_object_dict(block):
+            return block
+        encrypted_content: Final = block.get("encrypted_content")
+        if not isinstance(encrypted_content, str):
+            return block
+        _, unwrapped = cls.unwrap_encrypted_content_with_model_id(encrypted_content)
+        return {**block, "encrypted_content": unwrapped} if unwrapped != encrypted_content else block
 
     @staticmethod
     def shape_prompt_managed_message_for_responses(message: object) -> object:
@@ -698,21 +705,9 @@ class ResponsesAPIRequestUtils:
                     ) = ResponsesAPIRequestUtils.unwrap_encrypted_content_with_model_id(encrypted_content)
                     if unwrapped != encrypted_content:
                         item["encrypted_content"] = unwrapped
-                content_raw = item.get("content")
-                if isinstance(content_raw, list):
-                    content = cast(list[object], content_raw)
-                    for block in content:
-                        if not _is_object_dict(block):
-                            continue
-                        block_encrypted_content = block.get("encrypted_content")
-                        if not isinstance(block_encrypted_content, str):
-                            continue
-                        restored_block = ResponsesAPIRequestUtils.unwrap_encrypted_content_with_model_id(
-                            block_encrypted_content
-                        )
-                        unwrapped_block = restored_block[1]
-                        if unwrapped_block != block_encrypted_content:
-                            block["encrypted_content"] = unwrapped_block
+                for field in ("content", "output"):
+                    if _is_object_sequence(parts := item.get(field)):
+                        item[field] = [ResponsesAPIRequestUtils._restore_encrypted_content_block(block) for block in parts]
                 ResponsesAPIRequestUtils._restore_collaboration_arguments(item)
 
         return restored_input

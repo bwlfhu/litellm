@@ -17,6 +17,7 @@ The mechanism works without any cache and supports two encoding strategies:
 
 import json
 import time
+from typing import Final
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -154,6 +155,17 @@ class TestUpdateEncryptedContentItemIds:
 
 
 class TestEncryptedContentWrapping:
+    @pytest.mark.parametrize("item_type", ("function_call_output", "custom_tool_call_output"))
+    def test_affinity_reads_encrypted_tool_output(self, item_type: str) -> None:
+        marked: Final = ResponsesAPIRequestUtils.wrap_encrypted_content_with_model_id("opaque", "deployment-1")
+        item: Final = {
+            "type": item_type,
+            "call_id": "call_probe",
+            "output": [{"type": "encrypted_content", "encrypted_content": marked}],
+        }
+
+        assert EncryptedContentAffinityCheck._model_id_of_input_item(item) == "deployment-1"
+
     def test_collaboration_function_arguments_are_marked_and_restored(self):
         item = {
             "type": "function_call",
