@@ -15,6 +15,7 @@ The mechanism works without any cache and supports two encoding strategies:
   encrypted_content back to their original forms before sending to the upstream provider.
 """
 
+import json
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -153,6 +154,59 @@ class TestUpdateEncryptedContentItemIds:
 
 
 class TestEncryptedContentWrapping:
+    def test_collaboration_function_arguments_are_marked_and_restored(self):
+        item = {
+            "type": "function_call",
+            "name": "send_message",
+            "arguments": json.dumps({"target": "/root", "message": "opaque-agent-message"}),
+        }
+
+        result = ResponsesAPIRequestUtils._update_encrypted_content_item_ids_in_response(
+            {"output": [item]}, "deployment-1"
+        )
+        marked = json.loads(result["output"][0]["arguments"])["message"]
+        assert marked.startswith("litellm_enc:")
+        assert ResponsesAPIRequestUtils.get_collaboration_model_id_from_item(result["output"][0]) == "deployment-1"
+
+        restored = ResponsesAPIRequestUtils.restore_encrypted_content_item_ids_in_input(result["output"])
+        assert json.loads(restored[0]["arguments"])["message"] == "opaque-agent-message"
+
+    def test_agent_message_content_is_marked_and_restored(self):
+        encrypted = ResponsesAPIRequestUtils.wrap_encrypted_content_with_model_id("opaque", "deployment-1")
+        item = {
+            "type": "agent_message",
+            "content": [{"type": "encrypted_content", "encrypted_content": encrypted}],
+        }
+
+        assert ResponsesAPIRequestUtils.get_collaboration_model_id_from_item(item) == "deployment-1"
+        restored = ResponsesAPIRequestUtils.restore_encrypted_content_item_ids_in_input([item])
+        assert restored[0]["content"][0]["encrypted_content"] == "opaque"
+
+    def test_affinity_reads_marked_collaboration_argument(self):
+        marked = ResponsesAPIRequestUtils.wrap_encrypted_content_with_model_id("opaque", "deployment-1")
+        item = {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "send_message",
+            "arguments": json.dumps({"target": "/root", "message": marked}),
+        }
+
+        assert EncryptedContentAffinityCheck._model_id_of_input_item(item) == "deployment-1"
+
+    def test_plaintext_collaboration_argument_marker_is_preserved(self):
+        item = {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "send_message",
+            "encrypted_function_args": [],
+            "arguments": json.dumps({"target": "/root", "message": "plain-agent-message"}),
+        }
+
+        result = ResponsesAPIRequestUtils._update_encrypted_content_item_ids_in_response(
+            {"output": [item]}, "deployment-1"
+        )
+        assert json.loads(result["output"][0]["arguments"])["message"] == "plain-agent-message"
+
     def test_wrap_and_unwrap_encrypted_content(self):
         """Test wrapping encrypted_content with model_id metadata."""
         model_id = "deployment-1"

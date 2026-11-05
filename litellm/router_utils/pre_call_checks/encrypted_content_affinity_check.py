@@ -133,20 +133,21 @@ class EncryptedContentAffinityCheck(CustomLogger):
     def _model_id_of_input_item(item: object) -> str | None:
         if not isinstance(item, dict):
             return None
+        typed_item: Final = cast(dict[str, object], item)
 
-        item_id: Final = item.get("id")
+        item_id: Final = typed_item.get("id")
         if item_id and isinstance(item_id, str):
             decoded: Final = ResponsesAPIRequestUtils.decode_encrypted_item_id(item_id)
             if decoded:
                 return decoded.get("model_id")
 
-        encrypted_content: Final = item.get("encrypted_content")
+        encrypted_content: Final = typed_item.get("encrypted_content")
         if encrypted_content and isinstance(encrypted_content, str):
             model_id: Final = EncryptedContentAffinityCheck._model_id_from_wrapped_encrypted_content(encrypted_content)
             if model_id:
                 return model_id
 
-        return None
+        return ResponsesAPIRequestUtils.get_collaboration_model_id_from_item(typed_item)
 
     @staticmethod
     def _anthropic_content_blocks(messages: object) -> Iterator[Mapping[str, object]]:

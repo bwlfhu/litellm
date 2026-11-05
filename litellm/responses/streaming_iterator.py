@@ -481,6 +481,9 @@ class BaseResponsesAPIStreamingIterator:
                                         )
                                     )
                                     setattr(item, "encrypted_content", wrapped_content)
+                            stream_model_id: Final = _model_id_from_metadata(self.litellm_metadata)
+                            if stream_model_id:
+                                ResponsesAPIRequestUtils.wrap_encrypted_collaboration_arguments(item, stream_model_id)
 
                 # Store the completed response (also for incomplete/failed so logging still fires)
                 _chunk_type: Final = getattr(openai_responses_api_chunk, "type", None)
@@ -1946,13 +1949,16 @@ def _wrap_output_item_encrypted_content(
     item: Final = event_obj.get("item")
     if model_id is None or not _is_json_object(item):
         return None
+    wrapped_item: Final = {**item}
+    ResponsesAPIRequestUtils.wrap_encrypted_collaboration_arguments(wrapped_item, model_id)
     encrypted_content: Final = item.get("encrypted_content")
     if not isinstance(encrypted_content, str) or not encrypted_content:
-        return None
+        return {**event_obj, "item": wrapped_item} if wrapped_item != item else None
     wrapped_content: Final = ResponsesAPIRequestUtils.wrap_encrypted_content_with_model_id(
         encrypted_content=encrypted_content, model_id=model_id
     )
-    return {**event_obj, "item": {**item, "encrypted_content": wrapped_content}}
+    wrapped_item["encrypted_content"] = wrapped_content
+    return {**event_obj, "item": wrapped_item}
 
 
 class ResponsesWebSocketStreaming:
