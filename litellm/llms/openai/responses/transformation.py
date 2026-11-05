@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
 from types import MappingProxyType
@@ -21,6 +22,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
 )
 from litellm.litellm_core_utils.safe_json_loads import safe_json_loads
 from litellm.litellm_core_utils.url_utils import encode_url_path_segment
+from litellm.llms.base_llm.responses.collaboration import PlaintextCollaboration
 from litellm.llms.base_llm.responses.transformation import BaseResponsesAPIConfig
 from litellm.llms.openai.chat.gpt_5_transformation import (
     is_gpt_reasoning_series_name,
@@ -111,6 +113,49 @@ def _json_object_body(response: _JsonObjectResponse) -> dict[str, object]:
 
 
 class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
+    def __init__(self, plaintext_collaboration_api_bases: frozenset[str] | None = None) -> None:
+        super().__init__()
+        self._plaintext_collaboration_api_bases = (
+            plaintext_collaboration_api_bases
+            if plaintext_collaboration_api_bases is not None
+            else frozenset(
+                value.strip().rstrip("/")
+                for value in os.environ.get("LITELLM_PLAINTEXT_COLLABORATION_API_BASES", "").split(",")
+                if value.strip()
+            )
+        )
+        self._plaintext_collaboration: PlaintextCollaboration | None = None
+        self._collaboration_request: Mapping[str, object] | None = None
+
+    def _prepare_collaboration(
+        self, request: Mapping[str, object], litellm_params: GenericLiteLLMParams
+    ) -> Mapping[str, object]:
+        self._collaboration_request = request
+        if (
+            not self._plaintext_collaboration_api_bases
+            or self.custom_llm_provider != LlmProviders.OPENAI
+            or (litellm_params.api_base or "").rstrip("/") not in self._plaintext_collaboration_api_bases
+        ):
+            self._plaintext_collaboration = None
+            return request
+        self._plaintext_collaboration = PlaintextCollaboration()
+        return self._plaintext_collaboration.prepare_request(request)
+
+    def transform_extra_body(
+        self,
+        extra_body: Mapping[str, object],
+        request: Mapping[str, object],
+        model: str,
+        litellm_params: GenericLiteLLMParams,
+    ) -> Mapping[str, object]:
+        if not self._plaintext_collaboration_api_bases or self.custom_llm_provider != LlmProviders.OPENAI:
+            return extra_body
+        if (litellm_params.api_base or "").rstrip("/") not in self._plaintext_collaboration_api_bases:
+            return extra_body
+        original: Final = self._collaboration_request or request
+        projected: Final = self._prepare_collaboration({**original, **extra_body}, litellm_params)
+        return BaseResponsesAPIConfig.normalize_responses_api_request_dict(dict(projected))
+
     @property
     def custom_llm_provider(self) -> LlmProviders:
         return LlmProviders.OPENAI
@@ -348,7 +393,7 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
             ResponsesAPIRequestParams(model=model, input=replay_safe_input, **response_api_optional_request_params)
         )
 
-        return final_request_params
+        return dict(self._prepare_collaboration(final_request_params, litellm_params))
 
     def _prepared_input_and_tools(
         self,
@@ -613,7 +658,12 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
                 original_response=raw_response.text,
                 additional_args={"complete_input_dict": {}},
             )
-            raw_response_json: Final = _RAW_RESPONSE_JSON.validate_python(raw_response.json())
+            decoded_response: Final = _RAW_RESPONSE_JSON.validate_python(raw_response.json())
+            raw_response_json: Final = dict(
+                self._plaintext_collaboration.restore_response(decoded_response)
+                if self._plaintext_collaboration is not None
+                else decoded_response
+            )
             raw_response_json["created_at"] = safe_convert_created_field(raw_response_json["created_at"])
         except Exception:
             raise OpenAIError(message=raw_response.text, status_code=raw_response.status_code)
@@ -683,27 +733,35 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
         """
         # Convert the dictionary to a properly typed ResponsesAPIStreamingResponse
         verbose_logger.debug("Raw OpenAI Chunk=%s", parsed_chunk)
+        validated_chunk: Final = _RAW_RESPONSE_JSON.validate_python(parsed_chunk)
+        restored_chunk: Final = (
+            self._plaintext_collaboration.restore_event(validated_chunk)
+            if self._plaintext_collaboration is not None
+            else validated_chunk
+        )
+        return self._parse_streaming_response(restored_chunk)
+
+    @staticmethod
+    def _parse_streaming_response(parsed_chunk: Mapping[str, object]) -> ResponsesAPIStreamingResponse:
         event_type: Final = str(parsed_chunk.get("type"))
         event_pydantic_model: Final = OpenAIResponsesAPIConfig.get_event_model_class(event_type=event_type)
-        # Some OpenAI-compatible providers send error.code: null; coalesce so validation succeeds.
-        try:
-            error_obj: Final = parsed_chunk.get("error")
-            if isinstance(error_obj, dict) and error_obj.get("code") is None:
-                parsed_chunk = dict(parsed_chunk)
-                parsed_chunk["error"] = dict(error_obj)
-                parsed_chunk["error"]["code"] = "unknown_error"
-        except Exception:
-            verbose_logger.debug("Failed to coalesce error.code in parsed_chunk")
+        error_value: Final = parsed_chunk.get("error")
+        error_obj: Final = _RAW_RESPONSE_JSON.validate_python(error_value) if isinstance(error_value, dict) else None
+        normalized_chunk: Final = (
+            {**parsed_chunk, "error": {**error_obj, "code": "unknown_error"}}
+            if error_obj is not None and error_obj.get("code") is None
+            else parsed_chunk
+        )
 
         try:
-            return event_pydantic_model(**parsed_chunk)
+            return event_pydantic_model.model_validate(normalized_chunk)
         except ValidationError:
             verbose_logger.debug(
                 "Pydantic validation failed for %s with chunk %s, falling back to model_construct",
                 event_pydantic_model.__name__,
-                parsed_chunk,
+                normalized_chunk,
             )
-            return event_pydantic_model.model_construct(**parsed_chunk)
+            return event_pydantic_model.model_construct(**dict(normalized_chunk), _fields_set=set(normalized_chunk))
 
     @staticmethod
     def parse_terminal_event_from_stream_chunks(all_chunks: Sequence[str]) -> ResponsesTerminalEvent | None:

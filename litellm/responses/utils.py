@@ -96,7 +96,7 @@ class ResponsesAPIRequestUtils:
     @classmethod
     def _collaboration_arguments_with_marker(
         cls, item: Mapping[str, object], model_id: str
-    ) -> dict[str, object] | None:
+    ) -> Mapping[str, object] | None:
         if not cls._is_collaboration_function_call(item):
             return None
         if item.get("encrypted_function_args") is not None:
@@ -122,10 +122,10 @@ class ResponsesAPIRequestUtils:
                 item.update(updated)
             return
         if isinstance(item, BaseModel):
-            item_data: Final = cast(dict[str, object], item.model_dump(exclude_none=True))
+            item_data: Final = _JSON_OBJECT_ADAPTER.validate_python(item.model_dump(exclude_none=True))
             updated_item: Final = cls._collaboration_arguments_with_marker(item_data, model_id)
             if updated_item is not None:
-                setattr(item, "arguments", updated_item["arguments"])
+                item.__setattr__("arguments", updated_item["arguments"])
 
     @classmethod
     def get_collaboration_model_id_from_item(cls, item: Mapping[str, object]) -> str | None:
@@ -150,11 +150,10 @@ class ResponsesAPIRequestUtils:
         message: Final = parsed.get("message")
         if not isinstance(message, str):
             return None
-        model_id, _ = cls.unwrap_encrypted_content_with_model_id(message)
-        return model_id
+        return cls.unwrap_encrypted_content_with_model_id(message)[0]
 
     @classmethod
-    def _restore_collaboration_arguments(cls, item: dict[str, object]) -> None:
+    def _restore_collaboration_arguments(cls, item: Mapping[str, object]) -> str | None:
         if not cls._is_collaboration_function_call(item):
             return
         arguments: Final = item.get("arguments")
@@ -172,7 +171,7 @@ class ResponsesAPIRequestUtils:
         if unwrapped == message:
             return
         parsed["message"] = unwrapped
-        item["arguments"] = json.dumps(parsed, separators=(",", ":"))
+        return json.dumps(parsed, separators=(",", ":"))
 
     @classmethod
     def _restore_encrypted_content_block(cls, block: object) -> object:
@@ -602,11 +601,10 @@ class ResponsesAPIRequestUtils:
         else:
             output = getattr(response, "output", None)
 
-        if not isinstance(output, list):
+        if not _is_object_sequence(output):
             return response
 
-        typed_output: Final = cast(list[object], output)
-        for item in typed_output:
+        for item in output:
             if _is_object_dict(item):
                 ResponsesAPIRequestUtils.wrap_encrypted_collaboration_arguments(item, model_id)
                 item_id = item.get("id")
@@ -628,19 +626,16 @@ class ResponsesAPIRequestUtils:
                 if encrypted_content and isinstance(encrypted_content, str):
                     # Always wrap encrypted_content with model_id for redundancy
                     try:
-                        setattr(
-                            item,
+                        item.__setattr__(
                             "encrypted_content",
-                            ResponsesAPIRequestUtils.wrap_encrypted_content_with_model_id(
-                                encrypted_content, model_id
-                            ),
+                            ResponsesAPIRequestUtils.wrap_encrypted_content_with_model_id(encrypted_content, model_id),
                         )
                     except AttributeError:
                         pass
                     # Also encode the ID if present
                     if item_id and isinstance(item_id, str):
                         try:
-                            setattr(item, "id", ResponsesAPIRequestUtils._build_encrypted_item_id(model_id, item_id))
+                            item.__setattr__("id", ResponsesAPIRequestUtils._build_encrypted_item_id(model_id, item_id))
                         except AttributeError:
                             pass
 
@@ -707,8 +702,11 @@ class ResponsesAPIRequestUtils:
                         item["encrypted_content"] = unwrapped
                 for field in ("content", "output"):
                     if _is_object_sequence(parts := item.get(field)):
-                        item[field] = [ResponsesAPIRequestUtils._restore_encrypted_content_block(block) for block in parts]
-                ResponsesAPIRequestUtils._restore_collaboration_arguments(item)
+                        item[field] = [
+                            ResponsesAPIRequestUtils._restore_encrypted_content_block(block) for block in parts
+                        ]
+                if (restored_arguments := ResponsesAPIRequestUtils._restore_collaboration_arguments(item)) is not None:
+                    item["arguments"] = restored_arguments
 
         return restored_input
 

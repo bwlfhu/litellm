@@ -133,7 +133,7 @@ class EncryptedContentAffinityCheck(CustomLogger):
     def _model_id_of_input_item(item: object) -> str | None:
         if not isinstance(item, dict):
             return None
-        typed_item: Final = cast(dict[str, object], item)
+        typed_item: Final = _REQUEST_KWARGS_ADAPTER.validate_python(item)
 
         item_id: Final = typed_item.get("id")
         if item_id and isinstance(item_id, str):

@@ -22,6 +22,7 @@ from litellm.types.llms.openai import (
     ResponseAPIUsage,
     ResponseCompletedEvent,
     ResponsesAPIResponse,
+    ResponseInputParam,
     ResponsesAPIStreamEvents,
 )
 from litellm.types.router import GenericLiteLLMParams
@@ -3681,3 +3682,140 @@ def test_dict_responses_input_filters_unset_reasoning_fields() -> None:
     function_call_item: Final = validated_input[2]
     assert function_call_item["type"] == "function_call"
     assert function_call_item["status"] == "completed"
+
+
+@pytest.mark.parametrize("inventory", ["tools", "history"])
+def test_plaintext_collaboration_roundtrip_preserves_history_and_dispatch_marker(inventory: str) -> None:
+    from copy import deepcopy
+
+    endpoint: Final = "https://responses.example.test/v1"
+    config: Final = OpenAIResponsesAPIConfig(plaintext_collaboration_api_bases=frozenset({endpoint}))
+    schema: Final = {
+        "type": "namespace",
+        "name": "collaboration",
+        "tools": [
+            {
+                "type": "function",
+                "name": "send_message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}, "message": {"type": "string", "encrypted": True}},
+                    "required": ["target", "message"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+    }
+    original: Final = [
+        {"type": "additional_tools", "role": "system", "tools": [schema]}
+        if inventory == "history"
+        else {"role": "user", "content": "probe"},
+        {
+            "type": "agent_message",
+            "author": "/root/child",
+            "recipient": "/root",
+            "content": [{"type": "input_text", "text": "existing plaintext history"}],
+        },
+    ]
+    snapshot: Final = deepcopy(original)
+    params: Final = GenericLiteLLMParams(api_base=endpoint)
+    request: Final = config.transform_responses_api_request(
+        model="gpt-6.1-sol",
+        input=cast("ResponseInputParam", original),
+        response_api_optional_request_params={"store": False, **({"tools": [schema]} if inventory == "tools" else {})},
+        litellm_params=params,
+        headers={},
+    )
+    projected: Final = request["tools"][0] if inventory == "tools" else request["input"][0]["tools"][0]
+    assert projected["name"] == "codex_collaboration_plaintext"
+    assert projected["tools"][0]["parameters"]["properties"]["message"] == {"type": "string"}
+    assert request["input"][1] == original[1]
+    assert original == snapshot
+    call: Final = {
+        "type": "function_call",
+        "id": "fc_plaintext",
+        "call_id": "call_plaintext",
+        "namespace": projected["name"],
+        "name": "send_message",
+        "arguments": json.dumps({"target": "/root", "message": "Keep this exact plaintext message"}),
+        "status": "completed",
+    }
+    added: Final = config.transform_streaming_response(
+        "gpt-6.1-sol", {"type": "response.output_item.added", "output_index": 0, "item": call}, None
+    ).model_dump(exclude_none=True)
+    done: Final = config.transform_streaming_response(
+        "gpt-6.1-sol",
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {key: value for key, value in call.items() if key not in ("namespace", "name")},
+        },
+        None,
+    ).model_dump(exclude_none=True)
+    expected: Final = {**call, "namespace": "collaboration", "encrypted_function_args": []}
+    assert added["item"] == expected
+    assert done["item"] == expected
+    response: Final = {
+        "id": "resp_plaintext",
+        "created_at": 0,
+        "status": "completed",
+        "object": "response",
+        "model": "gpt-6.1-sol",
+        "output": [call],
+    }
+    logging: Final = LiteLLMLoggingObj(
+        model="gpt-6.1-sol",
+        messages=[],
+        stream=False,
+        call_type="responses",
+        start_time=None,
+        litellm_call_id="plaintext-probe",
+        function_id="plaintext-probe",
+    )
+    parsed: Final = config.transform_response_api_response("gpt-6.1-sol", httpx.Response(200, json=response), logging)
+    assert json.loads(parsed.model_dump_json(exclude_none=True))["output"] == [expected]
+
+
+@pytest.mark.parametrize(
+    "overlay", [{"store": True}, {"previous_response_id": "resp_old"}, {"conversation": "conv_old"}]
+)
+def test_plaintext_collaboration_extra_body_cannot_enable_stateful_history(overlay: dict[str, object]) -> None:
+    config: Final = OpenAIResponsesAPIConfig(
+        plaintext_collaboration_api_bases=frozenset({"https://responses.example.test/v1"})
+    )
+    params: Final = GenericLiteLLMParams(api_base="https://responses.example.test/v1")
+    tool: Final = {
+        "type": "namespace",
+        "name": "collaboration",
+        "tools": [
+            {
+                "type": "function",
+                "name": "send_message",
+                "parameters": {"type": "object", "properties": {"message": {"type": "string", "encrypted": True}}},
+            }
+        ],
+    }
+    request: Final = config.transform_responses_api_request("gpt-6.1-sol", "probe", {"tools": [tool]}, params, {})
+    with pytest.raises(ValueError, match="stateless Responses"):
+        config.transform_extra_body(overlay, request, "gpt-6.1-sol", params)
+
+
+def test_plaintext_collaboration_leaves_other_endpoints_unchanged() -> None:
+    config: Final = OpenAIResponsesAPIConfig(
+        plaintext_collaboration_api_bases=frozenset({"https://responses.example.test/v1"})
+    )
+    tool: Final = {
+        "type": "namespace",
+        "name": "collaboration",
+        "tools": [
+            {
+                "type": "function",
+                "name": "send_message",
+                "parameters": {"type": "object", "properties": {"message": {"type": "string", "encrypted": True}}},
+            }
+        ],
+    }
+    request: Final = config.transform_responses_api_request(
+        "gpt-6.1-sol", "probe", {"tools": [tool]}, GenericLiteLLMParams(api_base="https://another.example.test/v1"), {}
+    )
+    assert request["tools"] == [tool]
