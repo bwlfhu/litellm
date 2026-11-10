@@ -97,6 +97,18 @@ def http_client():
 
 
 class TestCountReleaseBullets:
+    def test_editorial_release_summary_supplies_counts_without_counting_action_items(self):
+        body: Final = (
+            "9 PRs. 2 added, 4 fixed, 1 changed. 1 needs action\n\n"
+            "### Action required\n- **Deployment:** Remove an obsolete setting\n\n"
+            "### Changes\n- **Messages API:** Fixed tool replay\n"
+        )
+        assert dict(count_release_bullets(body)) == {"new_features": 2, "bug_fixes": 4, "other_updates": 1}
+
+    def test_hyphen_bullets_keep_conventional_commit_categories(self):
+        body: Final = "- feat(proxy): add route\n- fix: preserve tools\n- docs: explain routing\n"
+        assert dict(count_release_bullets(body)) == {"new_features": 1, "bug_fixes": 1, "other_updates": 1}
+
     def test_buckets_by_conventional_commit_type(self):
         counts = count_release_bullets(SAMPLE_BODY)
         assert counts["new_features"] == 2

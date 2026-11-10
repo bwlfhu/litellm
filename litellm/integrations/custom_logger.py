@@ -22,6 +22,7 @@ from litellm.types.utils import (
     ModelResponse,
     ModelResponseStream,
     StandardAuditLogPayload,
+    StandardBatchLineItemsPayload,
     StandardCallbackDynamicParams,
     StandardLoggingPayload,
 )
@@ -35,12 +36,12 @@ if TYPE_CHECKING:
     from litellm.llms.base_llm.anthropic_messages.transformation import (
         BaseAnthropicMessagesConfig,
     )
-    from litellm.proxy._types import UserAPIKeyAuth
     from litellm.types.mcp import (
         MCPPostCallResponseObject,
         MCPPreCallRequestObject,
         MCPPreCallResponseObject,
     )
+    from litellm.types.proxy.auth.user_api_key_auth import UserAPIKeyAuth
     from litellm.types.router import PreRoutingHookResponse
 
     Span = _Span
@@ -195,6 +196,9 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
     async def async_log_audit_log_event(self, audit_log: "StandardAuditLogPayload"):
         """Called when an audit log is created. Override in subclasses to handle."""
 
+    async def async_log_batch_line_items(self, payload: StandardBatchLineItemsPayload) -> None:
+        """Called once per part of a finished batch's lines, when this logger is listed in batch_line_item_callbacks."""
+
     #### PROMPT MANAGEMENT HOOKS ####
 
     async def async_get_chat_completion_prompt(
@@ -252,7 +256,7 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
         self,
         model: str,
         request_kwargs: dict,
-        messages: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, object]] | None = None,
         input: str | list | None = None,
         specific_deployment: bool | None = False,
     ) -> PreRoutingHookResponse | None:
@@ -892,6 +896,11 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
         return OLD_LITELLM_METADATA_FIELD
 
     def redacts_messages_itself(self) -> bool:
+        return False
+
+    def exempt_from_message_redaction(self) -> bool:
+        """Router pre-call checks that key routing off the request and never log it return True, so
+        `turn_off_message_logging` leaves the success event they receive unredacted."""
         return False
 
     def redact_standard_logging_payload_from_model_call_details(self, model_call_details: dict) -> dict:

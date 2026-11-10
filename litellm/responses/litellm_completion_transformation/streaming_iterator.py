@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from itertools import chain, filterfalse
 from typing import Any, Final, cast
 
+from openai.types.responses import ResponseOutputMessage
 from pydantic import BaseModel, TypeAdapter
 
 import litellm
@@ -16,6 +17,11 @@ from litellm.responses.litellm_completion_transformation.custom_tools import (
     unwrap_custom_tool_arguments,
 )
 from litellm.responses.litellm_completion_transformation.reasoning_items import mint_reasoning_item_id
+from litellm.responses.litellm_completion_transformation.tool_search import (
+    build_tool_search_call,
+    has_server_tool_search,
+    is_anthropic_tool_search_use,
+)
 from litellm.responses.litellm_completion_transformation.transformation import (
     LiteLLMCompletionResponsesConfig,
 )
@@ -219,6 +225,49 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         ] = {}
         self._queued_code_interpreter_call_ids: set[str] = set()
         self._queued_web_search_call_ids: set[str] = set()  # mutable-ok: emitted call ids
+        self._tool_search_requested: bool = has_server_tool_search(self.responses_api_request.get("tools"))
+        self._tool_search_call_ids: frozenset[str] = frozenset()
+
+    def _is_tool_search_call(self, call_id: str, fn_name: str) -> bool:
+        if call_id in self._tool_search_call_ids:
+            return True
+        if not self._tool_search_requested or not is_anthropic_tool_search_use(call_id, fn_name):
+            return False
+        self._tool_search_call_ids = self._tool_search_call_ids | {call_id}
+        return True
+
+    def _queue_output_item_added(self, output_index: int, item: BaseLiteLLMOpenAIResponseObject) -> None:
+        self._sequence_number += 1
+        added: Final = OutputItemAddedEvent(
+            type=ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED,
+            output_index=output_index,
+            item=item,
+        )
+        added.__dict__["sequence_number"] = self._sequence_number
+        self._pending_tool_events.append(added)
+
+    def _queue_tool_search_call_added(self, call_id: str, output_index: int, args_delta: str) -> None:
+        if call_id not in self._tool_args_by_call_id:
+            self._tool_args_by_call_id[call_id] = ""
+            item: Final = build_tool_search_call(call_id, "", "in_progress")
+            self._tool_item_id_by_call_id[call_id] = item.id
+            self._queue_output_item_added(output_index, BaseLiteLLMOpenAIResponseObject(**item.model_dump()))
+        self._tool_args_by_call_id[call_id] += args_delta
+
+    def _queue_tool_search_call_done(self, call_id: str, output_index: int, final_args: str) -> None:
+        self._queue_tool_search_call_added(call_id, output_index, "")
+        item: Final = build_tool_search_call(
+            call_id, final_args or self._tool_args_by_call_id.get(call_id, ""), "completed"
+        )
+        self._sequence_number += 1
+        self._pending_tool_events.append(
+            OutputItemDoneEvent(
+                type=ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE,
+                output_index=output_index,
+                sequence_number=self._sequence_number,
+                item=BaseLiteLLMOpenAIResponseObject(**item.model_dump()),
+            )
+        )
 
     def _get_or_assign_tool_output_index(self, call_id: str) -> int:
         existing: Final = self._tool_output_index_by_call_id.get(call_id)
@@ -449,26 +498,18 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
 
             output_index = self._get_or_assign_tool_output_index(call_id)
 
+            if self._is_tool_search_call(call_id, fn_name):
+                self._queue_tool_search_call_added(call_id, output_index, fn_args_delta)
+                continue
+
             if call_id not in self._tool_args_by_call_id:
                 self._tool_args_by_call_id[call_id] = ""
-                self._sequence_number += 1
-                item_kwargs = build_tool_call_item_kwargs(
-                    call_id,
-                    tool_name,
-                    "",
-                    "in_progress",
-                    custom_tool_names,
-                )
-                if tool_namespace:
-                    item_kwargs["namespace"] = tool_namespace
+                item_kwargs = {
+                    **build_tool_call_item_kwargs(call_id, tool_name, "", "in_progress", custom_tool_names),
+                    **({"namespace": tool_namespace} if tool_namespace else {}),
+                }
                 self._tool_item_id_by_call_id[call_id] = str(item_kwargs["id"])
-                event = OutputItemAddedEvent(
-                    type=ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED,
-                    output_index=output_index,
-                    item=BaseLiteLLMOpenAIResponseObject.model_validate({**item_kwargs}),
-                    sequence_number=self._sequence_number,
-                )
-                self._pending_tool_events.append(event)
+                self._queue_output_item_added(output_index, BaseLiteLLMOpenAIResponseObject.model_validate(item_kwargs))
 
             if fn_args_delta:
                 self._tool_args_by_call_id[call_id] += fn_args_delta
@@ -543,6 +584,10 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
                     self._queue_web_search_events(call_id, web_search_call)
                     self._queued_web_search_call_ids.add(call_id)
                 continue
+            if self._is_tool_search_call(call_id, fn_name):
+                self._queue_tool_search_call_done(call_id, output_index, fn_args)
+                continue
+
             tool_name, tool_namespace, namespace_tool_type = self._resolve_tool_call_fields(call_id, fn_name)
             custom_tool_names = self._custom_names_for_tool_call(
                 tool_name,
@@ -556,24 +601,12 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             # If we never sent output_item.added for this call_id, emit it now.
             if is_new_tool_call:
                 self._tool_args_by_call_id[call_id] = ""
-                self._sequence_number += 1
-                item_kwargs = build_tool_call_item_kwargs(
-                    call_id,
-                    tool_name,
-                    "",
-                    "in_progress",
-                    custom_tool_names,
-                )
-                if tool_namespace:
-                    item_kwargs["namespace"] = tool_namespace
+                item_kwargs = {
+                    **build_tool_call_item_kwargs(call_id, tool_name, "", "in_progress", custom_tool_names),
+                    **({"namespace": tool_namespace} if tool_namespace else {}),
+                }
                 self._tool_item_id_by_call_id[call_id] = str(item_kwargs["id"])
-                event = OutputItemAddedEvent(
-                    type=ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED,
-                    output_index=output_index,
-                    item=BaseLiteLLMOpenAIResponseObject.model_validate({**item_kwargs}),
-                    sequence_number=self._sequence_number,
-                )
-                self._pending_tool_events.append(event)
+                self._queue_output_item_added(output_index, BaseLiteLLMOpenAIResponseObject.model_validate(item_kwargs))
 
             final_args = fn_args or self._tool_args_by_call_id.get(call_id, "")
             is_custom_tool = tool_name in custom_tool_names
@@ -1055,8 +1088,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         if self._cached_item_id is None:
             self._cached_item_id = f"msg_{uuid.uuid4()}"
 
-        text: Final = self.litellm_model_response.choices[0].message.content or ""
-        annotations = getattr(self.litellm_model_response.choices[0].message, "annotations", None)
+        text: Final = litellm_complete_object.choices[0].message.content or ""
+        annotations = getattr(litellm_complete_object.choices[0].message, "annotations", None)
 
         response_annotations: Final = (
             LiteLLMCompletionResponsesConfig.transform_chat_completion_annotations_to_response_output_annotations(
@@ -1829,7 +1862,13 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             if self._cached_response_id:
                 responses_api_response.id = self._cached_response_id
 
-            responses_api_response.output = list(self._output_with_streamed_item_ids(responses_api_response))
+            response_output: Final = self._output_with_streamed_item_ids(responses_api_response)
+            responses_api_response.output = [
+                ResponseOutputMessage.model_validate(item.model_dump())
+                if getattr(item, "type", None) == "message"
+                else item
+                for item in response_output
+            ]
 
             # Encode the response ID to match non-streaming behavior
             encoded_response: Final = self._with_encoded_response_id(responses_api_response)

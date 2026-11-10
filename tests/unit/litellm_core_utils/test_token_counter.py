@@ -1401,6 +1401,34 @@ def test_anthropic_image_block_with_empty_base64_data():
     assert tokens > 0
 
 
+def test_token_counter_counts_anthropic_search_result_text() -> None:
+    from litellm.litellm_core_utils.token_counter import _count_content_list
+
+    search_result: Final = {
+        "type": "search_result",
+        "source": "https://example.invalid/notes",
+        "title": "Project notes",
+        "content": [{"type": "text", "text": "The code word is 7f3a."}],
+        "citations": {"enabled": True},
+    }
+
+    assert _count_content_list(len, [search_result], False, None) == len(
+        "https://example.invalid/notesProject notesThe code word is 7f3a."
+    )
+
+
+@pytest.mark.parametrize("nested", (False, True))
+def test_unknown_content_type_remains_a_value_error_with_an_optional_fallback(nested: bool) -> None:
+    from litellm.litellm_core_utils.token_counter import _count_content_list
+
+    unknown: Final = {"type": "future_block"}
+    content: Final = [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [unknown]}] if nested else [unknown]
+
+    with pytest.raises(ValueError, match="Invalid content item type: future_block"):
+        _count_content_list(len, content, False, None)
+    assert _count_content_list(len, content, False, 7) == 7
+
+
 def test_anthropic_image_block_without_source_raises():
     """An `image` block with no `source` raises, matching the OpenAI `image_url`-without-`url` behavior."""
     from litellm.litellm_core_utils.token_counter import _count_content_list
@@ -1932,3 +1960,20 @@ def test_messages_reach_token_count_honours_disable_token_counter(monkeypatch: p
     messages = _threshold_test_messages(turns=3)
     assert messages_reach_token_count(model="gpt-4o", messages=messages, threshold=0) is True
     assert messages_reach_token_count(model="gpt-4o", messages=messages, threshold=1) is False
+
+
+@pytest.mark.usefixtures("local_model_cost_map")
+def test_get_modified_max_tokens_leaves_a_gemini_4_long_decode_budget_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(litellm, "token_counter", lambda **_: 1_000)
+
+    assert (
+        get_modified_max_tokens(
+            model="gemini/gemini-4-argon",
+            base_model="gemini/gemini-4-argon",
+            messages=[{"role": "user", "content": "Write a complete proof of the prime number theorem."}],
+            user_max_tokens=200_000,
+            buffer_perc=None,
+            buffer_num=None,
+        )
+        == 200_000
+    )

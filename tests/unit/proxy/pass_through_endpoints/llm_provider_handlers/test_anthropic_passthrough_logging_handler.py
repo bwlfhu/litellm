@@ -1,18 +1,21 @@
 import asyncio
 import json
 from datetime import datetime
-from typing import Final, List
+from typing import Final
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 import litellm
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+from litellm.llms.anthropic.pass_through.stream_assembly import extract_sse_data
 from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import (
     AnthropicPassthroughLoggingHandler,
 )
+from tests.unit.llms.anthropic.anthropic_docs_refusal import ANTHROPIC_DOCS_REFUSAL_MESSAGE
 
 
 async def _drain_tasks():
@@ -1136,7 +1139,7 @@ class TestAnthropicBatchPassthroughCostTracking:
 class TestBuildCompleteStreamingResponseRobustness:
     """_build_complete_streaming_response must tolerate non-standard SSE frames."""
 
-    def _build(self, chunks: List[str]):
+    def _build(self, chunks: list[str]):
         return AnthropicPassthroughLoggingHandler._build_complete_streaming_response(
             all_chunks=chunks,
             litellm_logging_obj=MagicMock(),
@@ -2203,8 +2206,10 @@ class TestAnthropicUsageOnlyFallback:
             ('data: {"a": 1}', {"a": 1}),
         ],
     )
-    def test_extract_sse_data_handles_malformed_and_sentinel_lines(self, event_str, expected):
-        assert AnthropicPassthroughLoggingHandler._extract_sse_data(event_str) == expected
+    def test_extract_sse_data_handles_malformed_and_sentinel_lines(
+        self, event_str, expected
+    ):
+        assert extract_sse_data(event_str) == expected
 
     def _real_logging_obj(self):
         from litellm.litellm_core_utils.litellm_logging import Logging as RealLoggingObj
@@ -2605,6 +2610,58 @@ class TestRecordPartialUsageForFailure:
         assert "response_cost" not in logging_obj.model_call_details
 
 
+class _FailureRecorder(CustomLogger):
+    def __init__(self):
+        super().__init__()
+        self.failure_kwargs = []
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        self.failure_kwargs.append(kwargs)
+
+
+class TestLogErrorFrameAsFailure:
+    """A stream closed at the provider's `event: error` frame is one failed attempt: its failure log bills the
+    usage streamed before the frame on the attempt-scoped copy its caller hands it, and the request's shared
+    logging state stays as it was, so the attempt the router opens next logs with nothing left behind."""
+
+    @pytest.mark.asyncio
+    async def test_logs_a_failure_with_the_usage_streamed_before_the_frame_and_leaves_the_request_state_alone(self):
+        recorder = _FailureRecorder()
+        logging_obj = LiteLLMLoggingObj(
+            model="claude-sonnet-5",
+            messages=[{"role": "user", "content": "hello"}],
+            stream=True,
+            call_type="anthropic_messages",
+            start_time=datetime.now(),
+            litellm_call_id="test-error-frame-failure",
+            function_id="test-error-frame-failure",
+            dynamic_async_failure_callbacks=[recorder],
+        )
+        chunks = [
+            *TestRecordPartialUsageForFailure()._interrupted_chunks()[:1],
+            TestRecordPartialUsageForFailure._sse(
+                "error", {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+            ),
+        ]
+
+        await AnthropicPassthroughLoggingHandler.log_error_frame_as_failure(
+            attempt_logging_obj=logging_obj.attempt_scoped_copy(),
+            request_body={"model": "claude-sonnet-5", "stream": True},
+            all_chunks=chunks,
+            error_event=("overloaded_error", "Overloaded", 529),
+        )
+
+        assert len(recorder.failure_kwargs) == 1
+        failure_payload = recorder.failure_kwargs[0]["standard_logging_object"]
+        assert failure_payload["status"] == "failure"
+        assert failure_payload["prompt_tokens"] == 52
+        assert failure_payload["response_cost"] > 0
+        assert isinstance(recorder.failure_kwargs[0]["exception"], litellm.InternalServerError)
+        assert "combined_usage_object" not in logging_obj.model_call_details
+        assert "response_cost" not in logging_obj.model_call_details
+        assert logging_obj.should_run_logging("async_failure")
+
+
 @pytest.mark.parametrize(
     ("all_chunks", "interrupted"),
     [
@@ -2821,3 +2878,208 @@ def test_build_complete_streaming_response(all_chunks):
     assert result.usage.prompt_tokens == 17
     assert result.usage.completion_tokens == 249
     assert result.usage.total_tokens == 266
+
+
+_USABLE_MESSAGE_START: Final = 'data: {"type": "message_start", "message": {"id": "msg_real", "model": "claude-real"}}'
+
+
+@pytest.mark.parametrize(
+    "unusable_line",
+    [
+        "data: [1, 2]",
+        'data: "message_start"',
+        "data: 7",
+        "data: null",
+        "data: not json",
+        'data: {"type": "message_start"}',
+        'data: {"type": "message_start", "message": null}',
+        'data: {"type": "message_start", "message": {}}',
+        'data: {"type": "message_start", "message": ""}',
+        'data: {"type": "message_start", "message": []}',
+        'data: {"type": "message_start", "message": {"id": 7, "model": ["claude"]}}',
+        'data: {"type": "message_start", "message": {"id": "", "model": null}}',
+        'data: {"type": "ping", "message": "not an object"}',
+    ],
+)
+def test_model_and_response_id_come_from_the_first_message_start_that_carries_them(unusable_line: str):
+    all_chunks: Final = [f"event: message_start\n{unusable_line}\n\n".encode(), _USABLE_MESSAGE_START]
+
+    extracted: Final = (
+        AnthropicPassthroughLoggingHandler._extract_model_from_anthropic_chunks(all_chunks),
+        AnthropicPassthroughLoggingHandler._extract_response_id_from_anthropic_chunks(all_chunks),
+    )
+
+    assert extracted == ("claude-real", "msg_real"), unusable_line
+
+
+@pytest.mark.parametrize("message", ['"upstream text"', "7", "[1, 2]", "true"])
+def test_message_start_whose_message_is_not_an_object_fails_without_echoing_the_upstream_value(message: str):
+    all_chunks: Final = [f'data: {{"type": "message_start", "message": {message}}}', _USABLE_MESSAGE_START]
+
+    with pytest.raises(ValidationError) as exc_info:
+        AnthropicPassthroughLoggingHandler._extract_model_from_anthropic_chunks(all_chunks)
+
+    assert str(exc_info.value).splitlines()[:2] == [
+        "1 validation error for dict[str,any]",
+        "  Input should be a valid dictionary [type=dict_type]",
+    ], message
+
+
+@pytest.mark.parametrize(
+    "end_user_id",
+    [{"litellm_metadata": {"user": "test"}}, {"metadata": {"user_id": "test"}}],
+)
+def test_get_user_from_metadata(end_user_id):
+    from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import (
+        AnthropicPassthroughLoggingHandler,
+        PassthroughStandardLoggingPayload,
+    )
+
+    passthrough_logging_payload: Final = PassthroughStandardLoggingPayload(
+        url="https://api.anthropic.com/v1/messages",
+        request_body={**end_user_id},
+        response_body={
+            "id": "msg_015uSaCZBvu9gUSkAmZtMfxC",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5-20250929",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Now I'll click on the Firefox icon to launch it.",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01TQsF5p7Pf4LGKyLUDDySVr",
+                    "name": "computer",
+                    "input": {"action": "mouse_move", "coordinate": [24, 36]},
+                },
+            ],
+            "stop_reason": "tool_use",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 2202, "output_tokens": 89},
+        },
+    )
+
+    response: Final = AnthropicPassthroughLoggingHandler._get_user_from_metadata(
+        passthrough_logging_payload=passthrough_logging_payload
+    )
+
+    assert response == "test"
+
+
+def _anthropic_sse_stream(stop_reason: str, stop_details: dict | None) -> list[str]:
+    events: Final = (
+        (
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": ANTHROPIC_DOCS_REFUSAL_MESSAGE["id"],
+                    "type": "message",
+                    "role": "assistant",
+                    "model": ANTHROPIC_DOCS_REFUSAL_MESSAGE["model"],
+                    "content": [],
+                    "usage": {"input_tokens": 412, "output_tokens": 0},
+                },
+            },
+        ),
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None, "stop_details": stop_details},
+                "usage": {"output_tokens": 0},
+            },
+        ),
+        ("message_stop", {"type": "message_stop"}),
+    )
+    return [f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events]
+
+
+def test_streamed_messages_refusal_stop_details_on_the_logged_response(mock_logging_obj):
+    stop_details: Final = ANTHROPIC_DOCS_REFUSAL_MESSAGE["stop_details"]
+    logged: Final = AnthropicPassthroughLoggingHandler.build_complete_streaming_response(
+        all_chunks=_anthropic_sse_stream("refusal", stop_details),
+        litellm_logging_obj=mock_logging_obj,
+        model="claude-sonnet-5-5",
+    )
+
+    assert logged.choices[0].finish_reason == "content_filter"
+    provider_fields: Final = logged.choices[0].message.provider_specific_fields
+    assert provider_fields["stop_reason"] == "refusal"
+    assert provider_fields["stop_details"] == stop_details
+
+
+def test_streamed_messages_end_turn_logs_no_stop_details(mock_logging_obj):
+    logged: Final = AnthropicPassthroughLoggingHandler.build_complete_streaming_response(
+        all_chunks=_anthropic_sse_stream("end_turn", None),
+        litellm_logging_obj=mock_logging_obj,
+        model="claude-sonnet-5-5",
+    )
+
+    assert logged.choices[0].finish_reason == "stop"
+    provider_fields: Final = logged.choices[0].message.provider_specific_fields or {}
+    assert "stop_details" not in provider_fields
+
+
+_BEDROCK_TRACE_PRICING: Final = {
+    "bedrock/guardrails": {
+        "litellm_provider": "bedrock",
+        "mode": "guardrail",
+        "guardrail_cost_per_unit": {"topicPolicyUnits": 0.00015, "contentPolicyUnits": 0.00015},
+    }
+}
+_BEDROCK_INVOKE_TRACE: Final = {
+    "guardrail": {
+        "input": {"gid": {"invocationMetrics": {"usage": {"topicPolicyUnits": 1, "contentPolicyUnits": 1}}}},
+        "outputs": [{"gid": {"invocationMetrics": {"usage": {"topicPolicyUnits": 2, "contentPolicyUnits": 2}}}}],
+    }
+}
+
+
+def _recorded_guardrail_entries(logging_obj: LiteLLMLoggingObj) -> list:
+    return logging_obj.model_call_details["litellm_params"]["metadata"]["standard_logging_guardrail_information"]
+
+
+def test_anthropic_passthrough_handler_bills_the_bedrock_guardrail_trace_of_a_messages_response(
+    monkeypatch, mock_httpx_response, mock_response, mock_logging_obj
+) -> None:
+    monkeypatch.setattr(litellm, "model_cost", _BEDROCK_TRACE_PRICING)
+    mock_logging_obj.model_call_details["litellm_params"] = {"metadata": {}}
+    AnthropicPassthroughLoggingHandler.anthropic_passthrough_handler(
+        httpx_response=mock_httpx_response,
+        response_body={**mock_response, "amazon-bedrock-trace": _BEDROCK_INVOKE_TRACE},
+        logging_obj=mock_logging_obj,
+        url_route="/v1/messages",
+        result="success",
+        start_time=datetime(2025, 1, 1),
+        end_time=datetime(2025, 1, 1),
+        cache_hit=False,
+    )
+    (entry,) = _recorded_guardrail_entries(mock_logging_obj)
+    assert entry["guardrail_provider"] == "bedrock"
+    assert entry["guardrail_usage"] == {"topicPolicyUnits": 3, "contentPolicyUnits": 3}
+    assert entry["guardrail_cost"] == pytest.approx(6 * 0.00015)
+
+
+def test_anthropic_passthrough_stream_bills_the_bedrock_guardrail_trace_of_the_message_stop_event(
+    monkeypatch, mock_logging_obj, all_chunks
+) -> None:
+    monkeypatch.setattr(litellm, "model_cost", _BEDROCK_TRACE_PRICING)
+    mock_logging_obj.model_call_details["litellm_params"] = {"metadata": {}}
+    stop_event: Final = json.dumps({"type": "message_stop", "amazon-bedrock-trace": _BEDROCK_INVOKE_TRACE})
+    chunks: Final = [*all_chunks, f"event: message_stop\ndata: {stop_event}\n\n"]
+    AnthropicPassthroughLoggingHandler.handle_logging_anthropic_collected_chunks(
+        litellm_logging_obj=mock_logging_obj,
+        passthrough_success_handler_obj=MagicMock(),
+        url_route="/v1/messages",
+        request_body={"model": "claude", "messages": []},
+        endpoint_type=MagicMock(),
+        start_time=datetime(2025, 1, 1),
+        all_chunks=chunks,
+        end_time=datetime(2025, 1, 1),
+    )
+    (entry,) = _recorded_guardrail_entries(mock_logging_obj)
+    assert entry["guardrail_usage"] == {"topicPolicyUnits": 3, "contentPolicyUnits": 3}
+    assert entry["guardrail_cost"] == pytest.approx(6 * 0.00015)

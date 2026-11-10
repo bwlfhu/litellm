@@ -91,6 +91,36 @@ async def test_bedrock_runtime_count_is_kept_when_it_answers() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("model_to_use", "runtime", "expected_hosts", "expected_tokens"),
+    (
+        ("us.anthropic.claude-sonnet-4-6", (200, {"inputTokens": 1353}), (RUNTIME_HOST,), 1353),
+        ("us.anthropic.claude-opus-5-5", (400, UNSUPPORTED), (RUNTIME_HOST, MANTLE_HOST), 2177),
+    ),
+)
+async def test_deployment_with_an_empty_api_base_counts_on_the_default_runtime_host(
+    model_to_use: str,
+    runtime: tuple[int, Mapping[str, object]],
+    expected_hosts: tuple[str, ...],
+    expected_tokens: int,
+) -> None:
+    bedrock: Final = _Bedrock(runtime=runtime, mantle=(200, {"input_tokens": 2177}))
+
+    result: Final = await _counter(bedrock).count_tokens(
+        model_to_use=model_to_use,
+        messages=MESSAGES,
+        contents=None,
+        deployment={"litellm_params": {**DEPLOYMENT["litellm_params"], "api_base": ""}},
+        request_model=model_to_use,
+    )
+
+    assert result is not None
+    assert result.error is False
+    assert result.total_tokens == expected_tokens
+    assert bedrock.posted_hosts() == expected_hosts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("model_to_use", "runtime"),
     (
         ("global.anthropic.claude-opus-4-8", (401, {"Message": "not authorized to perform: bedrock:CountTokens"})),
@@ -174,3 +204,50 @@ async def test_claude_runtime_404_retries_with_system_and_tools_on_mantle() -> N
         "system": "You are a terse assistant.",
         "tools": tools,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "host", "tokenizer", "expected_tokens"),
+    (
+        ("bedrock_mantle/anthropic.claude-opus-5-5", MANTLE_HOST, "bedrock_mantle_api", 271),
+        ("bedrock/anthropic.claude-3-haiku-20240307-v1:0", RUNTIME_HOST, "bedrock_api", 193),
+    ),
+)
+async def test_qualified_counting_model_uses_its_endpoint_without_a_failed_probe(
+    model: str, host: str, tokenizer: str, expected_tokens: int
+) -> None:
+    bedrock: Final = _Bedrock(runtime=(200, {"inputTokens": 193}), mantle=(200, {"input_tokens": 271}))
+
+    result: Final = await _counter(bedrock).count_tokens(
+        model_to_use=model,
+        messages=MESSAGES,
+        contents=None,
+        deployment=DEPLOYMENT,
+        request_model="served-model",
+    )
+
+    assert result is not None
+    assert result.total_tokens == expected_tokens
+    assert result.tokenizer_type == tokenizer
+    assert bedrock.posted_hosts() == (host,)
+    if host == MANTLE_HOST:
+        assert _JSON_BODY.validate_json(bedrock.requests[0].content)["model"] == model.split("/", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_explicit_mantle_failure_does_not_probe_runtime() -> None:
+    bedrock: Final = _Bedrock(runtime=(200, {"inputTokens": 193}), mantle=(404, UNSUPPORTED))
+
+    result: Final = await _counter(bedrock).count_tokens(
+        model_to_use="bedrock_mantle/anthropic.claude-opus-5-5",
+        messages=MESSAGES,
+        contents=None,
+        deployment=DEPLOYMENT,
+    )
+
+    assert result is not None
+    assert result.error is True
+    assert result.status_code == 404
+    assert result.tokenizer_type == "bedrock_mantle_api"
+    assert bedrock.posted_hosts() == (MANTLE_HOST,)

@@ -29,6 +29,7 @@ from litellm._internal_context import service_target, with_service_target
 from litellm._logging import verbose_proxy_logger
 from litellm.caching import RedisCache
 from litellm.constants import (
+    BILLED_RETRY_ATTEMPT_METADATA_KEY,
     DB_DAILY_TAG_SPEND_UPDATE_JOB_NAME,
     DB_SPEND_UPDATE_JOB_NAME,
     INTERNAL_CALL_ORIGIN_METADATA_KEY,
@@ -36,7 +37,6 @@ from litellm.constants import (
 from litellm.litellm_core_utils.litellm_logging import coerce_model_access_groups
 from litellm.litellm_core_utils.safe_json_loads import safe_json_loads
 from litellm.proxy._types import (
-    DB_CONNECTION_ERROR_TYPES,
     DB_RETRY_SAFE_ERROR_TYPES,
     BaseDailySpendTransaction,
     DailyAgentSpendTransaction,
@@ -73,8 +73,9 @@ from litellm.proxy.db.db_transaction_queue.window_spend_update_queue import (
     WindowSpendTransaction,
     WindowSpendUpdateQueue,
 )
-from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
+from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler, db_write_failure_is_requeue_safe
 from litellm.proxy.db.model_usage_rollup import build_model_usage_transaction
+from litellm.proxy.db.request_error_tracking import request_error_accumulator
 from litellm.proxy.db.rollup_lock_timeout import apply_rollup_lock_timeout
 from litellm.proxy.route_llm_request import ROUTE_ENDPOINT_MAPPING
 from litellm.proxy.spend_tracking.compression_savings import (
@@ -229,16 +230,6 @@ class _DailySpendCommit(Protocol[_DailySpendTransactionT]):
     ) -> None: ...
 
 
-_DATA_REJECTED_SQLSTATE_CLASSES: Final = frozenset({"22", "23"})
-
-
-def _spend_commit_failure_is_requeue_safe(e: Exception) -> bool:
-    if isinstance(e, DB_CONNECTION_ERROR_TYPES):
-        return isinstance(e, DB_RETRY_SAFE_ERROR_TYPES)
-    sqlstate: Final = PrismaDBExceptionHandler.postgres_sqlstate(e)
-    return sqlstate is None or sqlstate[:2] not in _DATA_REJECTED_SQLSTATE_CLASSES
-
-
 _SpendTableName = Literal[
     "user_list_transactions",
     "end_user_list_transactions",
@@ -276,7 +267,7 @@ def _spend_tables_left_to_send(
         _SPEND_TABLE_COMMIT_ORDER[len(committed)] if len(committed) < len(_SPEND_TABLE_COMMIT_ORDER) else None
     )
     dropped: Final[frozenset[_SpendTableName]] = (
-        frozenset() if in_flight is None or _spend_commit_failure_is_requeue_safe(failure) else frozenset({in_flight})
+        frozenset() if in_flight is None or db_write_failure_is_requeue_safe(failure) else frozenset({in_flight})
     )
     if dropped and in_flight is not None:
         spend_log_error(
@@ -291,6 +282,11 @@ def _spend_tables_left_to_send(
         name: (None if name in committed or name in dropped else txns) for name, txns in transactions.items()
     }
     return cast(DBSpendUpdateTransactions, remaining) if any(remaining.values()) else None
+
+
+def _is_billed_retry_attempt(metadata: SpendLogsMetadata) -> bool:
+    """An earlier billed retry attempt's own spend row, not a request the caller sent."""
+    return BILLED_RETRY_ATTEMPT_METADATA_KEY in metadata and metadata[BILLED_RETRY_ATTEMPT_METADATA_KEY] is True
 
 
 def _timed_request_duration_ms(
@@ -1210,6 +1206,13 @@ class DBSpendUpdateWriter:
                 "_batch_database_updates: add_spend_log_transaction_to_daily_team_transaction failed: %s",
                 traceback.format_exc(),
             )
+        try:
+            self._record_request_error(payload=payload_copy, prisma_client=prisma_client)
+        except Exception:  # noqa: BLE001  # the rollup must never skip the sibling spend writes
+            verbose_proxy_logger.debug(
+                "_batch_database_updates: _record_request_error failed: %s",
+                traceback.format_exc(),
+            )
 
         try:
             await self.add_spend_log_transaction_to_daily_org_transaction(
@@ -1743,7 +1746,7 @@ class DBSpendUpdateWriter:
                             window_spend_transactions=window_spend_update_transactions,
                         )
                     except Exception as e:
-                        if not _spend_commit_failure_is_requeue_safe(e):
+                        if not db_write_failure_is_requeue_safe(e):
                             uncommitted.pop("window_spend_update_transactions", None)
                             spend_log_error(
                                 "Spend tracking - dropped %d budget window increments: the failed statement may have "
@@ -1909,7 +1912,7 @@ class DBSpendUpdateWriter:
                 window_spend_transactions=window_spend_update_transactions,
             )
         except Exception as e:  # noqa: BLE001  # the increments go back on the queue; the rest of the flush must run
-            if _spend_commit_failure_is_requeue_safe(e):
+            if db_write_failure_is_requeue_safe(e):
                 spend_log_error(
                     "Spend tracking - failed to commit budget window spend updates. "
                     "Re-queued %d window increments for retry on next tick. Error: %s",
@@ -1926,9 +1929,6 @@ class DBSpendUpdateWriter:
                     str(e),
                     exc=e,
                 )
-
-        ################## Tool Registry Upserts ##################
-        await self._flush_tool_discovery_queue(prisma_client=prisma_client)
 
     async def commit_daily_tag_spend_to_db(
         self,
@@ -2061,20 +2061,6 @@ class DBSpendUpdateWriter:
             )
             raise
 
-    async def _flush_tool_discovery_queue(
-        self,
-        prisma_client: PrismaClient,
-    ) -> None:
-        """Flush ToolDiscoveryQueue and batch-upsert new tools into LiteLLM_ToolTable."""
-        from litellm.proxy.db.tool_registry_writer import batch_upsert_tools
-
-        try:
-            items: Final = self.tool_discovery_queue.flush()
-            if items:
-                await batch_upsert_tools(prisma_client=prisma_client, items=items)
-        except Exception as e:
-            verbose_proxy_logger.debug("_flush_tool_discovery_queue error (non-blocking): %s", e)
-
     @staticmethod
     async def handle_spend_update_failure(
         e: Exception,
@@ -2086,7 +2072,6 @@ class DBSpendUpdateWriter:
         """Retry a failed spend-update transaction on connection errors, deadlocks or a rollup
         ``lock_timeout`` (55P03), else re-raise. All three roll the transaction back before any
         increment applied, so re-sending the same batch cannot double-count."""
-        from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
         from litellm.proxy.utils import raise_failed_update_spend_exception
 
         is_retryable = (
@@ -2102,7 +2087,7 @@ class DBSpendUpdateWriter:
             n_retry_times,
             e,
         )
-        await asyncio.sleep(random.uniform(2**attempt, 2 ** (attempt + 1)))
+        await asyncio.sleep(random.uniform(2.0**attempt, 2.0 ** (attempt + 1)))
 
     _handle_spend_update_failure = handle_spend_update_failure
 
@@ -2595,7 +2580,7 @@ class DBSpendUpdateWriter:
                                 _mark_daily_spend_commit_started()
                             _mark_daily_spend_commit_finished()
                         except Exception as batch_error:
-                            if _spend_commit_failure_is_requeue_safe(batch_error):
+                            if db_write_failure_is_requeue_safe(batch_error):
                                 spend_log_error(
                                     "Daily %s spend batch upsert failed. Table: %s, Rows: %d, Error: %s",
                                     entity_type,
@@ -2653,7 +2638,7 @@ class DBSpendUpdateWriter:
                             # and thus they are more likely to deadlock again.
                             # Instead, we sleep a random amount so that they retry at slightly different times, lowering the chance of
                             # repeated deadlocks, and therefore of exceeding the retry limit.
-                            random.uniform(2**i, 2 ** (i + 1))
+                            random.uniform(2.0**i, 2.0 ** (i + 1))
                         )
 
         except Exception as e:
@@ -2773,6 +2758,23 @@ class DBSpendUpdateWriter:
             entity_id_field="tag",
         )
 
+    @staticmethod
+    def _record_request_error(*, payload: SpendLogsPayload, prisma_client: PrismaClient | None) -> None:
+        if prisma_client is None:
+            return
+        start_time: Final = payload["startTime"]
+        date: Final = start_time.isoformat() if isinstance(start_time, datetime) else str(start_time or "")
+        if not date:
+            return
+        metadata: Final[SpendLogsMetadata] = json.loads(payload["metadata"])
+        internal_origin: Final = bool(metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY))  # pyright: ignore[reportUnknownMemberType]  # TypedDict.get overloads carry Any defaults
+        request_error_accumulator.record(
+            payload=payload,
+            request_status=prisma_client.get_request_status(payload),  # pyright: ignore[reportUnknownMemberType]  # legacy payload union; this caller supplies a typed spend payload
+            date=date.split("T")[0],
+            is_internal_call=internal_origin or _is_billed_retry_attempt(metadata),
+        )
+
     async def _common_add_spend_log_transaction_to_daily_transaction(
         self,
         payload: dict | SpendLogsPayload,
@@ -2835,6 +2837,7 @@ class DBSpendUpdateWriter:
                 endpoint = ROUTE_ENDPOINT_MAPPING.get(call_type, None)
 
             is_internal_call: Final = bool(_metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY))
+            caller_request: Final = not is_internal_call and not _is_billed_retry_attempt(_metadata)
             cache_read_input_tokens: Final = extract_cache_read_tokens(usage_obj)
             compression_saved_tokens: Final = extract_compression_saved_tokens(_metadata)
             savings_spend: Final = compute_savings_spend(
@@ -2869,9 +2872,9 @@ class DBSpendUpdateWriter:
                 # requests the caller made: counting them inflates request-volume
                 # readers, and an auto-router savings figure computed on a shadow
                 # duplicate credits savings for traffic no user sent.
-                api_requests=0 if is_internal_call else 1,
-                successful_requests=1 if not is_internal_call and request_status == "success" else 0,
-                failed_requests=1 if not is_internal_call and request_status != "success" else 0,
+                api_requests=1 if caller_request else 0,
+                successful_requests=1 if caller_request and request_status == "success" else 0,
+                failed_requests=1 if caller_request and request_status != "success" else 0,
                 cache_read_input_tokens=cache_read_input_tokens,
                 cache_creation_input_tokens=extract_cache_creation_tokens(usage_obj),
                 compression_saved_tokens=compression_saved_tokens,

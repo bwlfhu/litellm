@@ -23,11 +23,16 @@ LATEST_RELEASE_CACHE_TTL_SECONDS: Final = 60 * 60
 LATEST_RELEASE_UNAVAILABLE_CACHE_TTL_SECONDS: Final = 5 * 60
 LATEST_RELEASE_CACHE_KEY: Final = "latest_release_info"
 
-_RELEASE_BULLET_PATTERN: Final = re.compile(r"^\*\s+(?:([A-Za-z]+)(?:\([^)]*\))?!?:\s)?\S")
-_NEW_CONTRIBUTOR_PATTERN: Final = re.compile(r"^\*\s+@\S+ made their first contribution\b")
+_RELEASE_BULLET_PATTERN: Final = re.compile(r"^[*-]\s+(?:([A-Za-z]+)(?:\([^)]*\))?!?:\s)?\S")
+_NEW_CONTRIBUTOR_PATTERN: Final = re.compile(r"^[*-]\s+@\S+ made their first contribution\b")
+_RELEASE_SUMMARY_PATTERN: Final = re.compile(r"^\d+ PRs?\.\s+([^.]+)\.", re.MULTILINE)
+_SUMMARY_COUNT_PATTERN: Final = re.compile(r"(\d+)\s+(added|fixed|changed)\b")
 
 _Bucket: TypeAlias = Literal["new_features", "bug_fixes", "other_updates"]
 _PREFIX_BUCKETS: Final[Mapping[str, _Bucket]] = MappingProxyType({"feat": "new_features", "fix": "bug_fixes"})
+_SUMMARY_BUCKETS: Final[Mapping[str, _Bucket]] = MappingProxyType(
+    {"added": "new_features", "fixed": "bug_fixes", "changed": "other_updates"}
+)
 
 
 class LatestReleaseInfo(LiteLLMBaseModel):
@@ -84,6 +89,10 @@ def _bucket_for(line: str) -> _Bucket | None:
 
 def count_release_bullets(body: str) -> Mapping[_Bucket, int]:
     """Bucket release-note bullets by conventional-commit type or ``other_updates``."""
+    summary: Final = _RELEASE_SUMMARY_PATTERN.search(body)
+    summary_counts: Final = _SUMMARY_COUNT_PATTERN.findall(summary.group(1)) if summary is not None else ()
+    if summary_counts:
+        return MappingProxyType({_SUMMARY_BUCKETS[kind]: int(count) for count, kind in summary_counts})
     return MappingProxyType(Counter(bucket for line in body.splitlines() if (bucket := _bucket_for(line)) is not None))
 
 

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import httpx
 import pytest
+import respx
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -29,6 +30,54 @@ if TYPE_CHECKING:
 
     from litellm.types.llms.openai import ResponsesAPIResponse
     from litellm.types.utils import ModelResponse
+
+
+def test_completion_over_responses_maps_anthropic_search_tool_to_openai_tool_search() -> None:
+    response_body: Final = {
+        "id": "resp_tool_search_bridge",
+        "object": "response",
+        "created_at": 1789788253,
+        "status": "completed",
+        "model": "gpt-5.5",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_tool_search_bridge",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+            }
+        ],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    }
+    tools: Final = [
+        {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"},
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+            "defer_loading": True,
+        },
+    ]
+
+    with respx.mock(assert_all_called=True) as router:
+        upstream: Final = router.post("https://api.openai.com/v1/responses").mock(
+            return_value=httpx.Response(200, json=response_body)
+        )
+
+        litellm.completion(
+            model="openai/responses/gpt-5.5",
+            messages=[{"role": "user", "content": "Find a tool"}],
+            tools=tools,
+            api_key="sk-test",
+            cache={"no-cache": True},
+        )
+
+    request_body: Final = json.loads(upstream.calls[0].request.content)
+    assert request_body["tools"][0] == {"type": "tool_search", "execution": "server"}
 
 
 def test_convert_chat_completion_messages_to_responses_api_image_input():
@@ -327,6 +376,187 @@ def test_chunk_parser_function_call_added_produces_tool_use():
     assert tool_call.function.name == "fn"
     assert tool_call.function.arguments == '{"key": "value"}'
     assert choice.finish_reason is None
+
+
+def test_streamed_function_call_namespace_replays_on_next_turn():
+    from unittest.mock import Mock
+
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.types.llms.openai import ResponsesAPIStreamEvents
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=None, sync_stream=True)
+    streamed = iterator.chunk_parser(
+        {
+            "type": ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED,
+            "item": {
+                "type": "function_call",
+                "name": "get_weather",
+                "call_id": "call-ns",
+                "arguments": '{"city": "Paris"}',
+                "namespace": "get_weather",
+            },
+        }
+    )
+    tool_call = streamed.choices[0].delta.tool_calls[0].model_dump(exclude_none=True)
+
+    request = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5.5",
+        messages=[
+            {"role": "user", "content": "weather in Paris"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "call-ns", "content": "sunny"},
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    function_calls = [item for item in request["input"] if item.get("type") == "function_call"]
+    assert [call["namespace"] for call in function_calls] == ["get_weather"]
+
+
+def test_function_level_namespace_replays_when_tool_call_level_is_missing():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    tool_call = {
+        "id": "call-ns",
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "arguments": '{"city": "Paris"}',
+            "provider_specific_fields": {"namespace": "get_weather"},
+        },
+    }
+
+    input_items, _ = LiteLLMResponsesTransformationHandler().convert_chat_completion_messages_to_responses_api(
+        [
+            {"role": "user", "content": "weather in Paris"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "call-ns", "content": "sunny"},
+        ],
+        include_namespace=True,
+    )
+
+    function_calls = [item for item in input_items if item.get("type") == "function_call"]
+    assert [call["namespace"] for call in function_calls] == ["get_weather"]
+
+
+def test_shared_converter_leaves_tool_search_items_and_namespace_out_by_default():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    tool_call = {
+        "id": "call-ns",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": "{}"},
+        "provider_specific_fields": {"namespace": "weather"},
+    }
+    search_items = [
+        {"type": "tool_search_call", "id": "tsc_1", "arguments": {"paths": ["weather"]}},
+        {"type": "tool_search_output", "id": "tso_1", "tools": [{"type": "function", "name": "get_weather"}]},
+    ]
+
+    input_items, _ = LiteLLMResponsesTransformationHandler().convert_chat_completion_messages_to_responses_api(
+        [
+            {"role": "user", "content": "weather in Paris"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [tool_call],
+                "provider_specific_fields": {"tool_search_items": search_items},
+            },
+            {"role": "tool", "tool_call_id": "call-ns", "content": "sunny"},
+        ]
+    )
+
+    assert input_items == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "weather in Paris"}]},
+        {"type": "function_call", "call_id": "call-ns", "name": "get_weather", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-ns", "output": [{"type": "input_text", "text": "sunny"}]},
+    ]
+
+
+def test_streamed_tool_search_turn_replays_with_its_reasoning_item():
+    from unittest.mock import Mock
+
+    import litellm
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.types.llms.openai import ResponsesAPIStreamEvents
+
+    function_call = {
+        "type": "function_call",
+        "id": "fc_1",
+        "name": "get_weather",
+        "call_id": "call-ts",
+        "arguments": '{"city": "Paris"}',
+        "namespace": "get_weather",
+        "status": "completed",
+    }
+    tool_search_call = {
+        "type": "tool_search_call",
+        "id": "tsc_1",
+        "arguments": {"paths": ["get_weather"]},
+        "call_id": None,
+        "created_by": None,
+        "execution": "server",
+        "status": "completed",
+    }
+    tool_search_output = {
+        "type": "tool_search_output",
+        "id": "tso_1",
+        "call_id": None,
+        "execution": "server",
+        "status": "completed",
+        "tools": [{"type": "function", "name": "get_weather", "parameters": {}, "defer_loading": True}],
+    }
+    reasoning = {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc", "summary": []}
+    later_reasoning = {"type": "reasoning", "id": "rs_2", "encrypted_content": "enc_2", "summary": []}
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=None, sync_stream=True)
+    chunks = [
+        iterator.chunk_parser({"type": ResponsesAPIStreamEvents.OUTPUT_ITEM_ADDED, "item": function_call}),
+        iterator.chunk_parser(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "output": [reasoning, tool_search_call, tool_search_output, later_reasoning, function_call],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                },
+            }
+        ),
+    ]
+    user = {"role": "user", "content": "weather in Paris"}
+    message = litellm.stream_chunk_builder(chunks, messages=[user]).choices[0].message
+
+    request = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5.5",
+        messages=[user, message.model_dump(), {"role": "tool", "tool_call_id": "call-ts", "content": "sunny"}],
+        optional_params={"tools": [{"type": "tool_search"}]},
+        litellm_params={},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    assert [(item["type"], item.get("id")) for item in request["input"][1:-1]] == [
+        ("reasoning", "rs_1"),
+        ("tool_search_call", "tsc_1"),
+        ("tool_search_output", "tso_1"),
+        ("reasoning", "rs_2"),
+        ("function_call", None),
+    ]
+    assert request["input"][2] == {key: value for key, value in tool_search_call.items() if value is not None}
+    assert request["input"][5]["namespace"] == "get_weather"
 
 
 def test_transform_response_with_reasoning_and_output():
@@ -830,6 +1060,168 @@ def test_convert_tools_to_responses_format_passes_flat_function_tool_through():
     assert converted == [flat_tool]
 
 
+@pytest.mark.parametrize(
+    ("tool", "expected_defer_loading"),
+    [
+        ({"type": "function", "function": {"name": "lookup"}, "defer_loading": True}, True),
+        ({"type": "function", "function": {"name": "lookup", "defer_loading": True}}, True),
+        ({"type": "function", "function": {"name": "lookup", "defer_loading": True}, "defer_loading": False}, False),
+        ({"type": "function", "function": {"name": "lookup", "defer_loading": True}, "defer_loading": None}, True),
+    ],
+    ids=["tool-level", "function-level", "tool-level-wins", "null-tool-level-falls-back"],
+)
+def test_convert_tools_to_responses_format_keeps_defer_loading(tool, expected_defer_loading):
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    converted = LiteLLMResponsesTransformationHandler()._convert_tools_to_responses_format(
+        [{"type": "tool_search"}, tool]
+    )
+
+    assert converted == [
+        {"type": "tool_search"},
+        {
+            "type": "function",
+            "name": "lookup",
+            "parameters": None,
+            "strict": None,
+            "description": None,
+            "defer_loading": expected_defer_loading,
+        },
+    ]
+
+
+_TOOL_SEARCH: Final = {"type": "tool_search"}
+
+
+@pytest.mark.parametrize(
+    "deferred_tool",
+    [
+        {"type": "function", "function": {"name": "lookup"}, "defer_loading": True},
+        {"type": "function", "function": {"name": "lookup", "defer_loading": True}},
+        {"type": "function", "name": "lookup", "defer_loading": True},
+    ],
+    ids=["tool-level", "function-level", "flat"],
+)
+@pytest.mark.parametrize(
+    ("drop_params", "with_tool_search", "expected_defer_loading"),
+    [(True, False, None), (True, True, True), (False, True, True)],
+    ids=["drop-params-no-search", "drop-params-with-search", "no-drop-params-with-search"],
+)
+def test_transform_request_forwards_defer_loading_only_beside_tool_search(
+    deferred_tool, drop_params, with_tool_search, expected_defer_loading
+):
+    tools: Final = [_TOOL_SEARCH, deferred_tool] if with_tool_search else [deferred_tool]
+
+    result = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5.5",
+        messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+        optional_params={"tools": tools},
+        litellm_params={"drop_params": drop_params},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    lookup_tool: Final = next(tool for tool in result["tools"] if tool.get("name") == "lookup")
+    assert lookup_tool.get("defer_loading") == expected_defer_loading
+
+
+@pytest.mark.parametrize(
+    "deferred_tool",
+    [
+        {"type": "function", "function": {"name": "lookup"}, "defer_loading": True},
+        {"type": "function", "function": {"name": "lookup", "defer_loading": True}},
+    ],
+    ids=["tool-level", "function-level"],
+)
+@pytest.mark.parametrize("drop_params", [False, True], ids=["no-drop-params", "drop-params"])
+@pytest.mark.parametrize(
+    "tool_search_tool",
+    [{"type": "tool_search", "execution": "client"}, {"type": "tool_search"}],
+    ids=["client-only", "hosted-and-client"],
+)
+def test_transform_request_drops_defer_loading_beside_client_tool_search(
+    deferred_tool, drop_params, tool_search_tool
+):
+    tool_search_tools: Final = (
+        [tool_search_tool]
+        if tool_search_tool.get("execution") == "client"
+        else [tool_search_tool, {"type": "tool_search", "execution": "client"}]
+    )
+
+    result = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5.5",
+        messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+        optional_params={"tools": [*tool_search_tools, deferred_tool]},
+        litellm_params={"drop_params": drop_params},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    lookup_tool: Final = next(tool for tool in result["tools"] if tool.get("name") == "lookup")
+    assert "defer_loading" not in lookup_tool
+
+
+@pytest.mark.parametrize(
+    "deferred_tool",
+    [
+        {"type": "function", "function": {"name": "lookup"}, "defer_loading": True},
+        {"type": "function", "function": {"name": "lookup", "defer_loading": True}},
+        {"type": "function", "name": "lookup", "defer_loading": True},
+    ],
+    ids=["tool-level", "function-level", "flat"],
+)
+def test_convert_tools_to_responses_format_rejects_deferred_tool_without_tool_search(deferred_tool):
+    with pytest.raises(litellm.UnsupportedParamsError, match=r"tool_search.*drop_params"):
+        LiteLLMResponsesTransformationHandler()._convert_tools_to_responses_format([deferred_tool])
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "function", "function": {"name": "lookup"}, "defer_loading": False},
+        {"type": "function", "name": "lookup", "defer_loading": False},
+    ],
+    ids=["nested", "flat"],
+)
+def test_convert_tools_to_responses_format_omits_false_defer_loading_without_tool_search(tool):
+    converted: Final = LiteLLMResponsesTransformationHandler()._convert_tools_to_responses_format([tool])
+
+    assert "defer_loading" not in converted[0]
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "function", "function": {"name": "lookup"}, "defer_loading": "true"},
+        {"type": "function", "function": {"name": "lookup", "defer_loading": "yes"}},
+        {"type": "function", "name": "lookup", "defer_loading": "true"},
+    ],
+    ids=["tool-level", "function-level", "flat"],
+)
+def test_convert_tools_to_responses_format_rejects_non_bool_defer_loading_without_drop_params(tool):
+    with pytest.raises(litellm.UnsupportedParamsError, match="defer_loading must be a boolean"):
+        LiteLLMResponsesTransformationHandler()._convert_tools_to_responses_format([_TOOL_SEARCH, tool])
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "function", "function": {"name": "lookup"}, "defer_loading": "true"},
+        {"type": "function", "name": "lookup", "defer_loading": "true"},
+    ],
+    ids=["nested", "flat"],
+)
+def test_convert_tools_to_responses_format_drops_non_bool_defer_loading_under_drop_params(tool):
+    converted: Final = LiteLLMResponsesTransformationHandler()._convert_tools_to_responses_format(
+        [_TOOL_SEARCH, tool], drop_params=True
+    )
+
+    lookup_tool: Final = next(item for item in converted if item.get("name") == "lookup")
+    assert "defer_loading" not in lookup_tool
+
+
 def test_extract_extra_body_params_reasoning_effort_override():
     """Test that reasoning_effort from extra_body overrides top-level reasoning_effort"""
     from litellm.completion_extras.litellm_responses_transformation.transformation import (
@@ -895,6 +1287,51 @@ def test_transform_request_system_only_message_maps_to_system_input_item():
     ]
     # System content lives in input only; not duplicated into instructions.
     assert not result.get("instructions")
+
+
+_JSON_SYSTEM_PROMPT: Final = "You output JSON objects."
+_PLAIN_USER_ITEM: Final = {
+    "type": "message",
+    "role": "user",
+    "content": [{"type": "input_text", "text": "List three colors."}],
+}
+_COLORS_SCHEMA: Final = {
+    "type": "json_schema",
+    "json_schema": {"name": "colors", "schema": {"type": "object", "properties": {}}},
+}
+
+
+@pytest.mark.parametrize(
+    ("response_format", "expected_input", "expected_instructions"),
+    [
+        (
+            {"type": "json_object"},
+            [
+                {"type": "message", "role": "system", "content": [{"type": "input_text", "text": _JSON_SYSTEM_PROMPT}]},
+                _PLAIN_USER_ITEM,
+            ],
+            None,
+        ),
+        (_COLORS_SCHEMA, [_PLAIN_USER_ITEM], _JSON_SYSTEM_PROMPT),
+    ],
+    ids=["json_object_keeps_system_in_input", "json_schema_keeps_system_in_instructions"],
+)
+def test_transform_request_json_object_keeps_system_prompt_where_the_json_word_check_reads_it(
+    response_format, expected_input, expected_instructions
+):
+    result = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5.4-mini",
+        messages=[
+            {"role": "system", "content": _JSON_SYSTEM_PROMPT},
+            {"role": "user", "content": "List three colors."},
+        ],
+        optional_params={"response_format": response_format},
+        litellm_params={},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    assert (result["input"], result.get("instructions")) == (expected_input, expected_instructions), result
 
 
 def test_transform_request_single_char_keys_not_matched():
@@ -2801,6 +3238,402 @@ def test_reasoning_items_streaming_emitted_on_response_completed():
     assert ri["summary"][0]["text"] == summary_text
 
 
+def test_reasoning_output_item_done_emits_signed_thinking_blocks_the_stream_keeps():
+    """A chatgpt /v1/messages stream drops the reasoning item unless this delta carries thinking_blocks.
+
+    response.output_item.done is the only event that has encrypted_content. The chat delta has to
+    expose it as a signed thinking block, and that block alone has to count as stream content.
+    """
+    from unittest.mock import MagicMock
+
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.litellm_core_utils.prompt_templates.common_utils import encrypted_reasoning_signature
+    from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+    from litellm.llms.anthropic.pass_through.adapters.transformation import LiteLLMAnthropicMessagesAdapter
+
+    encrypted: Final = "gAAAA_round_trip"
+    done: Final = {
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "reasoning",
+            "id": "rs_done",
+            "encrypted_content": encrypted,
+            "summary": [],
+        },
+    }
+    result: Final = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True, streams_reasoning_signatures=True
+    ).chunk_parser(done)
+    blocks: Final = result.choices[0].delta.thinking_blocks
+    assert blocks is not None
+    assert blocks[0]["type"] == "redacted_thinking"
+    assert blocks[0]["data"] == encrypted_reasoning_signature(encrypted)
+    assert blocks[0]["index"] == 0
+    assert getattr(result.choices[0].delta, "reasoning_content", None) in (None, "")
+
+    wrapper: Final = CustomStreamWrapper(
+        completion_stream=None,
+        model="chatgpt/gpt-6.1-sol",
+        logging_obj=MagicMock(),
+        custom_llm_provider="chatgpt",
+    )
+    assert wrapper.is_chunk_non_empty({}, result, {}) is True
+
+    block_type, start = LiteLLMAnthropicMessagesAdapter().translate_streaming_openai_chunk_to_anthropic_content_block(
+        choices=result.choices
+    )
+    assert block_type == "redacted_thinking"
+    assert start["data"] == encrypted_reasoning_signature(encrypted)
+
+
+_SIGNED_REASONING_STREAM_BODY: Final[Mapping[str, object]] = {
+    "id": "resp_signed_reasoning",
+    "object": "response",
+    "created_at": 1789788253,
+    "status": "completed",
+    "model": "gpt-6-sol",
+    "output": [
+        {"type": "reasoning", "id": "rs_signed", "summary": [], "encrypted_content": "gAAAA_consumer"},
+        {
+            "type": "message",
+            "id": "msg_logged_call_type",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "pong", "annotations": []}],
+        },
+    ],
+    "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+}
+
+_GET_WEATHER_TOOL: Final = {
+    "type": "function",
+    "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}},
+}
+
+
+def _signed_reasoning_sse() -> str:
+    events: Final = (
+        {
+            "type": "response.created",
+            "response": {**_SIGNED_REASONING_STREAM_BODY, "status": "in_progress", "output": [], "usage": None},
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": _SIGNED_REASONING_STREAM_BODY["output"][0]},
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_logged_call_type",
+            "output_index": 1,
+            "content_index": 0,
+            "delta": "pong",
+        },
+        {"type": "response.completed", "response": _SIGNED_REASONING_STREAM_BODY},
+    )
+    return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
+
+
+_AZURE_BRIDGE_KWARGS: Final[Mapping[str, object]] = {
+    "api_base": "https://example.invalid",
+    "api_version": "2025-04-01-preview",
+    "api_key": "test-key",
+}
+
+
+@pytest.mark.asyncio
+async def test_streamed_reasoning_signature_reaches_messages_clients_and_never_chat_completions_deltas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from litellm.litellm_core_utils.prompt_templates.common_utils import encrypted_reasoning_signature
+
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    with respx.mock(assert_all_called=True) as router:
+        router.post(url__startswith="https://example.invalid/openai/responses").mock(
+            side_effect=lambda _request: httpx.Response(
+                200, text=_signed_reasoning_sse(), headers={"content-type": "text/event-stream"}
+            )
+        )
+        chat_stream: Final = await litellm.acompletion(
+            model="azure/gpt-6-sol",
+            messages=[{"role": "user", "content": "ping"}],
+            tools=[_GET_WEATHER_TOOL],
+            stream=True,
+            **_AZURE_BRIDGE_KWARGS,
+        )
+        chat_deltas: Final = [chunk.choices[0].delta async for chunk in chat_stream if chunk.choices]
+        messages_stream: Final = await litellm.anthropic.messages.acreate(
+            model="azure/gpt-6-sol",
+            messages=[{"role": "user", "content": "ping"}],
+            tools=[{"name": "get_weather", "input_schema": {"type": "object", "properties": {}}}],
+            max_tokens=64,
+            stream=True,
+            **_AZURE_BRIDGE_KWARGS,
+        )
+        sse: Final = b"".join([chunk async for chunk in messages_stream]).decode()
+
+    assert [getattr(delta, "thinking_blocks", None) for delta in chat_deltas if getattr(delta, "thinking_blocks", None)] == []
+    assert "".join(delta.content or "" for delta in chat_deltas) == "pong"
+    messages_events: Final = [json.loads(line[len("data: ") :]) for line in sse.splitlines() if line.startswith("data: ")]
+    started: Final = [event["content_block"] for event in messages_events if event.get("type") == "content_block_start"]
+    assert [block["type"] for block in started] == ["redacted_thinking", "text"]
+    assert started[0]["data"] == encrypted_reasoning_signature("gAAAA_consumer")
+
+
+def test_reasoning_output_item_done_with_summary_signs_the_thinking_text():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.litellm_core_utils.prompt_templates.common_utils import encrypted_reasoning_signature
+
+    encrypted: Final = "gAAAA_with_summary"
+    done: Final = {
+        "type": "response.output_item.done",
+        "output_index": 2,
+        "item": {
+            "type": "reasoning",
+            "id": "rs_sum",
+            "encrypted_content": encrypted,
+            "summary": [{"type": "summary_text", "text": "Oslo is colder."}],
+        },
+    }
+    result: Final = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True, streams_reasoning_signatures=True
+    ).chunk_parser(done)
+    block: Final = result.choices[0].delta.thinking_blocks[0]
+    assert block["type"] == "thinking"
+    assert block["thinking"] == "Oslo is colder."
+    assert block["signature"] == encrypted_reasoning_signature(encrypted)
+    assert block["index"] == 2
+
+
+def test_streamed_reasoning_summary_reaches_messages_clients_once_with_its_signature():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.litellm_core_utils.prompt_templates.common_utils import encrypted_reasoning_signature
+    from litellm.llms.anthropic.pass_through.adapters.streaming_iterator import AnthropicStreamWrapper
+    from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+    encrypted: Final = "gAAAA_streamed_summary"
+    events: Final = (
+        {"type": "response.reasoning_summary_part.added", "output_index": 0, "summary_index": 0},
+        {"type": "response.reasoning_summary_text.delta", "output_index": 0, "delta": "Oslo is "},
+        {"type": "response.reasoning_summary_text.delta", "output_index": 0, "delta": "colder."},
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "reasoning",
+                "id": "rs_streamed",
+                "encrypted_content": encrypted,
+                "summary": [{"type": "summary_text", "text": "Oslo is colder."}],
+            },
+        },
+        {"type": "response.output_text.delta", "output_index": 1, "delta": "Oslo."},
+    )
+    parser: Final = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True, streams_reasoning_signatures=True
+    )
+    chunks: Final = (
+        *(parser.chunk_parser(event) for event in events),
+        ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(), finish_reason="stop")]),
+    )
+
+    sse_events: Final = list(AnthropicStreamWrapper(completion_stream=iter(chunks), model="chatgpt/gpt-5.5"))
+    deltas: Final = [event["delta"] for event in sse_events if event.get("type") == "content_block_delta"]
+    assert "".join(d.get("thinking", "") for d in deltas if d["type"] == "thinking_delta") == "Oslo is colder."
+    assert [d["signature"] for d in deltas if d["type"] == "signature_delta"] == [
+        encrypted_reasoning_signature(encrypted)
+    ]
+
+
+def test_reasoning_item_repeated_at_stream_end_reaches_messages_clients_once():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+    from litellm.litellm_core_utils.prompt_templates.common_utils import encrypted_reasoning_signature
+    from litellm.llms.anthropic.pass_through.adapters.streaming_iterator import AnthropicStreamWrapper
+    from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+    encrypted: Final = "gAAAA_completed_repeat"
+    reasoning_item: Final = {"type": "reasoning", "id": "rs_repeat", "summary": [], "encrypted_content": encrypted}
+    events: Final = (
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning_item},
+        {"type": "response.output_text.delta", "output_index": 1, "delta": "Oslo."},
+    )
+    parser: Final = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True, streams_reasoning_signatures=True
+    )
+    chunks: Final = (
+        *(parser.chunk_parser(event) for event in events),
+        ModelResponseStream(
+            choices=[StreamingChoices(index=0, delta=Delta(reasoning_items=[reasoning_item]), finish_reason=None)]
+        ),
+        ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(), finish_reason="stop")]),
+    )
+
+    sse_events: Final = list(AnthropicStreamWrapper(completion_stream=iter(chunks), model="azure/gpt-5.4-nano"))
+    started: Final = [event["content_block"] for event in sse_events if event.get("type") == "content_block_start"]
+    assert [block["type"] for block in started] == ["redacted_thinking", "text"]
+    assert started[0]["data"] == encrypted_reasoning_signature(encrypted)
+
+
+def test_reasoning_output_item_done_without_encrypted_content_stays_empty():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    done: Final = {
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "reasoning",
+            "id": "rs_plain",
+            "summary": [{"type": "summary_text", "text": "already streamed"}],
+        },
+    }
+    result: Final = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True, streams_reasoning_signatures=True
+    ).chunk_parser(done)
+    assert getattr(result.choices[0].delta, "thinking_blocks", None) in (None, [])
+
+
+def test_transform_response_hands_encrypted_reasoning_to_messages_clients_only():
+    from unittest.mock import Mock
+
+    from litellm.litellm_core_utils.prompt_templates.common_utils import encrypted_reasoning_signature
+    from litellm.llms.anthropic.pass_through.adapters.transformation import (
+        LiteLLMAnthropicMessagesAdapter,
+    )
+    from litellm.types.llms.openai import ResponsesAPIResponse
+    from litellm.types.utils import ModelResponse, Usage
+
+    encrypted: Final = "gAAAA_non_stream"
+    reasoning: Final = ResponseReasoningItem(
+        id="rs_tool",
+        summary=[],
+        type="reasoning",
+        content=None,
+        encrypted_content=encrypted,
+        status=None,
+    )
+    function_call: Final = ResponseFunctionToolCall(
+        id="fc_1",
+        type="function_call",
+        status="completed",
+        arguments='{"city":"Oslo"}',
+        call_id="call_1",
+        name="get_weather",
+    )
+    raw: Final = ResponsesAPIResponse.model_construct(
+        id="resp_tool",
+        created_at=1,
+        error=None,
+        incomplete_details=None,
+        model="gpt-6.1-sol",
+        output=[reasoning, function_call],
+        status="completed",
+        usage=None,
+    )
+    model_response: Final = ModelResponse(
+        id="chatcmpl-tool",
+        created=1,
+        model=None,
+        object="chat.completion",
+        system_fingerprint=None,
+        choices=[],
+        usage=Usage(completion_tokens=0, prompt_tokens=0, total_tokens=0),
+    )
+    result: Final = LiteLLMResponsesTransformationHandler().transform_response(
+        model="gpt-6.1-sol",
+        raw_response=raw,
+        model_response=model_response,
+        logging_obj=Mock(),
+        request_data={"model": "gpt-6.1-sol"},
+        messages=[{"role": "user", "content": "Which city?"}],
+        optional_params={},
+        litellm_params={},
+        encoding=Mock(),
+    )
+    message: Final = result.choices[0].message
+    assert message.reasoning_items[0]["encrypted_content"] == encrypted
+    assert "thinking_blocks" not in result.model_dump()["choices"][0]["message"]
+    assert message.tool_calls[0].function.name == "get_weather"
+
+    anthropic_response: Final = LiteLLMAnthropicMessagesAdapter().translate_openai_response_to_anthropic(
+        response=result, tool_name_mapping=None
+    )
+    content: Final = anthropic_response["content"]
+    assert [block["type"] for block in content] == ["redacted_thinking", "tool_use"]
+    assert content[0]["data"] == encrypted_reasoning_signature(encrypted)
+
+
+@pytest.mark.parametrize(
+    ("keeps_every_reasoning_item", "kept_ids"),
+    [
+        pytest.param(True, ["rs_first", "rs_second"], id="messages_client_keeps_every_item"),
+        pytest.param(False, ["rs_second"], id="chat_client_keeps_the_last_item"),
+    ],
+)
+def test_non_streamed_tool_turn_hands_messages_clients_every_reasoning_item(
+    keeps_every_reasoning_item: bool, kept_ids: list[str]
+) -> None:
+    from unittest.mock import Mock
+
+    from litellm.types.llms.openai import ResponsesAPIResponse
+    from litellm.types.utils import ModelResponse, Usage
+
+    def reasoning(item_id: str) -> ResponseReasoningItem:
+        return ResponseReasoningItem(
+            id=item_id, summary=[], type="reasoning", content=None, encrypted_content=f"gAAAA_{item_id}", status=None
+        )
+
+    def call(index: int, city: str) -> ResponseFunctionToolCall:
+        return ResponseFunctionToolCall(
+            id=f"fc_{index}",
+            type="function_call",
+            status="completed",
+            arguments=json.dumps({"city": city}),
+            call_id=f"call_{index}",
+            name="get_weather",
+        )
+
+    raw: Final = ResponsesAPIResponse.model_construct(
+        id="resp_two_reasoning",
+        created_at=1,
+        error=None,
+        incomplete_details=None,
+        model="gpt-5.4-nano",
+        output=[reasoning("rs_first"), call(1, "Oslo"), reasoning("rs_second"), call(2, "Lyon")],
+        status="completed",
+        usage=None,
+    )
+    result: Final = LiteLLMResponsesTransformationHandler().transform_response(
+        model="gpt-5.4-nano",
+        raw_response=raw,
+        model_response=ModelResponse(
+            id="chatcmpl-two-reasoning",
+            created=1,
+            model=None,
+            object="chat.completion",
+            system_fingerprint=None,
+            choices=[],
+            usage=Usage(completion_tokens=0, prompt_tokens=0, total_tokens=0),
+        ),
+        logging_obj=Mock(),
+        request_data={"model": "gpt-5.4-nano"},
+        messages=[{"role": "user", "content": "Oslo or Lyon?"}],
+        optional_params={},
+        litellm_params={"custom_llm_provider": "azure"},
+        encoding=Mock(),
+        keeps_every_reasoning_item=keeps_every_reasoning_item,
+    )
+
+    message: Final = result.choices[0].message
+    assert [item["id"] for item in message.reasoning_items] == kept_ids
+    assert [tool_call.function.name for tool_call in message.tool_calls] == ["get_weather", "get_weather"]
+
+
 def test_streaming_function_call_tool_id_for_degenerate_call_id():
     """In streaming, Bedrock Mantle's function_call event carries a unique ``id``
     (``fc_...``) and a non-unique, index-based ``call_id`` (``call_0``). For that
@@ -2831,7 +3664,6 @@ def test_streaming_function_call_tool_id_for_degenerate_call_id():
 
     assert stream_tool_id("fc_unique_abc123", "call_0") == "fc_unique_abc123"
     assert stream_tool_id("fc_2", "call_tokyo") == "call_tokyo"
-
 
 def test_convert_none_response_output_to_empty_choices():
     assert LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(None) == []
@@ -3712,6 +4544,207 @@ def test_transform_response_incomplete_reasoning_only_returns_empty_length_choic
     assert result.usage.completion_tokens_details.reasoning_tokens == 16
 
 
+@pytest.mark.parametrize(
+    ("status", "incomplete_reason", "finish_reason"),
+    [("completed", None, "stop"), ("incomplete", "max_output_tokens", "length")],
+)
+def test_search_only_turn_keeps_tool_search_items_for_the_next_request(status, incomplete_reason, finish_reason):
+    search_items = [
+        {"type": "tool_search_call", "id": "tsc_1", "arguments": {"paths": ["get_weather"]}, "status": "completed"},
+        {"type": "tool_search_output", "id": "tso_1", "status": "completed", "tools": [{"name": "get_weather"}]},
+    ]
+    raw_response = _make_incomplete_responses_api_response(
+        incomplete_reason,
+        [{"type": "reasoning", "id": "rs_raw", "summary": []}, _make_reasoning_only_output_item(), *search_items],
+        status=status,
+    )
+
+    choice = _call_transform_response(LiteLLMResponsesTransformationHandler(), raw_response).choices[0]
+
+    stored = choice.message.provider_specific_fields["tool_search_items"]
+    assert [item["id"] for item in stored] == ["rs_raw", "rs_incomplete", "tsc_1", "tso_1"]
+    assert stored[2:] == search_items
+    assert [item["id"] for item in choice.message.reasoning_items] == ["rs_raw", "rs_incomplete"]
+    assert choice.finish_reason == finish_reason
+    replayed, _ = LiteLLMResponsesTransformationHandler().convert_chat_completion_messages_to_responses_api(
+        [choice.message.model_dump()], replay_tool_search=True
+    )
+    assert [item["id"] for item in replayed] == ["rs_raw", "rs_incomplete", "tsc_1", "tso_1"]
+
+
+_CLIENT_SEARCH_CALL: Final = {
+    "type": "tool_search_call",
+    "id": "tsc_client",
+    "arguments": {"query": "weather"},
+    "call_id": "call_search",
+    "execution": "client",
+    "status": "completed",
+}
+
+
+def _non_streamed_client_search_turn() -> "ModelResponse":
+    raw_response = _make_incomplete_responses_api_response(None, [_CLIENT_SEARCH_CALL], status="completed")
+    return _call_transform_response(LiteLLMResponsesTransformationHandler(), raw_response)
+
+
+def _streamed_client_search_turn() -> "ModelResponse":
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator: Final = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=None, sync_stream=True)
+    completed: Final = iterator.chunk_parser(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_client_search",
+                "status": "completed",
+                "output": [_CLIENT_SEARCH_CALL],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            },
+        }
+    )
+    built: Final = litellm.stream_chunk_builder([completed], messages=[{"role": "user", "content": "weather in Paris"}])
+    assert isinstance(built, litellm.ModelResponse)
+    return built
+
+
+@pytest.mark.parametrize(
+    "client_search_turn",
+    [_non_streamed_client_search_turn, _streamed_client_search_turn],
+    ids=["non-streaming", "streaming"],
+)
+def test_client_search_turn_returns_its_call_and_replays_with_the_client_output(client_search_turn):
+    choice: Final = client_search_turn().choices[0]
+    client_output: Final = {
+        "type": "tool_search_output",
+        "call_id": "call_search",
+        "execution": "client",
+        "status": "completed",
+        "tools": [{"type": "function", "name": "get_weather", "parameters": {}, "defer_loading": True}],
+    }
+
+    assert choice.finish_reason == "stop"
+    assert choice.message.provider_specific_fields["tool_search_items"] == [_CLIENT_SEARCH_CALL]
+    answered: Final = {
+        **choice.message.model_dump(),
+        "provider_specific_fields": {"tool_search_items": [_CLIENT_SEARCH_CALL, client_output]},
+    }
+    request: Final = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5.5",
+        messages=[{"role": "user", "content": "weather in Paris"}, answered],
+        optional_params={"tools": [{"type": "tool_search", "execution": "client"}]},
+        litellm_params={},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+    assert request["input"][1:3] == [_CLIENT_SEARCH_CALL, client_output]
+
+
+def test_reasoning_after_a_tool_search_replays_after_the_search_it_followed():
+    from unittest.mock import Mock
+
+    from openai.types.responses import ResponseFunctionToolCall
+
+    search_items = [
+        {"type": "tool_search_call", "id": "tsc_1", "arguments": {"paths": ["get_weather"]}, "status": "completed"},
+        {"type": "tool_search_output", "id": "tso_1", "status": "completed", "tools": [{"name": "get_weather"}]},
+    ]
+    function_calls = [
+        ResponseFunctionToolCall(
+            type="function_call", id=f"fc_{city}", call_id=f"call_{city}", name="get_weather", arguments="{}"
+        )
+        for city in ("paris", "berlin")
+    ]
+    raw_response = _make_incomplete_responses_api_response(
+        None,
+        [
+            {"type": "reasoning", "id": "rs_search", "summary": [], "encrypted_content": "enc_1"},
+            *search_items,
+            {"type": "reasoning", "id": "rs_call", "summary": [], "encrypted_content": "enc_2"},
+            *function_calls,
+        ],
+        status="completed",
+    )
+    message = _call_transform_response(LiteLLMResponsesTransformationHandler(), raw_response).choices[0].message
+
+    request = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5.5",
+        messages=[
+            {"role": "user", "content": "weather in Paris and Berlin"},
+            message.model_dump(),
+            {"role": "tool", "tool_call_id": "call_paris", "content": "sunny"},
+            {"role": "tool", "tool_call_id": "call_berlin", "content": "rainy"},
+        ],
+        optional_params={"tools": [{"type": "tool_search"}]},
+        litellm_params={},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    assert [(item["type"], item.get("id", item.get("call_id"))) for item in request["input"][1:]] == [
+        ("reasoning", "rs_search"),
+        ("tool_search_call", "tsc_1"),
+        ("tool_search_output", "tso_1"),
+        ("reasoning", "rs_call"),
+        ("function_call", "call_paris"),
+        ("function_call", "call_berlin"),
+        ("function_call_output", "call_paris"),
+        ("function_call_output", "call_berlin"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tools", "replayed_types"),
+    [
+        (
+            [{"type": "tool_search"}],
+            ["message", "tool_search_call", "tool_search_output", "function_call", "function_call_output"],
+        ),
+        (
+            [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+            ["message", "function_call", "function_call_output"],
+        ),
+    ],
+    ids=["tool_search_requested", "tool_search_not_requested"],
+)
+def test_tool_search_items_replay_only_to_a_request_that_carries_tool_search(tools, replayed_types):
+    from unittest.mock import Mock
+
+    messages: Final = [
+        {"role": "user", "content": "weather in Paris"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+                }
+            ],
+            "provider_specific_fields": {
+                "tool_search_items": [
+                    {"type": "tool_search_call", "id": "tsc_1", "arguments": {"paths": ["get_weather"]}},
+                    {"type": "tool_search_output", "id": "tso_1", "tools": [{"type": "function", "name": "get_weather"}]},
+                ]
+            },
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+    ]
+
+    request: Final = LiteLLMResponsesTransformationHandler().transform_request(
+        model="gpt-5-mini",
+        messages=messages,
+        optional_params={"tools": tools},
+        litellm_params={},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    assert [item["type"] for item in request["input"]] == replayed_types
+
+
 def test_transform_response_incomplete_content_filter_maps_finish_reason():
     handler = LiteLLMResponsesTransformationHandler()
     raw_response = _make_incomplete_responses_api_response("content_filter", [_make_reasoning_only_output_item()])
@@ -4264,6 +5297,50 @@ def test_prompt_cache_breakpoint_survives_chat_to_responses_conversion(
     assert request["prompt_cache_options"] == cache_breakpoint
 
 
+@pytest.mark.parametrize(
+    ("model", "custom_llm_provider", "keep_marker"),
+    [
+        ("openai.gpt-5.6-sol", "bedrock_mantle", True),
+        ("openai.gpt-5.4", "bedrock_mantle", False),
+        ("openai.gpt-5.6-sol", "azure_ai", False),
+    ],
+    ids=("flagged-hosted-deployment", "unflagged-hosted-deployment", "provider-without-flag"),
+)
+def test_transform_request_uses_provider_keyed_prompt_cache_breakpoint_flag(
+    model: str, custom_llm_provider: str, keep_marker: bool
+) -> None:
+    handler: Final = LiteLLMResponsesTransformationHandler()
+    cache_breakpoint: Final = {"mode": "explicit"}
+    messages: Final = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Stable prefix", "prompt_cache_breakpoint": cache_breakpoint}],
+        },
+        {"role": "user", "content": "Hi"},
+    ]
+
+    request: Final = handler.transform_request(
+        model=model,
+        messages=messages,
+        optional_params={},
+        litellm_params={"custom_llm_provider": custom_llm_provider},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+
+    assert request["input"][0] == {
+        "type": "message",
+        "role": "system",
+        "content": [
+            {
+                "type": "input_text",
+                "text": "Stable prefix",
+                **({"prompt_cache_breakpoint": cache_breakpoint} if keep_marker else {}),
+            }
+        ],
+    }
+
+
 def test_prompt_cache_breakpoint_read_tolerates_non_string_content_block_keys() -> None:
     handler: Final = LiteLLMResponsesTransformationHandler()
     # Non-string keys are not JSON-representable but are accepted by chat completion
@@ -4548,6 +5625,81 @@ def test_prompt_cache_breakpoint_supports_model_alias_with_base_model(
             "role": "user",
             "content": [expected_content],
         }
+    ]
+
+
+_MANTLE_GPT_ROW: Final = {
+    "litellm_provider": "bedrock_mantle",
+    "mode": "responses",
+    "supports_prompt_cache_breakpoint": True,
+}
+_MARKED_SYSTEM_PART: Final = {"type": "text", "text": "Stable prefix", "prompt_cache_breakpoint": {"mode": "explicit"}}
+
+
+def _bridged_input_for_served_provider(
+    model: str, custom_llm_provider: str, **litellm_params: object
+) -> list[dict[str, object]]:
+    request: Final = LiteLLMResponsesTransformationHandler().transform_request(
+        model=model,
+        messages=cast(
+            List[AllMessageValues],
+            [{"role": "system", "content": [_MARKED_SYSTEM_PART]}, {"role": "user", "content": "hi"}],
+        ),  # cast-ok: the test builds chat messages as plain mappings
+        optional_params={},
+        litellm_params={"custom_llm_provider": custom_llm_provider, **litellm_params},
+        headers={},
+        litellm_logging_obj=Mock(),
+    )
+    return cast(list[dict[str, object]], request["input"])  # cast-ok: the bridge emits message item mappings
+
+
+@pytest.mark.parametrize("model", ["openai.gpt-5.6-sol", "us-east-1/openai.gpt-5.6-sol"])
+def test_transform_request_keeps_the_breakpoint_for_a_hosted_openai_model_by_its_served_provider(
+    monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    """The bridge is handed the provider-stripped deployment name, which has no cost-map row and no
+    ``gpt-`` version of its own: the row keyed for the serving provider states the dialect."""
+    monkeypatch.setitem(litellm.model_cost, "bedrock_mantle/openai.gpt-5.6-sol", _MANTLE_GPT_ROW)
+
+    assert _bridged_input_for_served_provider(model, "bedrock_mantle") == [
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{**_MARKED_SYSTEM_PART, "type": "input_text"}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+
+
+def test_transform_request_keeps_the_breakpoint_when_the_served_providers_row_is_the_base_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(litellm.model_cost, "bedrock_mantle/openai.gpt-5.6-sol", _MANTLE_GPT_ROW)
+
+    assert _bridged_input_for_served_provider("my-alias", "bedrock_mantle", base_model="openai.gpt-5.6-sol")[0][
+        "content"
+    ] == [{**_MARKED_SYSTEM_PART, "type": "input_text"}]
+
+
+def test_transform_request_strips_the_breakpoint_when_the_served_providers_row_opts_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        litellm.model_cost, "bedrock_mantle/gpt-6-luna", {**_MANTLE_GPT_ROW, "supports_prompt_cache_breakpoint": False}
+    )
+
+    assert _bridged_input_for_served_provider("gpt-6-luna", "bedrock_mantle")[0]["content"] == [
+        {"type": "input_text", "text": "Stable prefix"}
+    ]
+
+
+def test_transform_request_strips_the_breakpoint_for_a_served_provider_without_a_row_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(litellm.model_cost, "bedrock_mantle/openai.gpt-5.6-sol", _MANTLE_GPT_ROW)
+
+    assert _bridged_input_for_served_provider("openai.gpt-5.6-sol", "azure")[0]["content"] == [
+        {"type": "input_text", "text": "Stable prefix"}
     ]
 
 
@@ -5171,3 +6323,164 @@ def test_convert_response_output_folds_two_messages_and_function_call_into_one_c
             "index": 0,
         }
     ]
+
+
+def test_convert_response_output_folds_commentary_and_final_answer_into_one_choice() -> None:
+    commentary: Final = ResponseOutputMessage.model_validate(
+        {
+            "id": "msg_commentary",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "commentary",
+            "content": [{"type": "output_text", "text": "Let me answer that.", "annotations": []}],
+        }
+    )
+    final_answer: Final = ResponseOutputMessage.model_validate(
+        {
+            "id": "msg_final",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": '{"city": "Paris"}', "annotations": []}],
+        }
+    )
+
+    choices: Final = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(  # pyright: ignore[reportPrivateUsage]  # exercises the converter directly
+        (commentary, final_answer)
+    )
+
+    assert len(choices) == 1
+    assert choices[0].index == 0
+    assert choices[0].finish_reason == "stop"
+    assert choices[0].message.content == 'Let me answer that.{"city": "Paris"}'
+    assert choices[0].message.tool_calls is None
+
+
+def test_convert_response_output_numbers_two_function_calls_zero_and_one() -> None:
+    message: Final = ResponseOutputMessage.model_validate(
+        {
+            "id": "msg_only",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Checking both.", "annotations": []}],
+        }
+    )
+    weather: Final = ResponseFunctionToolCall(
+        id="fc_1",
+        type="function_call",
+        status="completed",
+        arguments='{"city":"Paris"}',
+        call_id="call_1",
+        name="get_weather",
+    )
+    time: Final = ResponseFunctionToolCall(
+        id="fc_2",
+        type="function_call",
+        status="completed",
+        arguments='{"city":"Paris"}',
+        call_id="call_2",
+        name="get_time",
+    )
+
+    choices: Final = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(  # pyright: ignore[reportPrivateUsage]  # the fold is the unit under test
+        (message, weather, time)
+    )
+
+    assert len(choices) == 1
+    tool_calls: Final = choices[0].message.tool_calls
+    assert tool_calls is not None
+    assert [(call.index, call.function.name) for call in tool_calls] == [(0, "get_weather"), (1, "get_time")]
+
+
+def _final_answer_message(item_id: str, text: str) -> ResponseOutputMessage:
+    return ResponseOutputMessage.model_validate(
+        {
+            "id": item_id,
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "structured_output, expected_content",
+    [
+        (True, '{"city":"Paris"}'),
+        (False, '{"city":"Paris"}{"city":"Paris"}'),
+    ],
+)
+def test_convert_response_output_structured_output_keeps_first_message_item(
+    structured_output: bool, expected_content: str
+) -> None:
+    """gpt-5.4-mini on /responses with a strict json_schema and a 'say what you will do first'
+    system prompt returned two final_answer items, each the whole document (captured 2026-10-14)."""
+    choices: Final = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(  # pyright: ignore[reportPrivateUsage]  # exercises the converter directly
+        (_final_answer_message("msg_1", '{"city":"Paris"}'), _final_answer_message("msg_2", '{"city":"Paris"}')),
+        structured_output=structured_output,
+    )
+
+    assert len(choices) == 1
+    assert choices[0].index == 0
+    assert choices[0].finish_reason == "stop"
+    assert choices[0].message.content == expected_content
+    if structured_output:
+        assert json.loads(expected_content) == {"city": "Paris"}
+
+
+@pytest.mark.parametrize(
+    "optional_params, expected",
+    [
+        ({"response_format": {"type": "json_schema", "json_schema": {"name": "a", "schema": {}}}}, True),
+        ({"response_format": {"type": "json_object"}}, True),
+        ({"response_format": {"type": "text"}}, False),
+        ({}, False),
+    ],
+)
+def test_is_structured_output_request(optional_params: dict[str, object], expected: bool) -> None:
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        is_structured_output_request,
+    )
+
+    assert is_structured_output_request(optional_params) is expected
+
+
+@pytest.mark.parametrize(
+    "structured_output, expected_content",
+    [
+        (True, '{"city":"Paris"}'),
+        (False, '{"city":"Paris"}{"city":"Paris"}'),
+    ],
+)
+def test_stream_structured_output_drops_text_after_first_message_item(
+    structured_output: bool, expected_content: str
+) -> None:
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=iter(()), sync_stream=True, structured_output=structured_output
+    )
+    events: Final[tuple[dict[str, object], ...]] = (
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "content": []}},
+        {"type": "response.output_text.delta", "output_index": 0, "delta": '{"city":'},
+        {"type": "response.output_text.delta", "output_index": 0, "delta": '"Paris"}'},
+        {"type": "response.output_item.done", "output_index": 0, "item": {"type": "message", "content": []}},
+        {"type": "response.output_item.added", "output_index": 1, "item": {"type": "message", "content": []}},
+        {"type": "response.output_text.delta", "output_index": 1, "delta": '{"city":'},
+        {"type": "response.output_text.delta", "output_index": 1, "delta": '"Paris"}'},
+        {"type": "response.output_item.done", "output_index": 1, "item": {"type": "message", "content": []}},
+        {"type": "response.completed"},
+    )
+
+    chunks: Final = [iterator.chunk_parser(event) for event in events]
+
+    content: Final = "".join(chunk.choices[0].delta.content or "" for chunk in chunks)
+    assert content == expected_content
+    assert chunks[-1].choices[0].finish_reason == "stop"

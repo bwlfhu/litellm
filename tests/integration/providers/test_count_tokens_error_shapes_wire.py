@@ -1,6 +1,5 @@
 import json
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Final
 
 import anthropic
@@ -30,22 +29,13 @@ _PROVIDER_KEY_VARIABLES: Final = (
 
 
 @pytest.fixture(scope="module")
-def provider_error_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    config: Final = tmp_path_factory.mktemp("count-tokens-provider-errors") / "config.yaml"
-    base: Final = Path(__file__).resolve().parents[1] / "proxy_config.yaml"
-    config.write_text(base.read_text() + "\nlitellm_settings:\n  disable_token_counter: true\n")
-    return config
-
-
-@pytest.fixture(scope="module")
-def keyless_proxy(tmp_path_factory: pytest.TempPathFactory, provider_error_config: Path) -> Iterator[OwnedProxy]:
+def keyless_proxy(tmp_path_factory: pytest.TempPathFactory) -> Iterator[OwnedProxy]:
     with (
         gateway_from_environment() as gateway,
         owned_proxy_process(
             gateway,
             tmp_path_factory.mktemp("count-tokens-error-shapes"),
             {},
-            config=provider_error_config,
             remove_environment=_PROVIDER_KEY_VARIABLES,
             workers=1,
         ) as owned,
@@ -76,6 +66,65 @@ def _anthropic(gateway: Gateway) -> anthropic.Anthropic:
 
 def _never_called(request: Request) -> Reply:
     raise AssertionError(f"count reached the provider without a key: {request.target}")
+
+
+@pytest.mark.parametrize("nested", (False, True), ids=("user-content", "tool-result"))
+def test_local_messages_count_accepts_search_result_text(gateway: Gateway, nested: bool) -> None:
+    search: Final[JsonValue] = {
+        "type": "search_result",
+        "source": "https://example.invalid/notes",
+        "title": "Project notes",
+        "content": [{"type": "text", "text": "The code word is 7f3a."}],
+        "citations": {"enabled": True},
+    }
+    content: Final = [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [search]}] if nested else [search]
+    text: Final[list[JsonValue]] = [
+        {"type": "text", "text": "https://example.invalid/notes"},
+        {"type": "text", "text": "Project notes"},
+        {"type": "text", "text": "The code word is 7f3a."},
+    ]
+    equivalent: Final = [{"type": "tool_result", "tool_use_id": "toolu_1", "content": text}] if nested else text
+    with gateway.scenario() as scenario:
+        model: Final = scenario.model(model="hosted_vllm/zai-org/GLM-5.3", api_base="http://127.0.0.1:9/v1")
+        counted: Final = gateway.request(
+            "POST", "/v1/messages/count_tokens", {"model": model, "messages": [{"role": "user", "content": content}]}
+        )
+        control: Final = gateway.request(
+            "POST", "/v1/messages/count_tokens", {"model": model, "messages": [{"role": "user", "content": equivalent}]}
+        )
+        assert counted.status_code == control.status_code == 200, (counted.text, control.text)
+        tokens: Final = _JSON_OBJECT.validate_json(counted.content)["input_tokens"]
+        assert tokens == _JSON_OBJECT.validate_json(control.content)["input_tokens"], (counted.text, control.text)
+
+
+@pytest.mark.parametrize("nested", (False, True), ids=("user-content", "tool-result"))
+@pytest.mark.parametrize(
+    ("block", "status", "error_type", "message"),
+    (
+        (
+            {"type": "future_block", "future_block": {"value": "ignore me"}},
+            400,
+            "invalid_request_error",
+            "future_block",
+        ),
+        ({"type": "image"}, 500, "api_error", "source"),
+    ),
+    ids=("unknown-block", "unrelated-counting-error"),
+)
+def test_local_messages_count_classifies_only_unsupported_content_as_an_invalid_request(
+    gateway: Gateway, nested: bool, block: JsonValue, status: int, error_type: str, message: str
+) -> None:
+    content: Final = [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [block]}] if nested else [block]
+    with gateway.scenario() as scenario:
+        model: Final = scenario.model(model="hosted_vllm/zai-org/GLM-5.3", api_base="http://127.0.0.1:9/v1")
+        response: Final = gateway.request(
+            "POST", "/v1/messages/count_tokens", {"model": model, "messages": [{"role": "user", "content": content}]}
+        )
+        assert response.status_code == status, response.text
+        payload: Final = _JSON_OBJECT.validate_json(response.content)
+        error: Final = payload["error"]
+        assert payload["type"] == "error" and isinstance(error, dict), payload
+        assert error["type"] == error_type and message in str(error["message"]), payload
 
 
 @pytest.mark.parametrize(

@@ -401,8 +401,10 @@ def _get_tiered_base_costs(model_info: ModelInfo, usage: Usage) -> tuple[float, 
         tier_rate(tier, "input_cost_per_token"),
         completion_cost,
         cache_creation_cost,
-        tier_rate(tier, "cache_creation_input_token_cost_above_1hr", "cache_creation_input_token_cost")
-        or cache_creation_cost,
+        tier_rate(tier, "cache_creation_input_token_cost_above_1hr")
+        if "cache_creation_input_token_cost_above_1hr" in tier
+        and tier["cache_creation_input_token_cost_above_1hr"] is not None
+        else cache_creation_cost,
         tier_rate(tier, "cache_read_input_token_cost", "input_cost_per_token"),
     )
 
@@ -1086,21 +1088,55 @@ def parse_completion_tokens_details(usage: Usage) -> CompletionTokensDetailsResu
     )
 
 
+def get_modality_token_cost_key(
+    model_info: ModelInfo,
+    cost_key: str,
+    prompt_tokens: int,
+    *,
+    threshold_is_inclusive: bool = False,
+) -> str:
+    suffix: Final = next((suffix for suffix in _NON_STANDARD_THRESHOLD_SUFFIXES if cost_key.endswith(suffix)), "")
+    base_key: Final = cost_key.removesuffix(suffix)
+    threshold_key: Final = max(
+        (
+            key
+            for key in model_info
+            if key.startswith(f"{base_key}_above_")
+            and key.endswith(("_tokens", f"_tokens{suffix}"))
+            and model_info.get(key) is not None
+            and _prompt_exceeds_threshold(prompt_tokens, _parse_above_token_threshold(key), threshold_is_inclusive)
+        ),
+        key=_parse_above_token_threshold,
+        default=None,
+    )
+    if threshold_key is None:
+        return cost_key
+    return f"{threshold_key.removesuffix(suffix)}{suffix}"
+
+
 def _modality_token_cost(
     model_info: ModelInfo,
     modality_cost_key: str,
     tokens: int,
     prompt_base_cost: float,
     service_tier: str | None,
+    *,
+    prompt_tokens: int = 0,
+    threshold_is_inclusive: bool = False,
 ) -> float:
     """
     Audio, image and video prompt tokens bill at their modality rate when the model has one.
     Without one they are ordinary prompt tokens, so they bill at `prompt_base_cost`, which
     `_get_token_base_cost` has already resolved for the service tier and long-context tier.
     """
-    tiered_key: Final = get_service_tier_cost_key(modality_cost_key, service_tier)
-    cost_key: Final = tiered_key if model_info.get(tiered_key) is not None else modality_cost_key
-    if model_info.get(cost_key) is None:
+    cost_key: Final = get_modality_token_cost_key(
+        model_info,
+        get_service_tier_cost_key(modality_cost_key, service_tier),
+        prompt_tokens,
+        threshold_is_inclusive=threshold_is_inclusive,
+    )
+    standard_key: Final = cost_key.removesuffix(get_service_tier_cost_key("", service_tier))
+    if model_info.get(cost_key) is None and model_info.get(standard_key) is None:
         return float(tokens) * prompt_base_cost
     return calculate_cost_component(model_info, cost_key, tokens)
 
@@ -1113,6 +1149,9 @@ def _calculate_input_cost(
     cache_creation_cost: float,
     cache_creation_cost_above_1hr: float,
     service_tier: str | None = None,
+    *,
+    prompt_tokens: int = 0,
+    threshold_is_inclusive: bool = False,
 ) -> float:
     """
     Calculates the input cost for a given model, prompt tokens, and completion tokens.
@@ -1147,6 +1186,8 @@ def _calculate_input_cost(
             prompt_tokens_details["audio_tokens"],
             prompt_base_cost,
             service_tier,
+            prompt_tokens=prompt_tokens,
+            threshold_is_inclusive=threshold_is_inclusive,
         )
 
     ### IMAGE TOKEN COST
@@ -1299,6 +1340,13 @@ def get_provider_specific_geo_multiplier(model_info: ModelInfo, usage: Usage) ->
         return 1.0
     provider_specific_entry: Final[dict[str, float]] = model_info.get("provider_specific_entry") or {}
     return float(provider_specific_entry.get(inference_geo.lower(), 1.0))
+
+
+def get_provider_specific_speed_multiplier(model_info: ModelInfo, usage: Usage) -> float:
+    provider_specific_entry: Final = model_info.get("provider_specific_entry")
+    if getattr(usage, "speed", None) != "fast" or not provider_specific_entry:
+        return 1.0
+    return float(provider_specific_entry.get("fast", 1.0))
 
 
 def _resolve_reasoning_token_cost(
@@ -1458,6 +1506,8 @@ def generic_cost_per_token(
         cache_creation_cost=cache_creation_cost,
         cache_creation_cost_above_1hr=cache_creation_cost_above_1hr,
         service_tier=service_tier,
+        prompt_tokens=usage.prompt_tokens,
+        threshold_is_inclusive=_uses_inclusive_token_thresholds(custom_llm_provider),
     )
 
     ## CALCULATE OUTPUT COST
@@ -1515,11 +1565,9 @@ def generic_cost_per_token(
 
     ## IMAGE COST
     if not is_text_tokens_total and image_tokens and image_tokens > 0:
-        _output_cost_per_image_token = get_cost_per_unit(resolved_model_info, "output_cost_per_image_token", None)
-        _output_cost_per_image_token = (
-            _output_cost_per_image_token if _output_cost_per_image_token is not None else completion_base_cost
-        )
-        completion_cost += float(image_tokens) * _output_cost_per_image_token
+        image_cost_key: Final = get_service_tier_cost_key("output_cost_per_image_token", service_tier)
+        image_rate: Final = get_cost_per_unit(resolved_model_info, image_cost_key, None)
+        completion_cost += float(image_tokens) * (completion_base_cost if image_rate is None else image_rate)
 
     ## VIDEO COST
     if not is_text_tokens_total and video_tokens and video_tokens > 0:
@@ -1665,6 +1713,7 @@ def _cost_map_billed_rates(
         get_regional_uplift_multiplier(model_info, data_residency)
         * get_vertex_regional_endpoint_uplift(model_info, vertex_location)
         * get_provider_specific_geo_multiplier(model_info=model_info, usage=usage)
+        * get_provider_specific_speed_multiplier(model_info=model_info, usage=usage)
     )
     return BilledTokenRates(
         input_cost_per_token=prompt_base_cost,

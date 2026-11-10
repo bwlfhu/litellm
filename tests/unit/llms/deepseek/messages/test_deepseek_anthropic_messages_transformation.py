@@ -29,7 +29,7 @@ from litellm.llms.deepseek.messages.transformation import (
 )
 from litellm.proxy.pass_through_endpoints import streaming_handler
 from litellm.router import Router
-from litellm.router_protocol import build_deployment_protocol_context, _RouterDeploymentProtocolContext
+from litellm.router_protocol import _RouterDeploymentProtocolContext, build_deployment_protocol_context
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
 
@@ -3733,7 +3733,7 @@ async def test_router_selected_deepseek_chat_strips_custom_tool_type(reasoning_p
             200,
             request=request,
             content=(
-                b'event: message_start\ndata: {"type":"message_start"}\n\n'
+                b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"deepseek-v4-pro","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
                 b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
             ),
         )
@@ -3808,7 +3808,7 @@ async def test_router_selected_deepseek_chat_strips_reasoning_content_when_disab
                 200,
                 request=request,
                 content=(
-                    b'event: message_start\ndata: {"type":"message_start"}\n\n'
+                    b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"deepseek-v4-pro","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
                     b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
                 ),
             )

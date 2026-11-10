@@ -7,10 +7,11 @@ The bedrock-mantle endpoint uses the Anthropic Messages API format but is served
 at a different endpoint (bedrock-mantle.{region}.api.aws) with AWS SigV4 auth.
 """
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from litellm.litellm_core_utils.prompt_templates.image_handling import async_inline_remote_media
+from litellm.llms.anthropic.chat.transformation import JsonModeRequest
 from litellm.llms.bedrock.chat.invoke_transformations.anthropic_claude3_transformation import (
     AmazonAnthropicClaudeConfig,
 )
@@ -35,6 +36,14 @@ class AmazonMantleConfig(AmazonAnthropicClaudeConfig):
 
     Usage: model="bedrock/mantle/anthropic.claude-mythos-preview"
     """
+
+    def uses_native_structured_output_for_schema(
+        self,
+        model: str,
+        json_schema: Mapping[str, object] | None,
+        request_params: Mapping[str, object],
+    ) -> bool:
+        return super().uses_native_structured_output_for_schema(model, json_schema, {})
 
     def get_complete_url(
         self,
@@ -134,10 +143,22 @@ class AmazonMantleConfig(AmazonAnthropicClaudeConfig):
         sync_stream: bool,
         json_mode: bool | None = False,
     ) -> Any:
+        return self.get_model_response_iterator_for_request(
+            streaming_response=streaming_response, sync_stream=sync_stream, json_mode=json_mode, optional_params={}
+        )
+
+    def get_model_response_iterator_for_request(
+        self,
+        streaming_response: Iterator[str] | AsyncIterator[str] | ModelResponse,
+        sync_stream: bool,
+        json_mode: bool | None,
+        optional_params: Mapping[str, object],
+    ) -> object:
         from litellm.llms.anthropic.chat.handler import ModelResponseIterator
 
         return ModelResponseIterator(
             streaming_response=streaming_response,
             sync_stream=sync_stream,
             json_mode=json_mode,
+            response_format_schema=JsonModeRequest.model_validate(optional_params).tool_schema() if json_mode else None,
         )

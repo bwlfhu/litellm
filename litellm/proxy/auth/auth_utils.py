@@ -4,7 +4,9 @@ import re
 import sys
 from collections.abc import Collection, Iterator, Mapping
 from functools import lru_cache
+from itertools import accumulate, chain, repeat
 from logging import Logger
+from types import MappingProxyType
 from typing import Any, Final, Protocol
 
 from fastapi import HTTPException, Request, status
@@ -37,7 +39,8 @@ from litellm.types.passthrough_endpoints.pass_through_endpoints import (
 )
 from litellm.types.router import CONFIGURABLE_CLIENTSIDE_AUTH_PARAMS, Deployment, server_owned_wif_fields_present
 from litellm.types.router import reject_server_owned_wif_params as _reject_server_owned_wif_params
-from litellm.types.utils import CustomPricingLiteLLMParams
+from litellm.types.utils import CustomPricingLiteLLMParams, oauth_token_exchange_litellm_params
+from litellm.types.videos.main import DecodedVideoId
 
 
 def is_invalid_virtual_key_error(exception: BaseException | None) -> bool:
@@ -244,6 +247,7 @@ def _allow_model_level_clientside_configurable_parameters(
 reject_server_owned_wif_params = _reject_server_owned_wif_params
 
 _CREDENTIAL_VALUES: Final = TypeAdapter(dict[str, object])
+_DECODED_JSON: Final = TypeAdapter(object)
 
 
 def reject_federated_credential_reference(body: Mapping[str, object]) -> None:
@@ -269,7 +273,8 @@ def reject_federated_credential_reference(body: Mapping[str, object]) -> None:
     if wif_fields:
         raise ValueError(
             f"Rejected Request: litellm_credential_name={named!r} names a credential configured for "
-            f"workload identity federation ({wif_fields[0]}), which a request body cannot choose. "
+            f"workload identity federation or OAuth token exchange ({wif_fields[0]}), which a request body "
+            "cannot choose. "
             "A proxy admin attaches it to a deployment."
         )
 
@@ -278,6 +283,7 @@ _DEPLOYMENT_MANAGEMENT_ROUTES: Final[frozenset[str]] = frozenset(
     ("/model/new", "/model/update", "/model/delete", "/health/test_connection")
 )
 _DEPLOYMENT_ID_UPDATE_ROUTE: Final = re.compile(r"^/model/[^/]+/update$")
+_MCP_SERVER_MANAGEMENT_ROUTE: Final = re.compile(r"^/v1/mcp/server(?:/.*)?$")
 
 
 def route_manages_deployments(route: str | None) -> bool:
@@ -294,6 +300,10 @@ def route_manages_deployments(route: str | None) -> bool:
     return route is not None and (
         route in _DEPLOYMENT_MANAGEMENT_ROUTES or _DEPLOYMENT_ID_UPDATE_ROUTE.fullmatch(route) is not None
     )
+
+
+def route_manages_mcp_servers(route: str | None) -> bool:
+    return route is not None and _MCP_SERVER_MANAGEMENT_ROUTE.fullmatch(route) is not None
 
 
 _NESTED_CONFIG_KEYS: Final[tuple[str, ...]] = ("litellm_embedding_config", "extra_body")
@@ -439,6 +449,12 @@ _BANNED_REQUEST_BODY_PARAMS: Final[tuple[str, ...]] = (
     # SDK-only field; also rejected outright in is_request_body_safe.
     "model_list",
     "vertex_ai_credentials",
+    # Per-user GitHub Copilot connection slots: the mode is decided by the
+    # stored credential's values and the caller's connection by the proxy's own
+    # secret_fields, so a body-supplied value could only spoof either.
+    "github_copilot_auth_type",
+    "user_provider_credentials",
+    "github_copilot_user_session",
     # Observability credentials, hosts, and project identifiers: derived
     # from the canonical ``_supported_callback_params`` allowlist so new
     # integrations are covered automatically. Sorted for stable iteration
@@ -449,19 +465,25 @@ _BANNED_REQUEST_BODY_PARAMS: Final[tuple[str, ...]] = (
 
 
 def _check_banned_params(
-    body: dict,
+    body: Mapping[str, object],
     general_settings: dict,
     llm_router: Router | None,
     model: str,
     *,
     manages_deployments: bool = False,
+    mcp_server_fields_allowed: bool = False,
 ) -> None:
     """Raise ``ValueError`` if ``body`` carries a banned param without admin opt-in.
 
     Shared between the root-level check and the nested-config check so a
     new banned param only needs to be added in one place.
     """
-    reject_server_owned_wif_params(body)
+    wif_body: Final[Mapping[str, object]] = (
+        MappingProxyType({key: value for key, value in body.items() if key not in oauth_token_exchange_litellm_params})
+        if mcp_server_fields_allowed
+        else body
+    )
+    reject_server_owned_wif_params(wif_body)
     if not manages_deployments:
         reject_federated_credential_reference(body)
     for param in _BANNED_REQUEST_BODY_PARAMS:
@@ -546,6 +568,31 @@ def fallback_target_model_name(target: object) -> str | None:
     return None
 
 
+def _direct_fallback_model_names(model: str, llm_router: Router) -> frozenset[str]:
+    from litellm.proxy.auth.model_checks import get_all_fallbacks
+
+    return frozenset(
+        name for target in get_all_fallbacks(model, llm_router) if (name := fallback_target_model_name(target))
+    )
+
+
+def _fallback_hop(
+    frontier_and_reached: tuple[frozenset[str], frozenset[str]], llm_router: Router
+) -> tuple[frozenset[str], frozenset[str]]:
+    frontier, reached = frontier_and_reached
+    next_hop: Final = (
+        frozenset(chain.from_iterable(_direct_fallback_model_names(model, llm_router) for model in frontier)) - reached
+    )
+    return next_hop, reached | next_hop
+
+
+def router_fallback_model_names(model: str, llm_router: Router) -> frozenset[str]:
+    """The groups a failure on `model` can reach through the router's fallbacks, chained and generic (`*`) ones."""
+    hops: Final = accumulate(repeat(llm_router), _fallback_hop, initial=(frozenset({model}), frozenset({model})))
+    _, reached = next(hop for hop in hops if not hop[0])
+    return reached - {model}
+
+
 def request_fallback_model_names(request_body: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
@@ -606,7 +653,14 @@ def is_request_body_safe(
     if "model_list" in request_body:
         raise ValueError("Rejected Request: model_list is not allowed in the request body.")
     manages_deployments: Final = route_manages_deployments(route)
-    _check_banned_params(request_body, general_settings, llm_router, model, manages_deployments=manages_deployments)
+    _check_banned_params(
+        request_body,
+        general_settings,
+        llm_router,
+        model,
+        manages_deployments=manages_deployments,
+        mcp_server_fields_allowed=route_manages_mcp_servers(route),
+    )
     for nested_key in _NESTED_CONFIG_KEYS:
         nested = _coerce_metadata_to_dict(request_body.get(nested_key))
         if nested is not None:
@@ -648,6 +702,15 @@ def is_request_body_safe(
     return True
 
 
+def carries_client_side_overrides(request_body: object) -> bool:
+    if not isinstance(request_body, dict):
+        return False
+    try:
+        return not is_request_body_safe(request_body=request_body, general_settings={}, llm_router=None, model="")
+    except ValueError:
+        return True
+
+
 def _coerce_metadata_to_dict(value: object) -> dict[str, object] | None:
     """Return ``value`` as a dict, parsing it from JSON if delivered as a string.
 
@@ -662,7 +725,7 @@ def _coerce_metadata_to_dict(value: object) -> dict[str, object] | None:
     if isinstance(value, str):
         from litellm.litellm_core_utils.safe_json_loads import safe_json_loads
 
-        parsed: Final = safe_json_loads(value)
+        parsed: Final = _DECODED_JSON.validate_python(safe_json_loads(value))
         if isinstance(parsed, dict):
             return parsed
     return None
@@ -1698,7 +1761,7 @@ def _coerce_user_id_to_str(value: object) -> str | None:
         # behind the flag preserves backwards compatibility for deployments
         # that intentionally pass JSON-encoded user identifiers.
         if litellm.validate_end_user_id_in_db and stripped[:1] in ("{", "["):
-            parsed: Final[object] = safe_json_loads(stripped)
+            parsed: Final[object] = _DECODED_JSON.validate_python(safe_json_loads(stripped))
             if isinstance(parsed, (dict, list)):
                 return None
         return stripped
@@ -1764,7 +1827,7 @@ def get_end_user_id_from_request_body(
         if isinstance(value, dict):
             return value
         if isinstance(value, str):
-            parsed: Final = safe_json_loads(value)
+            parsed: Final = _DECODED_JSON.validate_python(safe_json_loads(value))
             return parsed if isinstance(parsed, dict) else {}
         return {}
 
@@ -1939,10 +2002,10 @@ def _extract_models_from_managed_resource_id(
             )
 
             if resource_id_field == "video_id":
-                model_id = decode_video_id_with_provider(resource_id).get("model_id")
+                decoded_video: Final = decode_video_id_with_provider(resource_id)
                 _append_model_candidates(
                     candidates=candidates,
-                    value=_resolve_model_id_with_router(model_id, llm_router),
+                    value=_video_access_group(decoded_video, llm_router) or decoded_video.get("model_id"),
                 )
             else:
                 model_id = decode_character_id_with_provider(resource_id).get("model_id")
@@ -1954,6 +2017,25 @@ def _extract_models_from_managed_resource_id(
             verbose_proxy_logger.debug("Unable to extract model from managed video/character ID: %s", str(e))
 
     return _dedupe_model_candidates(candidates)
+
+
+def _video_access_group(decoded_video: DecodedVideoId, llm_router: Router | None) -> str | None:
+    """
+    The group a key must be allowed to call to use a video: the creating deployment's group, or, while router
+    fallbacks skip model access checks, the group whose router fallback created it.
+    """
+    from litellm.proxy.auth.fallback_model_access import router_fallback_access_check
+    from litellm.proxy.video_endpoints.utils import video_model_group
+
+    creating_group: Final = video_model_group(decoded_video, llm_router)
+    requested_model: Final = decoded_video.get("requested_model")
+    if llm_router is None or creating_group is None or requested_model is None:
+        return creating_group
+    if router_fallback_access_check.is_enforced():
+        return creating_group
+    if creating_group in router_fallback_model_names(requested_model, llm_router):
+        return requested_model
+    return creating_group
 
 
 def _resolve_model_id_with_router(model_id: str | None, llm_router: Router | None) -> str | None:
@@ -2083,8 +2165,10 @@ def request_dispatched_to_pass_through_endpoint(request: Request | None) -> bool
     Reads the marker set by ``create_pass_through_route`` off the dispatched endpoint
     (``request.scope["endpoint"]``). Because routing has already run by the time auth
     dependencies execute, this reflects the handler that actually serves the request:
-    a custom path colliding with a built-in route resolves to the built-in handler,
-    which carries no marker, so model-access checks are never wrongly skipped.
+    an exact-path collision or a built-in that is not a ``/<prefix>/{name:path}``
+    catch-all still resolves to the built-in handler, which carries no marker. A
+    configured route shadowed by such a catch-all is dispatched ahead of it unless
+    ``LITELLM_BUILTIN_PASS_THROUGH_ROUTES_FIRST`` is set.
     """
     if request is None:
         return False
@@ -2119,10 +2203,12 @@ def get_model_from_request(
     ``model`` field there names an upstream model, not a LiteLLM-managed one, and
     enforcing key/team model allowlists against it would reject valid requests. The
     check reads the FastAPI-resolved endpoint (``request.scope["endpoint"]``), not the
-    request path, so a custom path that collides with a built-in route never
-    suppresses model-access checks: on a collision the built-in handler is dispatched
-    and does not carry the marker. Built-in provider passthrough routes
-    (``/vertex_ai``, ``/gemini``, ...) are separate handlers and keep model enforcement.
+    request path, so only a dispatched configured handler suppresses model-access
+    checks: exact-path collisions and built-ins that are not ``/<prefix>/{name:path}``
+    catch-alls still resolve to the built-in handler, which carries no marker. A
+    configured route shadowed by such a catch-all is dispatched ahead of it unless
+    ``LITELLM_BUILTIN_PASS_THROUGH_ROUTES_FIRST`` is set. Built-in provider passthrough
+    routes (``/vertex_ai``, ``/gemini``, ...) are separate handlers and keep model enforcement.
     """
     if request_dispatched_to_pass_through_endpoint(request):
         return None

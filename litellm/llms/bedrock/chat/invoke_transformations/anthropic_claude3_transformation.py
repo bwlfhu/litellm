@@ -1,9 +1,11 @@
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
+from pydantic import TypeAdapter
 
 from litellm.anthropic_beta_headers_manager import filter_and_transform_beta_headers
-from litellm.constants import RESPONSE_FORMAT_TOOL_NAME
+from litellm.litellm_core_utils.llm_cost_calc.guardrail_cost import object_mapping
 from litellm.litellm_core_utils.prompt_templates.factory import (
     convert_to_anthropic_image_obj,
 )
@@ -12,17 +14,27 @@ from litellm.litellm_core_utils.prompt_templates.image_handling import (
     convert_url_to_base64,
 )
 from litellm.llms.anthropic.chat.transformation import AnthropicConfig
-from litellm.llms.anthropic.common_utils import AnthropicModelInfo, thinking_block_binding
+from litellm.llms.anthropic.common_utils import (
+    OBJECT_MAPPING_ADAPTER,
+    AnthropicModelInfo,
+    carried_thinking_keys,
+)
 from litellm.llms.bedrock.chat.invoke_transformations.base_invoke_transformation import (
     AmazonInvokeConfig,
 )
 from litellm.llms.bedrock.common_utils import (
+    BEDROCK_INVOKE_TRACE_FIELD,
     apply_bedrock_invoke_structured_output,
+    bedrock_chat_uses_native_structured_output,
+    bedrock_cleaned_output_schema,
+    bedrock_native_output_is_opt_in,
     bedrock_supports_tool_search,
+    deployment_model_info,
     get_anthropic_beta_from_headers,
     normalize_bedrock_opus_output_config_effort,
     normalize_custom_field_on_tools,
     normalize_tool_input_schema_types_for_bedrock_invoke,
+    requests_opt_in_native_output,
     strip_unsupported_bedrock_invoke_output_config_keys,
     tools_without_eager_input_streaming,
 )
@@ -41,6 +53,9 @@ if TYPE_CHECKING:
     LiteLLMLoggingObj = _LiteLLMLoggingObj
 else:
     LiteLLMLoggingObj = Any
+
+_NON_DEFAULT_PARAMS: Final = TypeAdapter(Mapping[str, object])
+_LITELLM_PARAMS: Final = TypeAdapter(Mapping[str, object])
 
 
 class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
@@ -63,19 +78,45 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
 
     anthropic_version: str = "bedrock-2023-05-31"
 
+    def __init__(self, model_info: Mapping[str, object] | None = None) -> None:
+        super().__init__()
+        self._deployment_model_info: Final = model_info
+
     @property
     def custom_llm_provider(self) -> str | None:
         return "bedrock"
-
-    @property
-    def _carries_thinking_block_binding(self) -> bool:
-        return type(self) is AmazonAnthropicClaudeConfig
 
     def should_strip_billing_metadata(self) -> bool:
         return True
 
     def get_supported_openai_params(self, model: str) -> list[str]:
         return AnthropicConfig.get_supported_openai_params(self, model)
+
+    def native_output_format_schema(
+        self, json_schema: Mapping[str, object], model: str | None = None
+    ) -> Mapping[str, object] | None:
+        if model is not None and bedrock_native_output_is_opt_in(model, model_info=self._deployment_model_info):
+            return bedrock_cleaned_output_schema(json_schema)
+        return AnthropicConfig.native_output_format_schema(self, json_schema, model)
+
+    def uses_native_structured_output_for_schema(
+        self,
+        model: str,
+        json_schema: Mapping[str, object] | None,
+        request_params: Mapping[str, object],
+    ) -> bool:
+        return bedrock_chat_uses_native_structured_output(
+            model, self.is_thinking_requested(request_params), model_info=self._deployment_model_info
+        ) and (
+            json_schema is None
+            or not bedrock_native_output_is_opt_in(model, model_info=self._deployment_model_info)
+            or bedrock_cleaned_output_schema(json_schema) is not None
+        )
+
+    def uses_opt_in_native_output(
+        self, model: str, optional_params: Mapping[str, object], litellm_params: Mapping[str, object]
+    ) -> bool:
+        return requests_opt_in_native_output(model, optional_params, deployment_model_info(litellm_params))
 
     def map_openai_params(
         self,
@@ -84,19 +125,8 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
         model: str,
         drop_params: bool,
     ) -> dict:
-        # Force tool-based structured outputs for Bedrock Invoke
-        # (similar to VertexAI fix in #19201) unless the model map advertises
-        # native structured output
-        from litellm.utils import supports_native_structured_output
-
-        original_model: Final = model
         requested_thinking: Final = non_default_params.get("thinking")
         requested_display_updates: Final = self.is_thinking_display_updates_used(requested_thinking)
-        if "response_format" in non_default_params and not supports_native_structured_output(
-            model=model, custom_llm_provider="bedrock"
-        ):
-            # Use a model name that forces tool-based approach
-            model = "claude-3-sonnet-20240229"
 
         # Clamp ``reasoning_effort`` to the Bedrock effort ceiling before the
         # parent mapping converts it to ``output_config.effort`` and the
@@ -105,48 +135,40 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
         # ``_clamp_adaptive_reasoning_effort_for_bedrock`` so adaptive Claude
         # requests degrade ``xhigh`` -> ``max`` rather than 400-ing on
         # models like Opus 4.6 that don't natively advertise xhigh.
-        self._clamp_adaptive_reasoning_effort_for_bedrock(model=original_model, params=non_default_params)
+        self._clamp_adaptive_reasoning_effort_for_bedrock(model=model, params=non_default_params)
 
-        optional_params = AnthropicConfig.map_openai_params(
+        mapped_params: Final = AnthropicConfig.map_openai_params(
             self,
-            non_default_params,
+            {
+                **non_default_params,
+                **self._tools_param_with_openai_tool_search_mapped(
+                    _NON_DEFAULT_PARAMS.validate_python(non_default_params), model, drop_params
+                ),
+            },
             optional_params,
             model,
             drop_params,
         )
 
-        # Restore original model name
-        model = original_model
-
         AnthropicModelInfo.translate_legacy_thinking_for_adaptive_model(
-            model=original_model,
-            optional_params=optional_params,
-            custom_llm_provider="bedrock",
-            carry_block_binding=self._carries_thinking_block_binding,
+            model=model, optional_params=mapped_params, custom_llm_provider="bedrock", drop_params=drop_params
         )
-        translated_thinking: Final = optional_params.get("thinking")
+        translated_thinking: Final = mapped_params.get("thinking")
         if (
             requested_display_updates
             and isinstance(translated_thinking, dict)
             and translated_thinking.get("type") == "adaptive"
         ):
-            optional_params["thinking"] = {
-                **(thinking_block_binding(translated_thinking) if self._carries_thinking_block_binding else {}),
-                "type": "adaptive",
+            mapped_params["thinking"] = {
+                **carried_thinking_keys(
+                    OBJECT_MAPPING_ADAPTER.validate_python(translated_thinking),
+                    rebuilt_keys=frozenset(("display",)),
+                    drop_params=drop_params,
+                ),
                 "display": "updates",
             }
 
-        # The stub model hides the original model from the parent's forced-tool-use backstop
-        response_format_tool_choice: Final = optional_params.get("tool_choice")
-        if (
-            "response_format" in non_default_params
-            and isinstance(response_format_tool_choice, dict)
-            and response_format_tool_choice.get("name") == RESPONSE_FORMAT_TOOL_NAME
-            and AnthropicModelInfo.forced_tool_use_unsupported(original_model)
-        ):
-            optional_params.pop("tool_choice")
-
-        return optional_params
+        return mapped_params
 
     @staticmethod
     def _clamp_adaptive_reasoning_effort_for_bedrock(model: str, params: dict) -> None:
@@ -250,6 +272,7 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
         apply_bedrock_invoke_structured_output(
             model=model,
             request_body=anthropic_request,
+            model_info=deployment_model_info(_LITELLM_PARAMS.validate_python(litellm_params)),
         )
         strip_unsupported_bedrock_invoke_output_config_keys(
             model=model,
@@ -388,7 +411,7 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
         api_key: str | None = None,
         json_mode: bool | None = None,
     ) -> ModelResponse:
-        return AnthropicConfig.transform_response(
+        response: Final = AnthropicConfig.transform_response(
             self,
             model=model,
             raw_response=raw_response,
@@ -402,3 +425,9 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
             api_key=api_key,
             json_mode=json_mode,
         )
+        body: Final = object_mapping(raw_response.json()) or {}
+        trace: Final = object_mapping(body.get(BEDROCK_INVOKE_TRACE_FIELD))
+        if trace is not None:
+            setattr(response, BEDROCK_INVOKE_TRACE_FIELD, trace)
+            logging_obj.record_native_bedrock_guardrail(response)
+        return response

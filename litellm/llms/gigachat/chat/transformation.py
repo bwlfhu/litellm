@@ -14,8 +14,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
+from pydantic import TypeAdapter
 
 from litellm._logging import verbose_logger
+from litellm.litellm_core_utils.tool_fields import tool_params_without_hosted_mcp
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.llms.gigachat.utils import convert_usage, get_api_base
 from litellm.secret_managers.main import get_secret_str
@@ -35,6 +37,7 @@ else:
 
 
 _EMPTY_FUNCTION: Final[Mapping[str, object]] = MappingProxyType({})
+_JSON_VALUE: Final = TypeAdapter(object)
 
 
 def is_valid_json(value: str) -> bool:
@@ -158,7 +161,10 @@ class GigaChatConfig(BaseConfig):
         drop_params: bool,
     ) -> dict:  # mutable-ok: base class contract returns dict
         """Map OpenAI parameters to GigaChat parameters."""
-        for param, value in non_default_params.items():
+        request_params: Final = tool_params_without_hosted_mcp(
+            dict(non_default_params), model=model, route="gigachat", drop_params=drop_params
+        )
+        for param, value in request_params.items():
             if param == "stream":
                 optional_params["stream"] = value
             elif param == "temperature":
@@ -392,7 +398,7 @@ class GigaChatConfig(BaseConfig):
                 args = func.get("arguments", "{}")
                 if isinstance(args, str):
                     try:
-                        args = json.loads(args)
+                        args = _JSON_VALUE.validate_python(json.loads(args))
                     except json.JSONDecodeError:
                         args = {}
                 message["function_call"] = {

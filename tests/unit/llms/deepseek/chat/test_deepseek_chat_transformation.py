@@ -5,6 +5,7 @@ from typing import Final
 
 import httpx
 import pytest
+import respx
 
 import litellm
 from litellm.caching.llm_caching_handler import LLMClientCache
@@ -137,6 +138,53 @@ def _assert_deepseek_request(request: httpx.Request, messages: list[dict[str, st
     assert actual_data["model"] == "deepseek-reasoner"
     assert actual_data["messages"] == messages
     assert actual_data["stream"] is stream
+
+
+@pytest.mark.usefixtures("_deepseek_httpx_transport")
+@pytest.mark.respx(assert_all_called=True)
+def test_completion_cost_deepseek_reports_prompt_cache_usage(respx_mock: respx.MockRouter) -> None:
+    messages: Final = [{"role": "user", "content": "A cached prompt"}]
+    route: Final = respx_mock.post(DEEPSEEK_CHAT_COMPLETIONS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-deepseek-cache",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Answer"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                    "prompt_cache_hit_tokens": 4,
+                    "prompt_cache_miss_tokens": 6,
+                },
+            },
+        )
+    )
+
+    response: Final = litellm.completion(
+        model="deepseek/deepseek-chat",
+        messages=messages,
+        api_key=DEEPSEEK_API_KEY,
+        num_retries=0,
+        max_retries=0,
+    )
+    request_body: Final = json.loads(route.calls[0].request.content)
+
+    assert request_body == {"model": "deepseek-chat", "messages": messages}
+    assert response.usage.prompt_cache_hit_tokens == 4
+    assert response.usage.prompt_cache_miss_tokens == 6
+    assert response.usage.prompt_tokens == 10
+    assert response.usage.prompt_tokens_details.cached_tokens == 4
+    assert response.usage._cache_read_input_tokens == 4
 
 
 def _function_tool(name: str) -> dict:
@@ -973,6 +1021,98 @@ def test_deepseek_fill_reasoning_content_guard_in_transform_request():
     assert "reasoning_content" not in result["messages"][1], (
         "reasoning_content should not be injected for non-reasoning models"
     )
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "https://gateway.example.com/deepseek",
+        "https://gateway.example.com/deepseek/",
+        "https://gateway.example.com/deepseek/chat/completions/",
+    ],
+)
+def test_get_complete_url_ignores_a_trailing_slash_on_api_base(api_base: str):
+    assert (
+        DeepSeekChatConfig().get_complete_url(
+            api_base=api_base, api_key=None, model="deepseek-chat", optional_params={}, litellm_params={}
+        )
+        == "https://gateway.example.com/deepseek/chat/completions"
+    )
+
+
+_HOSTED_MCP_TOOL: Final = {
+    "type": "mcp",
+    "server_label": "deepwiki",
+    "server_url": "https://mcp.deepwiki.com/mcp",
+    "require_approval": "never",
+}
+
+
+def test_a_hosted_mcp_tool_answers_400_on_deepseek_without_drop_params(monkeypatch):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    with pytest.raises(litellm.utils.UnsupportedParamsError) as raised:
+        DeepSeekChatConfig().map_openai_params(
+            {"tools": [_function_tool("shell"), _HOSTED_MCP_TOOL]}, {}, "deepseek-v4-flash", False
+        )
+    assert raised.value.status_code == 400
+    assert "deepseek-v4-flash on deepseek " in str(raised.value)
+    assert "`deepwiki`" in str(raised.value)
+
+
+def test_deepseek_drops_a_hosted_mcp_tool_under_drop_params_and_keeps_the_function_tool(monkeypatch, caplog):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    with caplog.at_level("WARNING"):
+        result: Final = DeepSeekChatConfig().map_openai_params(
+            {"tools": [_HOSTED_MCP_TOOL, _function_tool("shell")], "tool_choice": "auto"}, {}, "deepseek-v4-flash", True
+        )
+    assert result["tools"] == [_function_tool("shell")]
+    assert result["tool_choice"] == "auto"
+    assert any(
+        "`deepwiki`" in record.getMessage() and " on deepseek (" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_deepseek_sends_no_tools_when_drop_params_drops_every_hosted_mcp_tool(monkeypatch):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    result: Final = DeepSeekChatConfig().map_openai_params(
+        {"tools": [_HOSTED_MCP_TOOL], "tool_choice": "required", "parallel_tool_calls": True},
+        {},
+        "deepseek-v4-flash",
+        True,
+    )
+    assert "tools" not in result
+    assert "tool_choice" not in result
+    assert "parallel_tool_calls" not in result
+
+
+def test_deepseek_clears_a_tool_choice_naming_the_hosted_mcp_tool_drop_params_dropped(monkeypatch):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    result: Final = DeepSeekChatConfig().map_openai_params(
+        {
+            "tools": [_HOSTED_MCP_TOOL, _function_tool("shell")],
+            "tool_choice": {"type": "function", "function": {"name": "deepwiki"}},
+        },
+        {},
+        "deepseek-v4-flash",
+        True,
+    )
+    assert result["tools"] == [_function_tool("shell")]
+    assert "tool_choice" not in result
+
+
+def test_deepseek_removes_tool_selection_beside_legacy_functions_when_drop_params_drops_every_tool(monkeypatch):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    functions: Final = [{"name": "shell", "parameters": {"type": "object", "properties": {}}}]
+    result: Final = DeepSeekChatConfig().map_openai_params(
+        {"tools": [_HOSTED_MCP_TOOL], "functions": functions, "tool_choice": "required", "parallel_tool_calls": True},
+        {},
+        "deepseek-v4-flash",
+        True,
+    )
+    assert result["functions"] == functions
+    assert "tools" not in result
+    assert "tool_choice" not in result
+    assert "parallel_tool_calls" not in result
 
 
 @pytest.mark.parametrize(

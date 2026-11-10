@@ -47,7 +47,45 @@ else:
 _LyriaVoice: TypeAlias = str | dict | None
 
 _JSON_OBJECT: Final = TypeAdapter(Mapping[str, object], config=ConfigDict(hide_input_in_errors=True))
+_JSON_ARRAY: Final = TypeAdapter(tuple[object, ...], config=ConfigDict(hide_input_in_errors=True))
 _STR: Final = TypeAdapter(str, config=ConfigDict(hide_input_in_errors=True))
+_CLOUD_TTS_LOCATIONS: Final = MappingProxyType(
+    {
+        **dict.fromkeys(
+            (
+                "us",
+                "us-central1",
+                "us-east1",
+                "us-east4",
+                "us-east5",
+                "us-south1",
+                "us-west1",
+                "us-west2",
+                "us-west3",
+                "us-west4",
+                "us-west5",
+            ),
+            "us",
+        ),
+        **dict.fromkeys(
+            (
+                "eu",
+                "europe-central2",
+                "europe-north1",
+                "europe-north2",
+                "europe-southwest1",
+                "europe-west1",
+                "europe-west3",
+                "europe-west4",
+                "europe-west8",
+                "europe-west9",
+                "europe-west10",
+                "europe-west12",
+            ),
+            "eu",
+        ),
+    }
+)
 
 
 class VertexAITextToSpeechConfig(BaseTextToSpeechConfig, VertexBase):
@@ -172,7 +210,7 @@ class VertexAITextToSpeechConfig(BaseTextToSpeechConfig, VertexBase):
         # Resolve Vertex AI credentials using VertexBase helpers
         vertex_credentials: Final = self.safe_get_vertex_ai_credentials(litellm_params_dict)
         vertex_project: Final = self.safe_get_vertex_ai_project(litellm_params_dict)
-        vertex_location: Final = self.safe_get_vertex_ai_location(litellm_params_dict)
+        vertex_location: Final = self.explicit_vertex_ai_location(litellm_params_dict)
 
         # Convert voice to string if it's a dict (extract name)
         # Actual voice mapping happens in map_openai_params
@@ -313,7 +351,11 @@ class VertexAITextToSpeechConfig(BaseTextToSpeechConfig, VertexBase):
         if api_base:
             return api_base
 
-        return self.TTS_API_URL
+        location: Final = _JSON_OBJECT.validate_python(litellm_params).get("vertex_location")
+        cloud_tts_location: Final = _CLOUD_TTS_LOCATIONS.get(location) if isinstance(location, str) else None
+        if cloud_tts_location is None:
+            return self.TTS_API_URL
+        return f"https://{cloud_tts_location}-texttospeech.googleapis.com/v1/text:synthesize"
 
     def _validate_vertex_input(
         self,
@@ -650,27 +692,37 @@ class VertexAILyriaTextToSpeechConfig(VertexAITextToSpeechConfig):
     ) -> "HttpxBinaryResponseContent":
         from litellm.types.llms.openai import HttpxBinaryResponseContent
 
-        response_json: Final = raw_response.json()
+        response_json: Final = _JSON_OBJECT.validate_python(raw_response.json())
         base_model: Final = model.removeprefix("vertex_ai/")
         model_info: Final = self._get_model_info(model=model)
-        audio_data: str | None = None  # rebind-ok: response parsing discovers audio data in provider-specific shapes
-        mime_type: str | None = None  # rebind-ok: response parsing discovers the MIME type beside the audio payload
+        audio_data: object = None  # rebind-ok: response parsing discovers audio data in provider-specific shapes
+        mime_type: object = None  # rebind-ok: response parsing discovers the MIME type beside the audio payload
         if model_info["vertex_ai_audio_api"] == "lyria_predict":
-            predictions: Final = response_json.get("predictions") or ()
+            predictions: Final = _JSON_ARRAY.validate_python(response_json.get("predictions") or ())
             if predictions:
-                audio_data = predictions[0].get("audioContent") or predictions[0].get("bytesBase64Encoded")
-                mime_type = predictions[0].get("mimeType")  # rebind-ok: predict response supplies its audio MIME type
+                prediction: Final = _JSON_OBJECT.validate_python(predictions[0])
+                audio_data = prediction.get("audioContent") or prediction.get("bytesBase64Encoded")
+                mime_type = prediction.get("mimeType")  # rebind-ok: predict response supplies its audio MIME type
         else:
-            for step in response_json.get("steps") or response_json.get("outputs") or ():
-                content_items = step.get("content") or () if step.get("type") == "model_output" else (step,)
+            steps: Final = _JSON_ARRAY.validate_python(response_json.get("steps") or response_json.get("outputs") or ())
+            for step in map(_JSON_OBJECT.validate_python, steps):
+                content_items = (
+                    map(_JSON_OBJECT.validate_python, _JSON_ARRAY.validate_python(step.get("content") or ()))
+                    if step.get("type") == "model_output"
+                    else (step,)
+                )
                 for content in content_items:
                     if content.get("type") == "audio" and content.get("data"):
                         audio_data = content["data"]
                         mime_type = content.get("mime_type")
         if audio_data is None:
             raise ValueError(f"No generated audio found in Vertex AI {base_model} response")
-        binary_data: Final = base64.b64decode(audio_data)
-        media_type: Final = mime_type or speech_media_type_from_audio_bytes(binary_data) or DEFAULT_SPEECH_MEDIA_TYPE
+        binary_data: Final = base64.b64decode(_STR.validate_python(audio_data))
+        media_type: Final = (
+            (_STR.validate_python(mime_type) if mime_type else None)
+            or speech_media_type_from_audio_bytes(binary_data)
+            or DEFAULT_SPEECH_MEDIA_TYPE
+        )
         return HttpxBinaryResponseContent(
             httpx.Response(
                 status_code=raw_response.status_code,

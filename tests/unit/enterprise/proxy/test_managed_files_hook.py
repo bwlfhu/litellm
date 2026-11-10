@@ -1420,6 +1420,8 @@ def _make_object_store_instance():
     mock_prisma = MagicMock()
     mock_prisma.db.litellm_managedobjecttable.upsert = AsyncMock()
     mock_prisma.db.litellm_managedobjecttable.update_many = AsyncMock()
+    mock_prisma.db.litellm_managedobjecttable.find_first = AsyncMock(return_value=None)
+    mock_prisma.db.writer = mock_prisma.db
 
     return (
         PROXY_LiteLLMManagedFiles(
@@ -1497,6 +1499,51 @@ async def test_create_still_upserts_and_claims_attribution():
     assert created["api_key"] != "sk-the-creator"
     assert created["created_by"] == "alice"
     assert created["team_id"] == "team-alpha"
+
+
+@pytest.mark.asyncio
+async def test_a_stored_background_response_names_its_creators_end_user_and_holds_none_of_its_output():
+    """Billing reads only a stored response's status and model, so neither the row nor its cache
+    entry keeps what the model generated, and the row names the end user the create billed to."""
+    from litellm.types.llms.openai import ResponsesAPIResponse
+
+    managed_files, mock_prisma = _make_object_store_instance()
+    generated_text = "the generated answer"
+    response = ResponsesAPIResponse(
+        id="resp_unified",
+        object="response",
+        status="completed",
+        created_at=1,
+        model="gpt-5.6",
+        output=[
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": generated_text, "annotations": []}],
+            }
+        ],
+        background=True,
+    )
+
+    await managed_files.store_unified_object_id(
+        unified_object_id="resp_unified",
+        file_object=response,
+        litellm_parent_otel_span=None,
+        model_object_id="resp_provider",
+        file_purpose="response",
+        user_api_key_dict=UserAPIKeyAuth(api_key="sk-the-creator", end_user_id="customer-42", parent_otel_span=None),
+        persist_attribution=True,
+    )
+
+    written = mock_prisma.db.litellm_managedobjecttable.upsert.await_args.kwargs["data"]
+    cached = managed_files.internal_usage_cache.async_set_cache.await_args.kwargs["value"]
+    assert generated_text not in json.dumps(written, default=str)
+    assert generated_text not in json.dumps(cached, default=str)
+    assert json.loads(written["create"]["file_object"])["status"] == "completed"
+    assert written["create"]["end_user_id"] == "customer-42"
+    assert generated_text in response.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -2099,3 +2146,117 @@ async def test_store_unified_file_id_caches_the_storage_location_the_db_row_gets
     assert (cached.storage_backend, cached.storage_url) == ("litellm_db", "litellm_db://content-row-1")
     create_data = file_table.upsert.await_args.kwargs["data"]["create"]
     assert (create_data["storage_backend"], create_data["storage_url"]) == ("litellm_db", "litellm_db://content-row-1")
+
+
+@pytest.mark.asyncio
+async def test_create_stores_the_creating_deployment_in_file_object():
+    """Regression (LIT-10326): an unmanaged gs:// batch stores the raw Vertex job id, which
+    says nothing about which of two deployments sharing a base model created it. The create
+    must keep the router's deployment id inside the stored file_object so the cost poller
+    reads the result through that deployment instead of the first base-model match."""
+    managed_files, mock_prisma = _make_object_store_instance()
+    creator: Final = UserAPIKeyAuth(api_key="sk-team-b", user_id="bob", team_id="team-b", parent_otel_span=None)
+
+    await managed_files.store_unified_object_id(
+        unified_object_id="projects/123/locations/us/batchPredictionJobs/456",
+        file_object=_make_batch_response(status="validating"),
+        litellm_parent_otel_span=None,
+        model_object_id="projects/123/locations/us/batchPredictionJobs/456",
+        file_purpose="batch",
+        user_api_key_dict=creator,
+        persist_attribution=True,
+        create_if_missing=True,
+        creating_model_id="deploy-team-b",
+    )
+
+    created: Final = mock_prisma.db.litellm_managedobjecttable.upsert.await_args.kwargs["data"]["create"]
+    assert json.loads(created["file_object"])["model_id"] == "deploy-team-b"
+
+
+@pytest.mark.asyncio
+async def test_poll_refresh_keeps_the_stored_creating_deployment():
+    """A later observe of the row (a GET through whichever deployment the client named)
+    rewrites file_object; it must carry the create-time model_id forward, not drop it or
+    replace it with the deployment that served the retrieve."""
+    managed_files, mock_prisma = _make_object_store_instance()
+    stored_row: Final = MagicMock()
+    stored_row.file_object = json.dumps(
+        {**json.loads(_make_batch_response(status="validating").model_dump_json()), "model_id": "deploy-team-b"}
+    )
+    mock_prisma.db.litellm_managedobjecttable.find_first = AsyncMock(return_value=stored_row)
+    observer: Final = UserAPIKeyAuth(api_key="sk-team-b", user_id="bob", team_id="team-b", parent_otel_span=None)
+
+    await managed_files.store_unified_object_id(
+        unified_object_id="projects/123/locations/us/batchPredictionJobs/456",
+        file_object=_make_batch_response(status="completed"),
+        litellm_parent_otel_span=None,
+        model_object_id="projects/123/locations/us/batchPredictionJobs/456",
+        file_purpose="batch",
+        user_api_key_dict=observer,
+        persist_attribution=False,
+        create_if_missing=False,
+    )
+
+    written: Final = json.loads(
+        mock_prisma.db.litellm_managedobjecttable.update_many.await_args.kwargs["data"]["file_object"]
+    )
+    assert written["model_id"] == "deploy-team-b"
+    assert written["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_poll_refresh_reads_the_stored_creating_deployment_from_the_writer():
+    """With a read replica configured, a retrieve that lands before the replica has the create
+    must still find the create-time model_id, so the lookup goes to the writer. Prisma may hand
+    the Json column back already decoded, so the row here is a dict rather than JSON text."""
+    managed_files, mock_prisma = _make_object_store_instance()
+    stored_row: Final = MagicMock()
+    stored_row.file_object = {
+        **json.loads(_make_batch_response(status="validating").model_dump_json()),
+        "model_id": "deploy-team-b",
+    }
+    mock_prisma.db.litellm_managedobjecttable.find_first = AsyncMock(return_value=None)
+    mock_prisma.db.writer = MagicMock()
+    mock_prisma.db.writer.litellm_managedobjecttable.find_first = AsyncMock(return_value=stored_row)
+    observer: Final = UserAPIKeyAuth(api_key="sk-team-b", user_id="bob", team_id="team-b", parent_otel_span=None)
+
+    await managed_files.store_unified_object_id(
+        unified_object_id="projects/123/locations/us/batchPredictionJobs/456",
+        file_object=_make_batch_response(status="completed"),
+        litellm_parent_otel_span=None,
+        model_object_id="projects/123/locations/us/batchPredictionJobs/456",
+        file_purpose="batch",
+        user_api_key_dict=observer,
+        persist_attribution=False,
+        create_if_missing=False,
+    )
+
+    written: Final = json.loads(
+        mock_prisma.db.litellm_managedobjecttable.update_many.await_args.kwargs["data"]["file_object"]
+    )
+    assert written["model_id"] == "deploy-team-b"
+    mock_prisma.db.litellm_managedobjecttable.find_first.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_create_hook_passes_the_router_deployment_as_creating_model_id():
+    """The post-call hook on a batch create hands the router's model_id to the object store;
+    a retrieve of the same batch hands None so it cannot overwrite the creator."""
+    from litellm_enterprise.proxy.hooks.managed_files import BATCH_CREATE_HIDDEN_PARAM
+
+    managed_files: Final = _make_managed_files_instance()
+    created: Final = _make_batch_response(model_id="deploy-team-b", output_file_id=None, status="validating")
+    created._hidden_params[BATCH_CREATE_HIDDEN_PARAM] = True
+    retrieved: Final = _make_batch_response(model_id="deploy-team-a", output_file_id=None, status="in_progress")
+
+    with patch("litellm.proxy.proxy_server.llm_router", MagicMock()):
+        await managed_files.async_post_call_success_hook(
+            data={}, user_api_key_dict=_make_user_api_key_dict(), response=created
+        )
+        await managed_files.async_post_call_success_hook(
+            data={}, user_api_key_dict=_make_user_api_key_dict(), response=retrieved
+        )
+
+    first, second = managed_files.store_unified_object_id.await_args_list
+    assert first.kwargs["creating_model_id"] == "deploy-team-b"
+    assert second.kwargs["creating_model_id"] is None

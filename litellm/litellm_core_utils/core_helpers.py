@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, cast, runtime_c
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
+import litellm
 from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.llm_response_utils.get_headers import get_provider_request_id
 from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
@@ -66,12 +67,21 @@ class _SupportsGetItem(Protocol):
     def __getitem__(self, index: int, /) -> object: ...
 
 
+def attribute_or_none(source: object, name: str) -> object:
+    return getattr(source, name, None)
+
+
 def iter_items(value: object) -> Iterable[object]:
     if isinstance(value, _SupportsIter):
         return value
     if isinstance(value, _SupportsGetItem):
         return iter(value)
     raise TypeError(f"'{type(value).__name__}' object is not iterable")
+
+
+def attribute_items(source: object, name: str) -> Iterable[object]:
+    value: Final = attribute_or_none(source, name)
+    return iter_items(value) if value else ()
 
 
 def normalize_drop_params(value: object) -> bool | None:
@@ -81,6 +91,10 @@ def normalize_drop_params(value: object) -> bool | None:
         return _DROP_PARAMS_BOOL.validate_python(value.strip() if isinstance(value, str) else value)
     except ValidationError:
         return None
+
+
+def drops_unsupported_params(drop_params: object) -> bool:
+    return litellm.drop_params is True or normalize_drop_params(drop_params) is True
 
 
 def drop_params_flag(value: object, source: str, logger: logging.Logger) -> bool:
@@ -235,6 +249,7 @@ _FINISH_REASON_MAP: Final[dict[str, OpenAIChatCompletionFinishReason]] = {
     # Gemini / Vertex AI
     "STOP": "stop",
     "MAX_TOKENS": "length",
+    "CONTINUATION": "length",
     "SAFETY": "content_filter",
     "RECITATION": "content_filter",
     "FINISH_REASON_UNSPECIFIED": "stop",
@@ -293,7 +308,13 @@ def remove_index_from_tool_calls(
                         tool_call.pop("index", None)
 
 
-def remove_items_at_indices(items: list[Any] | None, indices: Iterable[int]) -> None:
+class _PoppableByIndex(Protocol):
+    def __len__(self) -> int: ...
+
+    def pop(self, index: int, /) -> object: ...
+
+
+def remove_items_at_indices(items: _PoppableByIndex | None, indices: Iterable[int]) -> None:
     """Remove items from a list in-place by index"""
     if items is None:
         return
@@ -302,7 +323,7 @@ def remove_items_at_indices(items: list[Any] | None, indices: Iterable[int]) -> 
             items.pop(index)
 
 
-def add_missing_spend_metadata_to_litellm_metadata(litellm_metadata: dict, metadata: dict) -> dict:
+def add_missing_spend_metadata_to_litellm_metadata(litellm_metadata: dict, metadata: Mapping[str, object]) -> dict:
     """
     Helper to get litellm metadata for spend tracking
 
@@ -310,7 +331,7 @@ def add_missing_spend_metadata_to_litellm_metadata(litellm_metadata: dict, metad
     and user_api_key values are in 'metadata'.
     """
     potential_spend_tracking_metadata_substring: Final = "user_api_key"
-    for key, value in metadata.items():
+    for key, value in dict(metadata).items():
         if potential_spend_tracking_metadata_substring in key:
             litellm_metadata[key] = value
     return litellm_metadata

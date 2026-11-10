@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+import respx
 
 import litellm
 from litellm import Router
@@ -29,6 +30,7 @@ from litellm.router_utils.fallback_event_handlers import (
     fallback_attempt_key,
     get_fallback_model_group,
     get_pre_routing_selection,
+    is_bad_request_without_fallback,
     log_failure_fallback_event,
     log_success_fallback_event,
     mid_stream_fallback_snapshot_kwargs,
@@ -38,7 +40,9 @@ from litellm.router_utils.fallback_event_handlers import (
     routed_deployment_id,
     run_async_fallback,
 )
+from litellm.types.router import FallbackSkipReason, SkippedFallbackTarget
 from tests._vcr_conftest_common import install_live_call_probe, record_vcr_outcome
+from tests.fake_openai_endpoint import FAKE_OPENAI_API_BASE
 
 
 class StreamingWrapper:
@@ -1085,7 +1089,12 @@ class TestTriggerCooldownForFailedDeployment:
                     "model_name": "fallback-model",
                     "litellm_params": {"model": "openai/gpt-5.6", "api_key": "sk-fake"},
                     "model_info": {"id": "fallback-deployment"},
-                }
+                },
+                {
+                    "model_name": "fallback-model",
+                    "litellm_params": {"model": "openai/gpt-5.6", "api_key": "sk-fake"},
+                    "model_info": {"id": "fallback-sibling"},
+                },
             ],
             allowed_fails=0,
             cooldown_time=60,
@@ -1218,7 +1227,10 @@ async def test_a_stored_fallback_target_cannot_carry_a_federation_field():
     so a stored key/team/global fallback could otherwise set the workspace a federation token is
     minted for. The request itself is already forbidden to carry these, and a stored setting is
     not a more trusted source than the request."""
-    with pytest.raises(ValueError, match="server-owned workload identity federation parameter"):
+    with pytest.raises(
+        ValueError,
+        match="server-owned workload identity federation or OAuth token exchange parameter",
+    ):
         await run_async_fallback(
             litellm_router=FakeRouter(),
             fallback_model_group=[{"model": "anthropic-backup", "anthropic_federation_workspace_id": "wrkspc_other"}],
@@ -1465,6 +1477,19 @@ class TestHasUnattemptedFallbackTarget:
         assert has_unattempted_fallback_target(["fb1", "fb3"], {"attempted_targets": attempted}) is True
         assert has_unattempted_fallback_target(["fb1"], {}) is True
         assert has_unattempted_fallback_target(None, {}) is False
+
+
+def test_attempted_fallback_targets_deduplicates_skips_in_order_and_keeps_first_reason() -> None:
+    attempted: Final = AttemptedFallbackTargets()
+    attempted.record_skip("a", FallbackSkipReason.NOT_AUTHORIZED)
+    attempted.record_skip("a", FallbackSkipReason.NOT_AUTHORIZED)
+    attempted.record_skip("b", FallbackSkipReason.OVER_BUDGET)
+    attempted.record_skip("a", FallbackSkipReason.OVER_BUDGET)
+
+    assert attempted.skipped == (
+        SkippedFallbackTarget("a", FallbackSkipReason.NOT_AUTHORIZED),
+        SkippedFallbackTarget("b", FallbackSkipReason.OVER_BUDGET),
+    )
 
 
 def test_get_fallback_model_group_matches_provider_prefixed_key():
@@ -2419,3 +2444,187 @@ class CustomTestLogger(CustomLogger):
             original_model_group,
         )
         self.failure_fallback_events.append((original_model_group, kwargs, original_exception))
+
+
+def create_test_router_2():
+    return Router(
+        model_list=[
+            {
+                "model_name": "gpt-3.5-turbo",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",
+                    "api_key": os.getenv("OPENAI_API_KEY"),
+                },
+            },
+            {
+                "model_name": "gpt-4",
+                "litellm_params": {
+                    "model": "gpt-4",
+                    "api_key": "very-fake-key",
+                },
+            },
+            {
+                "model_name": "fake-openai-endpoint-2",
+                "litellm_params": {
+                    "model": "openai/fake-openai-endpoint-2",
+                    "api_key": "working-key-since-this-is-fake-endpoint",
+                    "api_base": FAKE_OPENAI_API_BASE,
+                },
+            },
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("function_name", ["_acompletion", "_atext_completion"])
+async def test_multiple_fallbacks(function_name, respx_mock: respx.MockRouter, monkeypatch):
+    """
+    Tests that if multiple fallbacks passed:
+    - fallback 1 = bad configured deployment / failing endpoint
+    - fallback 2 = working deployment / working endpoint
+
+    Assert that:
+    - a success response is received from the working endpoint (fallback 2)
+    """
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    invalid_key = httpx.Response(
+        401,
+        json={
+            "error": {
+                "message": "Incorrect API key provided",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+            }
+        },
+    )
+    respx_mock.post("https://api.openai.com/v1/chat/completions").mock(return_value=invalid_key)
+    respx_mock.post("https://api.openai.com/v1/completions").mock(return_value=invalid_key)
+    respx_mock.post(f"{FAKE_OPENAI_API_BASE}/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-fake",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "fake-openai-endpoint-2",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            },
+        )
+    )
+    respx_mock.post(f"{FAKE_OPENAI_API_BASE}/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "cmpl-fake",
+                "object": "text_completion",
+                "created": 1700000000,
+                "model": "fake-openai-endpoint-2",
+                "choices": [{"index": 0, "text": "hi", "logprobs": None, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            },
+        )
+    )
+    router_2 = create_test_router_2()
+    original_function = getattr(router_2, function_name)
+
+    fallback_model_group = ["gpt-4", "fake-openai-endpoint-2"]
+    original_model_group = "gpt-3.5-turbo"
+    original_exception = Exception("Simulated error")
+
+    request_kwargs: dict[str, object] = {"metadata": {"previous_models": ["gpt-3.5-turbo"]}}
+
+    if function_name == "_aembedding":
+        request_kwargs["input"] = "hello this is a test for run_async_fallback"
+    elif function_name == "_atext_completion":
+        request_kwargs["prompt"] = "hello this is a test for run_async_fallback"
+    elif function_name == "_acompletion":
+        request_kwargs["messages"] = [{"role": "user", "content": "Hello, world!"}]
+
+    result = await run_async_fallback(
+        litellm_router=router_2,
+        original_function=original_function,
+        num_retries=1,
+        fallback_model_group=fallback_model_group,
+        original_model_group=original_model_group,
+        original_exception=original_exception,
+        max_fallbacks=5,
+        fallback_depth=0,
+        **request_kwargs,
+    )
+
+    print(result)
+
+    print(result._hidden_params)
+
+    assert result._hidden_params["api_base"] == FAKE_OPENAI_API_BASE
+
+
+def _provider_error(status_code: int) -> httpx.Response:
+    return httpx.Response(status_code=status_code, request=httpx.Request(method="POST", url="https://provider.test"))
+
+
+@pytest.mark.parametrize(
+    ("exception", "stops_fallbacks"),
+    [
+        pytest.param(
+            litellm.BadRequestError(message="Unsupported value: temperature", model="m", llm_provider="openai"),
+            True,
+            id="provider 400",
+        ),
+        pytest.param(
+            litellm.UnsupportedParamsError(
+                message="reasoning_effort is not supported", model="m", llm_provider="openai"
+            ),
+            True,
+            id="client-side rejection",
+        ),
+        pytest.param(
+            litellm.UnsupportedParamsError(message="stop is not supported"),
+            True,
+            id="client-side rejection without a provider",
+        ),
+        pytest.param(
+            litellm.BadRequestError(
+                message="Deployment ptu is reserved for another team", model="ptu", llm_provider=""
+            ),
+            False,
+            id="router-raised 400 keeps falling back",
+        ),
+        pytest.param(
+            litellm.BadRequestError(
+                message="VertexAIException BadRequestError - 403",
+                model="m",
+                llm_provider="vertex_ai",
+                response=_provider_error(403),
+            ),
+            False,
+            id="vertex 403 wrapped as BadRequestError",
+        ),
+        pytest.param(
+            litellm.PaymentRequiredError(message="insufficient credits", model="m", llm_provider="openrouter"),
+            False,
+            id="402",
+        ),
+        pytest.param(
+            litellm.ContextWindowExceededError(message="maximum context length", model="m", llm_provider="openai"),
+            False,
+            id="context window keeps its own fallbacks",
+        ),
+        pytest.param(
+            litellm.ContentPolicyViolationError(message="content_policy_violation", model="m", llm_provider="openai"),
+            False,
+            id="content policy keeps its own fallbacks",
+        ),
+        pytest.param(
+            litellm.InternalServerError(message="overloaded", model="m", llm_provider="openai"),
+            False,
+            id="500 still falls back",
+        ),
+    ],
+)
+def test_is_bad_request_without_fallback_only_stops_on_a_real_400_when_the_flag_is_off(
+    exception: Exception, stops_fallbacks: bool
+) -> None:
+    assert is_bad_request_without_fallback(exception, fallback_on_unsupported_params=False) is stops_fallbacks
+    assert is_bad_request_without_fallback(exception, fallback_on_unsupported_params=True) is False

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from httpx._models import Headers, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 import litellm
 from litellm._uuid import uuid
@@ -14,6 +14,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
     extract_images_from_message,
     extract_reasoning_content,
 )
+from litellm.litellm_core_utils.tool_fields import tool_params_without_hosted_mcp
 from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.types.llms.ollama import (
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     LiteLLMLoggingObj = _LiteLLMLoggingObj
 else:
     LiteLLMLoggingObj = Any
+
+_REQUEST_PARAMS: Final = TypeAdapter(dict[str, object])
 
 
 class OllamaChatConfig(BaseConfig):
@@ -150,7 +153,13 @@ class OllamaChatConfig(BaseConfig):
         model: str,
         drop_params: bool,
     ) -> dict:
-        for param, value in non_default_params.items():
+        request_params: Final = tool_params_without_hosted_mcp(
+            _REQUEST_PARAMS.validate_python(non_default_params),
+            model=model,
+            route="ollama_chat",
+            drop_params=drop_params,
+        )
+        for param, value in request_params.items():
             if param == "max_tokens" or param == "max_completion_tokens":
                 optional_params["num_predict"] = value
             if param == "stream":
@@ -218,14 +227,10 @@ class OllamaChatConfig(BaseConfig):
 
         Some providers need `model` in `api_base`
         """
-        if api_base is None:
-            api_base = "http://localhost:11434"
-        if api_base.endswith("/api/chat"):
-            url = api_base
-        else:
-            url = f"{api_base}/api/chat"
-
-        return url
+        clean_api_base: Final = (api_base or "http://localhost:11434").rstrip("/")
+        if clean_api_base.endswith("/api/chat"):
+            return clean_api_base
+        return f"{clean_api_base}/api/chat"
 
     def transform_request(
         self,

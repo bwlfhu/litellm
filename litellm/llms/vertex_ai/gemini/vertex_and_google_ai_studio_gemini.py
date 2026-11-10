@@ -4,10 +4,11 @@
 import json
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from functools import partial
-from typing import TYPE_CHECKING, Any, Final, Literal, Optional, Union, cast, get_args
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Optional, Protocol, Union, cast, get_args
 
 import httpx
 from pydantic import JsonValue
@@ -26,10 +27,12 @@ from litellm.constants import (
     DEFAULT_REASONING_EFFORT_MINIMAL_THINKING_BUDGET_GEMINI_2_5_PRO,
 )
 from litellm.exceptions import UnsupportedParamsError
+from litellm.litellm_core_utils.core_helpers import normalize_drop_params
 from litellm.litellm_core_utils.json_fragment_accumulator import JSONFragmentAccumulator
 from litellm.litellm_core_utils.prompt_templates.factory import (
     encode_tool_call_id_with_signature,
 )
+from litellm.litellm_core_utils.tool_fields import tool_params_without_hosted_mcp
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
@@ -38,6 +41,7 @@ from litellm.llms.custom_httpx.http_handler import (
     get_httpx_client,
 )
 from litellm.types.llms.anthropic import AnthropicThinkingParam
+from litellm.types.llms.base import CachedTokensDetails
 from litellm.types.llms.gemini import BidiGenerateContentServerMessage
 from litellm.types.llms.openai import (
     AllMessageValues,
@@ -64,6 +68,7 @@ from litellm.types.llms.vertex_ai import (
     GenerateContentResponseBody,
     HttpxPartType,
     LogprobsResult,
+    RequestBody,
     ToolConfig,
     Tools,
     UsageMetadata,
@@ -95,6 +100,31 @@ from ..common_utils import (
 )
 from ..vertex_llm_base import VertexBase
 from .grounding_requests import calculate_grounding_requests
+from .long_decode import (
+    HOP_FAILURES,
+    AsyncStreamResume,
+    LongDecodeHops,
+    StreamResume,
+    SyncStreamResume,
+    answer_bytes,
+    client_continuation_token,
+    collect_hops_async,
+    collect_hops_sync,
+    continuation_cap_of,
+    hop_request,
+    hops_original_response,
+    initial_prompt_tokens_of,
+    log_failed_hop,
+    merge_hops,
+    next_hop_token,
+    output_tokens_of,
+    parse_body,
+    per_hop,
+    sum_usage_metadata,
+    url_for,
+    with_initial_prompt_tokens,
+    with_spans_shifted,
+)
 from .transformation import (
     async_transform_request_body,
     gemini_convert_messages_with_history,
@@ -116,6 +146,39 @@ else:
 SUPPORTED_REASONING_EFFORTS: Final = ("minimal", "low", "medium", "high", "none", "disable")
 
 
+def _response_header(headers: Mapping[str, str], name: str) -> str | None:
+    return headers.get(name)
+
+
+class _HiddenParamsSink(Protocol):
+    def __setitem__(self, key: str, value: object, /) -> None: ...
+
+
+class _StreamMetadataTarget(Protocol):
+    @property
+    def hidden_params(self) -> _HiddenParamsSink: ...
+
+
+# Gemini prebuilt voices per https://ai.google.dev/gemini-api/docs/speech-generation (2026-10-01), by nearest character;
+# nova is left out since Gemini 3.x TTS models accept it as given (live check 2026-10-08)
+OPENAI_TO_GEMINI_TTS_VOICES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "alloy": "Kore",
+        "ash": "Iapetus",
+        "ballad": "Algieba",
+        "cedar": "Achird",
+        "coral": "Sulafat",
+        "echo": "Charon",
+        "fable": "Umbriel",
+        "marin": "Despina",
+        "onyx": "Orus",
+        "sage": "Vindemiatrix",
+        "shimmer": "Achernar",
+        "verse": "Puck",
+    }
+)
+
+
 def _unsupported_reasoning_effort(reasoning_effort: str) -> UnsupportedParamsError:
     return UnsupportedParamsError(
         message=(
@@ -126,6 +189,11 @@ def _unsupported_reasoning_effort(reasoning_effort: str) -> UnsupportedParamsErr
         ),
         status_code=400,
     )
+
+
+def _cache_creation_tokens(logging_obj: LoggingClass) -> int:
+    recorded: Final[object] = getattr(logging_obj, "vertex_ai_cache_creation_input_tokens", 0)
+    return recorded if isinstance(recorded, int) and recorded > 0 else 0
 
 
 def _served_model_name(model_version: object) -> str | None:
@@ -212,6 +280,8 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
     Note: Please make sure to modify the default parameters as required for your use case.
     """
 
+    _route: ClassVar[str] = "vertex_ai"
+
     temperature: float | None = None
     max_output_tokens: int | None = None
     top_p: float | None = None
@@ -236,7 +306,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         presence_penalty: float | None = None,
         seed: int | None = None,
     ) -> None:
-        locals_: Final[Mapping[str, object]] = locals().copy()
+        locals_: Final[Mapping[str, object]] = MappingProxyType(locals().copy())
         for key, value in locals_.items():
             if key != "self" and value is not None:
                 setattr(self.__class__, key, value)
@@ -862,11 +932,38 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 # - Requires propertyOrdering
                 optional_params["response_schema"] = self._map_response_schema(value=schema)
 
+    @property
+    def accepts_reasoning_summary_in_reasoning_effort(self) -> bool:
+        return True
+
+    @staticmethod
+    def _include_thoughts(requested: bool | None) -> bool:
+        if requested is not None:
+            return requested
+        return normalize_drop_params(litellm.gemini_include_thoughts_default) is not False
+
+    @staticmethod
+    def _include_thoughts_requested_by_reasoning_effort(reasoning_effort: object) -> bool | None:
+        match reasoning_effort:
+            case {"summary": str()}:
+                return True
+            case _:
+                return None
+
+    @staticmethod
+    def _map_reasoning_effort(effort: str, model: str, reasoning_effort: object) -> GeminiThinkingConfig:
+        include_thoughts: Final = VertexGeminiConfig._include_thoughts_requested_by_reasoning_effort(reasoning_effort)
+        if VertexGeminiConfig._is_gemini_3_or_newer(model):
+            return VertexGeminiConfig._map_reasoning_effort_to_thinking_level(effort, model, include_thoughts)
+        return VertexGeminiConfig._map_reasoning_effort_to_thinking_budget(effort, model, include_thoughts)
+
     @staticmethod
     def _map_reasoning_effort_to_thinking_budget(
         reasoning_effort: str,
         model: str | None = None,
+        include_thoughts: bool | None = None,
     ) -> GeminiThinkingConfig:
+        sends_thoughts: Final = VertexGeminiConfig._include_thoughts(include_thoughts)
         if reasoning_effort == "minimal":
             # Use model-specific minimum thinking budget or fallback
             # Check for exact matches first, then partial matches
@@ -881,22 +978,22 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
             return {
                 "thinkingBudget": budget,
-                "includeThoughts": True,
+                "includeThoughts": sends_thoughts,
             }
         elif reasoning_effort == "low":
             return {
                 "thinkingBudget": DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET,
-                "includeThoughts": True,
+                "includeThoughts": sends_thoughts,
             }
         elif reasoning_effort == "medium":
             return {
                 "thinkingBudget": DEFAULT_REASONING_EFFORT_MEDIUM_THINKING_BUDGET,
-                "includeThoughts": True,
+                "includeThoughts": sends_thoughts,
             }
         elif reasoning_effort == "high":
             return {
                 "thinkingBudget": DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET,
-                "includeThoughts": True,
+                "includeThoughts": sends_thoughts,
             }
         elif reasoning_effort == "disable":
             return {
@@ -923,6 +1020,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
     def _map_reasoning_effort_to_thinking_level(
         reasoning_effort: str,
         model: str | None = None,
+        include_thoughts: bool | None = None,
     ) -> GeminiThinkingConfig:
         """
         Map reasoning_effort to thinking_level for Gemini 3+ models.
@@ -934,17 +1032,18 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             GeminiThinkingConfig with thinkingLevel and includeThoughts
         """
         supports_minimal: Final = bool(model) and VertexGeminiConfig._supports_minimal_thinking_level(model)
+        sends_thoughts: Final = VertexGeminiConfig._include_thoughts(include_thoughts)
         if reasoning_effort == "minimal":
             if supports_minimal:
-                return {"thinkingLevel": "minimal", "includeThoughts": True}
+                return {"thinkingLevel": "minimal", "includeThoughts": sends_thoughts}
             else:
-                return {"thinkingLevel": "low", "includeThoughts": True}
+                return {"thinkingLevel": "low", "includeThoughts": sends_thoughts}
         elif reasoning_effort == "low":
-            return {"thinkingLevel": "low", "includeThoughts": True}
+            return {"thinkingLevel": "low", "includeThoughts": sends_thoughts}
         elif reasoning_effort == "medium":
-            return {"thinkingLevel": "medium", "includeThoughts": True}
+            return {"thinkingLevel": "medium", "includeThoughts": sends_thoughts}
         elif reasoning_effort == "high":
-            return {"thinkingLevel": "high", "includeThoughts": True}
+            return {"thinkingLevel": "high", "includeThoughts": sends_thoughts}
         elif reasoning_effort in ("disable", "none"):
             return {
                 "thinkingLevel": "minimal" if supports_minimal else "low",
@@ -998,12 +1097,19 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 )
 
     @staticmethod
+    def _thinking_asks_for_thoughts(thinking_param: Mapping[str, object]) -> bool:
+        display: Final = thinking_param.get("display")
+        return isinstance(thinking_param.get("summary"), str) or (display is not None and display != "omitted")
+
+    @staticmethod
     def _map_thinking_param(
         thinking_param: AnthropicThinkingParam,
         model: str | None = None,
     ) -> GeminiThinkingConfig:
         thinking_enabled: Final = thinking_param.get("type") == "enabled"
         thinking_budget: Final = thinking_param.get("budget_tokens")
+        asks_for_thoughts: Final = VertexGeminiConfig._thinking_asks_for_thoughts(thinking_param)
+        sends_thoughts: Final = VertexGeminiConfig._include_thoughts(True if asks_for_thoughts else None)
 
         params: Final[GeminiThinkingConfig] = {}
 
@@ -1013,7 +1119,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 if thinking_budget == 0:
                     params["includeThoughts"] = False
                 else:
-                    params["includeThoughts"] = True
+                    params["includeThoughts"] = sends_thoughts
                     # Follow provider defaults unless explicitly opted into legacy behavior.
                     if litellm.enable_gemini_default_thinking_level_low is True:
                         params["thinkingLevel"] = (
@@ -1025,7 +1131,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         else:
             # For older Gemini models, use thinkingBudget
             if thinking_enabled and not VertexGeminiConfig._is_thinking_budget_zero(thinking_budget):
-                params["includeThoughts"] = True
+                params["includeThoughts"] = sends_thoughts
             if thinking_budget is not None and isinstance(thinking_budget, int):
                 params["thinkingBudget"] = thinking_budget
 
@@ -1072,7 +1178,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         speechConfig = {
             voiceConfig: {
                 prebuiltVoiceConfig: {
-                    voiceName: "alloy",
+                    voiceName: "Kore",
                 }
             },
             languageCode: "en-US",
@@ -1097,7 +1203,11 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         speech_config: Final[SpeechConfig] = {}
 
         if "voice" in value:
-            prebuilt_voice_config: Final[PrebuiltVoiceConfig] = {"voiceName": value["voice"]}
+            voice: Final = value["voice"]
+            voice_name: Final = (
+                OPENAI_TO_GEMINI_TTS_VOICES.get(voice.lower(), voice) if isinstance(voice, str) else voice
+            )
+            prebuilt_voice_config: Final[PrebuiltVoiceConfig] = {"voiceName": voice_name}
             voice_config: Final[VoiceConfig] = {"prebuiltVoiceConfig": prebuilt_voice_config}
             speech_config["voiceConfig"] = voice_config
 
@@ -1139,9 +1249,12 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         model: str,
         drop_params: bool,
     ) -> dict:
-        self._apply_include_server_side_tool_invocations(non_default_params, optional_params)
+        request_params: Final = tool_params_without_hosted_mcp(
+            non_default_params, model=model, route=self._route, drop_params=drop_params
+        )
+        self._apply_include_server_side_tool_invocations(request_params, optional_params)
         gemini_sampling_params_warned: bool = False
-        for param, value in non_default_params.items():
+        for param, value in request_params.items():
             if param == "temperature":
                 if VertexGeminiConfig._is_gemini_3_or_newer(model):
                     if value is not None and value < 1.0:
@@ -1211,7 +1324,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 if _tool_choice_value is not None:
                     optional_params["tool_choice"] = _tool_choice_value
             elif param == "parallel_tool_calls":
-                tools_list = non_default_params.get("tools", non_default_params.get("functions"))
+                tools_list = request_params.get("tools", request_params.get("functions"))
                 num_tools = len(tools_list) if isinstance(tools_list, list) else 0
                 # Gemini does not support parallel_tool_calls=False with multiple
                 # tools. Drop the param instead of failing — Responses API clients
@@ -1236,14 +1349,9 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                         param_name="reasoning_effort",
                         param_description="thinking_budget",
                     )
-                    if VertexGeminiConfig._is_gemini_3_or_newer(model):
-                        optional_params["thinkingConfig"] = VertexGeminiConfig._map_reasoning_effort_to_thinking_level(
-                            effort_value, model
-                        )
-                    else:
-                        optional_params["thinkingConfig"] = VertexGeminiConfig._map_reasoning_effort_to_thinking_budget(
-                            effort_value, model
-                        )
+                    optional_params["thinkingConfig"] = VertexGeminiConfig._map_reasoning_effort(
+                        effort=effort_value, model=model, reasoning_effort=value
+                    )
             elif param == "thinking":
                 # Validate no conflict with thinking_level
                 VertexGeminiConfig._validate_thinking_config_conflicts(
@@ -1275,11 +1383,6 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 optional_params["responseModalities"] = ["AUDIO"]
             elif "AUDIO" not in optional_params["responseModalities"]:
                 optional_params["responseModalities"].append("AUDIO")
-
-        # Set default temperature to 1.0 for Gemini 3 models if not specified
-        if VertexGeminiConfig._is_gemini_3_or_newer(model):
-            if "temperature" not in optional_params:
-                optional_params["temperature"] = 1.0
 
         self._drop_search_tools_mixed_with_functions(optional_params)
 
@@ -1797,6 +1900,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
     @staticmethod
     def _calculate_usage(
         completion_response: GenerateContentResponseBody | BidiGenerateContentServerMessage,
+        cache_creation_tokens: int = 0,
     ) -> Usage:
         if completion_response is not None and "usageMetadata" not in completion_response:
             raise ValueError(f"usageMetadata not found in completion_response. Got={completion_response}")
@@ -1908,26 +2012,13 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 elif modality == "DOCUMENT":
                     cached_text_tokens = (cached_text_tokens or 0) + token_count
 
-        ## Calculate non-cached tokens by subtracting cached from total (per modality)
-        ## This is necessary because promptTokensDetails includes both cached and non-cached tokens
-        ## See: https://github.com/BerriAI/litellm/issues/18750
-        if cached_text_tokens is not None and prompt_text_tokens is not None:
-            # Explicit caching: subtract cached tokens per modality from cacheTokensDetails
-            prompt_text_tokens = prompt_text_tokens - cached_text_tokens
-        elif (
+        if (
             cached_tokens is not None
             and prompt_text_tokens is not None
             and cached_text_tokens is None
             and "cacheTokensDetails" not in usage_metadata
         ):
-            # Implicit caching: only cachedContentTokenCount is provided (no cacheTokensDetails)
-            # Subtract from text tokens since implicit caching is primarily for text content
-            # See: https://github.com/BerriAI/litellm/issues/16341
             prompt_text_tokens = prompt_text_tokens - cached_tokens
-        if cached_audio_tokens is not None and prompt_audio_tokens is not None:
-            prompt_audio_tokens = prompt_audio_tokens - cached_audio_tokens
-        if cached_image_tokens is not None and prompt_image_tokens is not None:
-            prompt_image_tokens = prompt_image_tokens - cached_image_tokens
         if cached_video_tokens is not None and prompt_video_tokens is not None:
             prompt_video_tokens = prompt_video_tokens - cached_video_tokens
 
@@ -1940,19 +2031,37 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
         tool_use_prompt_tokens: Final = usage_metadata.get("toolUsePromptTokenCount") or None
 
-        prompt_tokens_details = PromptTokensDetailsWrapper(
-            cached_tokens=cached_tokens,
-            audio_tokens=prompt_audio_tokens,
-            text_tokens=prompt_text_tokens,
-            image_tokens=prompt_image_tokens,
-            video_tokens=prompt_video_tokens,
-            tool_use_tokens=tool_use_prompt_tokens,
-        )
-
         billable_tool_use_prompt_tokens: Final = (
             0
             if VertexGeminiConfig._response_has_search_grounding(completion_response)
             else (tool_use_prompt_tokens or 0)
+        )
+        billable_text_tokens: Final = (
+            prompt_text_tokens if prompt_text_tokens is None else prompt_text_tokens + billable_tool_use_prompt_tokens
+        )
+        cached_tokens_details_fields: Final = MappingProxyType(
+            {
+                key: token_count
+                for key, token_count in (
+                    ("text_tokens", cached_text_tokens),
+                    ("audio_tokens", cached_audio_tokens),
+                    ("image_tokens", cached_image_tokens),
+                )
+                if token_count is not None
+            }
+        )
+        cached_tokens_details: Final = (
+            CachedTokensDetails.model_validate(cached_tokens_details_fields) if cached_tokens_details_fields else None
+        )
+
+        prompt_tokens_details = PromptTokensDetailsWrapper(
+            cached_tokens=cached_tokens,
+            cached_tokens_details=cached_tokens_details,
+            audio_tokens=prompt_audio_tokens,
+            text_tokens=billable_text_tokens,
+            image_tokens=prompt_image_tokens,
+            video_tokens=prompt_video_tokens,
+            tool_use_tokens=tool_use_prompt_tokens,
         )
 
         completion_tokens = response_tokens or completion_response["usageMetadata"].get("candidatesTokenCount", 0)
@@ -1960,11 +2069,14 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             completion_tokens = reasoning_tokens + completion_tokens
         ## GET USAGE ##
         usage: Final = Usage(
-            prompt_tokens=usage_metadata.get("promptTokenCount", 0) + billable_tool_use_prompt_tokens,
+            prompt_tokens=usage_metadata.get("promptTokenCount", 0)
+            + billable_tool_use_prompt_tokens
+            + cache_creation_tokens,
             completion_tokens=completion_tokens,
-            total_tokens=usage_metadata.get("totalTokenCount", 0),
+            total_tokens=usage_metadata.get("totalTokenCount", 0) + cache_creation_tokens,
             prompt_tokens_details=prompt_tokens_details,
             cache_read_input_tokens=cached_tokens,
+            cache_creation_input_tokens=cache_creation_tokens or None,
             reasoning_tokens=reasoning_tokens,
             completion_tokens_details=response_tokens_details,
         )
@@ -1975,8 +2087,9 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
     def calculate_usage(
         cls,
         completion_response: GenerateContentResponseBody | BidiGenerateContentServerMessage,
+        cache_creation_tokens: int = 0,
     ) -> Usage:
-        return cls._calculate_usage(completion_response)
+        return cls._calculate_usage(completion_response, cache_creation_tokens)
 
     @staticmethod
     def _check_finish_reason(
@@ -2144,7 +2257,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         citation_metadata: Final[list] = []
 
         if "groundingMetadata" in candidate:
-            if isinstance(candidate["groundingMetadata"], list):
+            if isinstance(candidate["groundingMetadata"], (list, tuple)):
                 grounding_metadata.extend(candidate["groundingMetadata"])
             else:
                 grounding_metadata.append(candidate["groundingMetadata"])
@@ -2153,11 +2266,10 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             safety_ratings.append(candidate["safetyRatings"])
 
         if "citationMetadata" in candidate:
-            citation_metadata.append(candidate["citationMetadata"])
+            citation_metadata.extend(per_hop(candidate["citationMetadata"]))
 
         if "urlContextMetadata" in candidate:
-            # Add URL context metadata to grounding metadata
-            url_context_metadata.append(cast(dict, candidate["urlContextMetadata"]))
+            url_context_metadata.extend(cast(tuple[dict, ...], per_hop(candidate["urlContextMetadata"])))
 
         return (
             grounding_metadata,
@@ -2185,11 +2297,11 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
     @staticmethod
     def _set_stream_metadata_on_response(
-        model_response: Any,
-        grounding_metadata: list[dict],
-        url_context_metadata: list[dict],
-        safety_ratings: list[dict],
-        citation_metadata: list[dict],
+        model_response: _StreamMetadataTarget,
+        grounding_metadata: Sequence[Mapping[str, object]],
+        url_context_metadata: Sequence[Mapping[str, object]],
+        safety_ratings: Sequence[Mapping[str, object]],
+        citation_metadata: Sequence[Mapping[str, object]],
     ) -> None:
         setattr(model_response, "vertex_ai_grounding_metadata", grounding_metadata)
         if grounding_metadata:
@@ -2200,11 +2312,11 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         setattr(model_response, "vertex_ai_safety_ratings", safety_ratings)
         setattr(model_response, "vertex_ai_safety_results", safety_ratings)
         if safety_ratings:
-            model_response._hidden_params["vertex_ai_safety_ratings"] = safety_ratings
-            model_response._hidden_params["vertex_ai_safety_results"] = safety_ratings
+            model_response.hidden_params["vertex_ai_safety_ratings"] = safety_ratings
+            model_response.hidden_params["vertex_ai_safety_results"] = safety_ratings
         setattr(model_response, "vertex_ai_citation_metadata", citation_metadata)
         if citation_metadata:
-            model_response._hidden_params["vertex_ai_citation_metadata"] = citation_metadata
+            model_response.hidden_params["vertex_ai_citation_metadata"] = citation_metadata
 
     @classmethod
     def set_stream_metadata_on_response(
@@ -2375,11 +2487,11 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 )
 
                 if audio_response is not None:
-                    cast(dict[str, Any], chat_completion_message)["audio"] = audio_response
+                    cast(dict[str, object], chat_completion_message)["audio"] = audio_response
                     chat_completion_message["content"] = None  # OpenAI spec
                 if image_response is not None:
                     # Handle image response - combine with text content into structured format
-                    cast(dict[str, Any], chat_completion_message)["images"] = image_response
+                    cast(dict[str, object], chat_completion_message)["images"] = image_response
                 if content is not None:
                     chat_completion_message["content"] = content
 
@@ -2430,17 +2542,17 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                         reasoning_content = "\n".join(reasoning_content_parts)
                         chat_completion_message["reasoning_content"] = reasoning_content
 
-            # Store thoughtSignatures in provider_specific_fields
-            if thought_signatures is not None:
-                thought_signature_fields = chat_completion_message.get("provider_specific_fields") or {}
-                thought_signature_fields["thought_signatures"] = thought_signatures
-                chat_completion_message["provider_specific_fields"] = thought_signature_fields
-
-            # Store server-side tool invocations in provider_specific_fields
-            if server_side_tool_invocations is not None:
-                tool_invocation_fields = chat_completion_message.get("provider_specific_fields") or {}
-                tool_invocation_fields["server_side_tool_invocations"] = server_side_tool_invocations
-                chat_completion_message["provider_specific_fields"] = tool_invocation_fields
+            message_provider_fields = {
+                key: value
+                for key, value in (
+                    ("thought_signatures", thought_signatures),
+                    ("server_side_tool_invocations", server_side_tool_invocations),
+                    ("continuation_token", client_continuation_token(candidate)),
+                )
+                if value is not None
+            }
+            if message_provider_fields:
+                chat_completion_message["provider_specific_fields"] = message_provider_fields
 
             if isinstance(model_response, ModelResponseStream):
                 choice = VertexGeminiConfig._create_streaming_choice(
@@ -2517,18 +2629,8 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             additional_args={"complete_input_dict": request_data},
         )
 
-        ## RESPONSE OBJECT
-        try:
-            completion_response: Final = GenerateContentResponseBody(**raw_response.json())
-        except Exception as e:
-            raise VertexAIError(
-                message=f"Error converting to valid response block={e}. File an issue if litellm error - https://github.com/BerriAI/litellm/issues",
-                status_code=422,
-                headers=raw_response.headers,
-            )
-
         return self._transform_google_generate_content_to_openai_model_response(
-            completion_response=completion_response,
+            completion_response=parse_body(raw_response),
             model_response=model_response,
             model=model,
             logging_obj=logging_obj,
@@ -2587,7 +2689,10 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                     _,  # cumulative_tool_call_index not needed in non-streaming
                 ) = VertexGeminiConfig._process_candidates(_candidates, model_response, logging_obj.optional_params)
 
-            usage: Final = VertexGeminiConfig._calculate_usage(completion_response=completion_response)
+            usage: Final = VertexGeminiConfig._calculate_usage(
+                completion_response=completion_response,
+                cache_creation_tokens=_cache_creation_tokens(logging_obj),
+            )
 
             VertexGeminiConfig._set_grounding_usage_counters(usage, grounding_metadata)
 
@@ -2620,7 +2725,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
             ## ADD SERVICE TIER ##
             if getattr(raw_response, "headers", None):
-                service_tier: Final[str | None] = raw_response.headers.get("x-gemini-service-tier")
+                service_tier: Final = _response_header(raw_response.headers, "x-gemini-service-tier")
                 if service_tier:
                     if service_tier.lower() == "standard":
                         setattr(model_response, "service_tier", "default")
@@ -2713,7 +2818,10 @@ async def make_call(
     data: str,
     model: str,
     messages: list,
-    logging_obj,
+    logging_obj: LoggingClass,
+    request_body: RequestBody,
+    hop_headers: Callable[[], Awaitable[Mapping[str, str]]],
+    timeout: float | httpx.Timeout | None = None,
 ):
     if gemini_client is not None:
         client = gemini_client
@@ -2723,7 +2831,14 @@ async def make_call(
         )
 
     try:
-        response: Final = await client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj)
+        response: Final = await client.post(
+            url_for(api_base, request_body),
+            headers=headers,
+            data=data,
+            stream=True,
+            logging_obj=logging_obj,
+            timeout=timeout,
+        )
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
         exception_string: Final = str(await e.response.aread())
@@ -2739,12 +2854,23 @@ async def make_call(
             headers=response.headers,
         )
 
+    async def open_hop(body: RequestBody) -> httpx.Response:
+        return await client.post(
+            url_for(api_base, body),
+            headers=dict(await hop_headers()),
+            data=json.dumps(body),
+            stream=True,
+            logging_obj=logging_obj,
+            timeout=timeout,
+        )
+
     completion_stream: Final = ModelResponseIterator(
         streaming_response=response.aiter_lines(),
         sync_stream=False,
         logging_obj=logging_obj,
         response_headers=response.headers,
         response=response,
+        resume=AsyncStreamResume(request_body=request_body, open_hop=open_hop),
     )
     # LOGGING
     logging_obj.post_call(
@@ -2765,14 +2891,24 @@ def make_sync_call(
     data: str,
     model: str,
     messages: list,
-    logging_obj,
+    logging_obj: LoggingClass,
+    request_body: RequestBody,
+    hop_headers: Callable[[], Mapping[str, str]],
+    timeout: float | httpx.Timeout | None = None,
 ):
     if gemini_client is not None:
         client = gemini_client
     if client is None:
         client = HTTPHandler()  # Create a new client if none provided
 
-    response: Final = client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj)
+    response: Final = client.post(
+        url_for(api_base, request_body),
+        headers=headers,
+        data=data,
+        stream=True,
+        logging_obj=logging_obj,
+        timeout=timeout,
+    )
 
     if response.status_code != 200 and response.status_code != 201:
         raise VertexAIError(
@@ -2781,12 +2917,23 @@ def make_sync_call(
             headers=response.headers,
         )
 
+    def open_hop(body: RequestBody) -> httpx.Response:
+        return client.post(
+            url_for(api_base, body),
+            headers=dict(hop_headers()),
+            data=json.dumps(body),
+            stream=True,
+            logging_obj=logging_obj,
+            timeout=timeout,
+        )
+
     completion_stream: Final = ModelResponseIterator(
         streaming_response=response.iter_lines(),
         sync_stream=True,
         logging_obj=logging_obj,
         response_headers=response.headers,
         response=response,
+        resume=SyncStreamResume(request_body=request_body, open_hop=open_hop),
     )
 
     # LOGGING
@@ -2803,6 +2950,42 @@ def make_sync_call(
 class VertexLLM(VertexBase):
     def __init__(self) -> None:
         super().__init__()
+
+    async def _fresh_headers_async(
+        self,
+        headers: Mapping[str, str],
+        extra_headers: Mapping[str, str] | None,
+        vertex_credentials: VERTEX_CREDENTIALS_TYPES | None,
+        vertex_project: str | None,
+        custom_llm_provider: Literal["vertex_ai", "vertex_ai_beta", "gemini"],
+    ) -> Mapping[str, str]:
+        if custom_llm_provider == "gemini":
+            return headers
+        try:
+            token, _ = await self._ensure_access_token_async(
+                credentials=vertex_credentials, project_id=vertex_project, custom_llm_provider=custom_llm_provider
+            )
+        except Exception as e:
+            raise VertexAIError(status_code=401, message=str(e), headers=None) from e
+        return {**headers, "Authorization": f"Bearer {token}", **(extra_headers or {})}
+
+    def _fresh_headers(
+        self,
+        headers: Mapping[str, str],
+        extra_headers: Mapping[str, str] | None,
+        vertex_credentials: VERTEX_CREDENTIALS_TYPES | None,
+        vertex_project: str | None,
+        custom_llm_provider: Literal["vertex_ai", "vertex_ai_beta", "gemini"],
+    ) -> Mapping[str, str]:
+        if custom_llm_provider == "gemini":
+            return headers
+        try:
+            token, _ = self._ensure_access_token(
+                credentials=vertex_credentials, project_id=vertex_project, custom_llm_provider=custom_llm_provider
+            )
+        except Exception as e:
+            raise VertexAIError(status_code=401, message=str(e), headers=None) from e
+        return {**headers, "Authorization": f"Bearer {token}", **(extra_headers or {})}
 
     async def async_streaming(
         self,
@@ -2890,6 +3073,16 @@ class VertexLLM(VertexBase):
                 model=model,
                 messages=messages,
                 logging_obj=logging_obj,
+                request_body=request_body,
+                hop_headers=partial(
+                    self._fresh_headers_async,
+                    headers,
+                    extra_headers,
+                    vertex_credentials,
+                    vertex_project,
+                    custom_llm_provider,
+                ),
+                timeout=timeout,
             ),
             model=model,
             custom_llm_provider="vertex_ai_beta",
@@ -2909,7 +3102,7 @@ class VertexLLM(VertexBase):
         ],  # if it's vertex_ai or gemini (google ai studio)
         timeout: float | httpx.Timeout | None,
         encoding: object,
-        logging_obj,
+        logging_obj: LoggingClass,
         stream,
         optional_params: dict,
         litellm_params: dict,
@@ -2978,39 +3171,42 @@ class VertexLLM(VertexBase):
             },
         )
 
-        try:
-            response: Final = await client.post(
-                api_base,
-                headers=headers,
-                json=cast(dict, request_body),
-                logging_obj=logging_obj,
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as err:
-            error_code: Final = err.response.status_code
-            raise VertexAIError(
-                status_code=error_code,
-                message=err.response.text,
-                headers=err.response.headers,
-            )
-        except httpx.TimeoutException:
-            raise VertexAIError(
-                status_code=408,
-                message="Timeout error occurred.",
-                headers=None,
-            )
+        fresh_headers: Final = partial(
+            self._fresh_headers_async, headers, extra_headers, vertex_credentials, vertex_project, custom_llm_provider
+        )
 
-        return VertexGeminiConfig().transform_response(
+        async def post(body: RequestBody) -> httpx.Response:
+            try:
+                response: Final = await client.post(
+                    url_for(api_base, body),
+                    headers=dict(await fresh_headers()),
+                    json=dict(body),
+                    logging_obj=logging_obj,
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as err:
+                raise VertexAIError(
+                    status_code=err.response.status_code,
+                    message=err.response.text,
+                    headers=err.response.headers,
+                )
+            except httpx.TimeoutException:
+                raise VertexAIError(
+                    status_code=408,
+                    message="Timeout error occurred.",
+                    headers=None,
+                )
+            return response
+
+        first_response: Final = await post(request_body)
+        return _transform_long_decode_hops(
             model=model,
-            raw_response=response,
+            hops=await collect_hops_async(parse_body(first_response), request_body, post),
+            first_response=first_response,
             model_response=model_response,
             logging_obj=logging_obj,
-            api_key="",
-            request_data=cast(dict, request_body),
+            request_body=request_body,
             messages=messages,
-            optional_params=optional_params,
-            litellm_params=litellm_params,
-            encoding=encoding,
         )
 
     def completion(
@@ -3023,7 +3219,7 @@ class VertexLLM(VertexBase):
             "vertex_ai", "vertex_ai_beta", "gemini"
         ],  # if it's vertex_ai or gemini (google ai studio)
         encoding: object,
-        logging_obj,
+        logging_obj: LoggingClass,
         optional_params: dict,
         acompletion: bool,
         timeout: float | httpx.Timeout | None,
@@ -3152,6 +3348,10 @@ class VertexLLM(VertexBase):
             },
         )
 
+        fresh_headers: Final = partial(
+            self._fresh_headers, headers, extra_headers, vertex_credentials, vertex_project, custom_llm_provider
+        )
+
         ## SYNC STREAMING CALL ##
         if stream is True:
             request_data_str: Final = json.dumps(data)
@@ -3166,6 +3366,9 @@ class VertexLLM(VertexBase):
                     messages=messages,
                     logging_obj=logging_obj,
                     headers=headers,
+                    request_body=data,
+                    hop_headers=fresh_headers,
+                    timeout=timeout,
                 ),
                 model=model,
                 custom_llm_provider="vertex_ai_beta",
@@ -3185,35 +3388,66 @@ class VertexLLM(VertexBase):
         else:
             client = client
 
-        try:
-            response: Final = client.post(url=url, headers=headers, json=data, logging_obj=logging_obj)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as err:
-            error_code: Final = err.response.status_code
-            raise VertexAIError(
-                status_code=error_code,
-                message=err.response.text,
-                headers=err.response.headers,
-            )
-        except httpx.TimeoutException:
-            raise VertexAIError(
-                status_code=408,
-                message="Timeout error occurred.",
-                headers=None,
-            )
+        def post(body: RequestBody) -> httpx.Response:
+            try:
+                response: Final = client.post(
+                    url=url_for(url, body), headers=dict(fresh_headers()), json=dict(body), logging_obj=logging_obj
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as err:
+                raise VertexAIError(
+                    status_code=err.response.status_code,
+                    message=err.response.text,
+                    headers=err.response.headers,
+                )
+            except httpx.TimeoutException:
+                raise VertexAIError(
+                    status_code=408,
+                    message="Timeout error occurred.",
+                    headers=None,
+                )
+            return response
 
-        return VertexGeminiConfig().transform_response(
+        first_response: Final = post(data)
+        return _transform_long_decode_hops(
             model=model,
-            raw_response=response,
+            hops=collect_hops_sync(parse_body(first_response), data, post),
+            first_response=first_response,
             model_response=model_response,
             logging_obj=logging_obj,
-            optional_params=optional_params,
-            litellm_params=litellm_params,
-            api_key="",
-            request_data=data,
+            request_body=data,
             messages=messages,
-            encoding=encoding,
         )
+
+
+def _transform_long_decode_hops(
+    model: str,
+    hops: LongDecodeHops,
+    first_response: httpx.Response,
+    model_response: ModelResponse,
+    logging_obj: LoggingClass,
+    request_body: RequestBody,
+    messages: Sequence[AllMessageValues],
+) -> ModelResponse:
+    body: Final = merge_hops(hops)
+    logging_obj.post_call(
+        input=messages,
+        api_key="",
+        original_response=hops_original_response(hops, body, first_response),
+        additional_args={"complete_input_dict": request_body},
+    )
+    merged: Final = VertexGeminiConfig().transform_google_generate_content_to_openai_model_response(
+        completion_response=body,
+        model_response=model_response,
+        model=model,
+        logging_obj=logging_obj,
+        raw_response=first_response,
+    )
+    merged_usage: Final = getattr(merged, "usage", None)
+    if not isinstance(merged_usage, Usage):
+        return merged
+    marked: Final = with_initial_prompt_tokens(merged_usage, initial_prompt_tokens_of(hops))
+    return merged if marked is merged_usage else merged.model_copy(update={"usage": marked})
 
 
 class ModelResponseIterator:
@@ -3224,6 +3458,7 @@ class ModelResponseIterator:
         logging_obj: LoggingClass,
         response_headers: dict[str, str] | None = None,
         response: httpx.Response | None = None,
+        resume: StreamResume | None = None,
     ):
         from litellm.litellm_core_utils.prompt_templates.common_utils import (
             check_is_function_call,
@@ -3239,6 +3474,18 @@ class ModelResponseIterator:
         self.is_function_call = check_is_function_call(logging_obj)
         self.cumulative_tool_call_index: int = 0
         self.has_seen_tool_calls: bool = False
+        self._resume = resume
+        self._output_cap = continuation_cap_of(resume.request_body) if resume is not None else None
+        self._pending_hop_token: str | None = None
+        self._unanswered_hop_token: str | None = None
+        self._first_response_id: str | None = None
+        self._usage_offset: UsageMetadata = UsageMetadata()
+        self._hop_usage: UsageMetadata = UsageMetadata()
+        self._initial_prompt_tokens: int | None = None
+        self._grounding_offset: tuple[Mapping[str, object], ...] = ()
+        self._hop_grounding: tuple[Mapping[str, object], ...] = ()
+        self._answer_offset: int = 0
+        self._hop_answer_bytes: int = 0
 
     @property
     def accumulated_json(self) -> str:
@@ -3350,6 +3597,20 @@ class ModelResponseIterator:
             citation_metadata,
         )
 
+    def _marked_stream_usage(self, usage: Usage | None) -> Usage | None:
+        if usage is None or not self._usage_offset:
+            return usage
+        return with_initial_prompt_tokens(usage, self._initial_prompt_tokens)
+
+    def _grounding_through_this_hop(
+        self, grounding_metadata: Sequence[Mapping[str, object]]
+    ) -> Sequence[Mapping[str, object]]:
+        if grounding_metadata:
+            self._hop_grounding = tuple(grounding_metadata)
+        if not self._grounding_offset:
+            return grounding_metadata
+        return (*self._grounding_offset, *self._hop_grounding)
+
     def _apply_stream_usage_metadata(
         self,
         processed_chunk: GenerateContentResponseBody,
@@ -3361,9 +3622,10 @@ class ModelResponseIterator:
 
         usage: Final = VertexGeminiConfig.calculate_usage(
             completion_response=processed_chunk,
+            cache_creation_tokens=_cache_creation_tokens(self.logging_obj),
         )
 
-        VertexGeminiConfig.set_grounding_usage_counters(usage, grounding_metadata)
+        VertexGeminiConfig.set_grounding_usage_counters(usage, self._grounding_through_this_hop(grounding_metadata))
 
         traffic_type: Final = processed_chunk.get("usageMetadata", {}).get("trafficType")
         if traffic_type:
@@ -3385,11 +3647,14 @@ class ModelResponseIterator:
             # Detect mid-stream error chunks (e.g. 429 RESOURCE_EXHAUSTED).
             # Vertex AI can return errors as HTTP 200 but with an "error" field in the SSE body.
             self._check_streaming_error(chunk)
+            self._unanswered_hop_token = None
 
             from litellm.types.utils import ModelResponseStream
 
-            processed_chunk: Final = GenerateContentResponseBody(**chunk)
-            response_id: Final = processed_chunk.get("responseId")
+            processed_chunk: Final = self._with_answer_offset(
+                self._with_usage_offset(GenerateContentResponseBody(**chunk))
+            )
+            response_id: Final = self._first_response_id or processed_chunk.get("responseId")
             served: Final = _served_model_name(processed_chunk.get("modelVersion"))
             model_response = ModelResponseStream(
                 choices=[],
@@ -3420,15 +3685,120 @@ class ModelResponseIterator:
                     citation_metadata,
                 ) = self._apply_stream_candidates(_candidates, model_response)
 
-            usage: Final = self._apply_stream_usage_metadata(processed_chunk, model_response, grounding_metadata)
+            usage: Final = self._marked_stream_usage(
+                self._apply_stream_usage_metadata(processed_chunk, model_response, grounding_metadata)
+            )
 
             setattr(model_response, "usage", usage)
+            self._plan_resume(processed_chunk, model_response)
 
             model_response.hidden_params["is_finished"] = False
             return model_response
 
         except json.JSONDecodeError:
             raise ValueError(f"Failed to decode JSON from chunk: {chunk}")
+
+    def _with_usage_offset(self, chunk: GenerateContentResponseBody) -> GenerateContentResponseBody:
+        if "usageMetadata" not in chunk:
+            return chunk
+        self._hop_usage = chunk["usageMetadata"]
+        if not self._usage_offset:
+            return chunk
+        return {**chunk, "usageMetadata": sum_usage_metadata(self._usage_offset, self._hop_usage)}
+
+    def _with_answer_offset(self, chunk: GenerateContentResponseBody) -> GenerateContentResponseBody:
+        candidates: Final = chunk.get("candidates")
+        if self._output_cap is None or not candidates:
+            return chunk
+        self._hop_answer_bytes += answer_bytes(candidates[0])
+        if not self._answer_offset:
+            return chunk
+        return {**chunk, "candidates": [with_spans_shifted(candidates[0], self._answer_offset), *candidates[1:]]}
+
+    def _plan_resume(self, processed_chunk: GenerateContentResponseBody, model_response: "ModelResponseStream") -> None:
+        if self._output_cap is None:
+            return
+        token: Final = next_hop_token(
+            processed_chunk,
+            hop_usage=self._hop_usage,
+            produced_before=output_tokens_of(self._usage_offset),
+            output_cap=self._output_cap,
+        )
+        if token is None:
+            return
+        self._pending_hop_token = token
+        self._first_response_id = self._first_response_id or processed_chunk.get("responseId")
+        for choice in model_response.choices:
+            delta_fields: Mapping[str, object] = choice.delta.provider_specific_fields or {}
+            choice.finish_reason = None
+            choice.delta.provider_specific_fields = {
+                key: value for key, value in delta_fields.items() if key != "continuation_token"
+            } or None
+
+    def _start_hop(self, response: httpx.Response, token: str) -> None:
+        if self._initial_prompt_tokens is None:
+            self._initial_prompt_tokens = self._hop_usage.get("promptTokenCount")
+        self._usage_offset = sum_usage_metadata(self._usage_offset, self._hop_usage)
+        self._hop_usage = UsageMetadata()
+        self._grounding_offset = (*self._grounding_offset, *self._hop_grounding)
+        self._hop_grounding = ()
+        self._answer_offset += self._hop_answer_bytes
+        self._hop_answer_bytes = 0
+        self._json_buffer = JSONFragmentAccumulator()
+        self._unanswered_hop_token = token
+        self.response = response
+
+    def _truncated_stream_end(self, token: str) -> "ModelResponseStream":
+        from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+        return ModelResponseStream(
+            id=self._first_response_id,
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    finish_reason="length",
+                    delta=Delta(provider_specific_fields={"continuation_token": token}),
+                )
+            ],
+        )
+
+    def _end_of_unanswered_hop(
+        self, reason: Exception | str = "the continuation stream ended without a readable frame"
+    ) -> Optional["ModelResponseStream"]:
+        token: Final = self._unanswered_hop_token
+        if token is None:
+            return None
+        self._unanswered_hop_token = None
+        log_failed_hop(reason)
+        return self._truncated_stream_end(token)
+
+    async def _open_next_hop_async(self, token: str) -> Optional["ModelResponseStream"]:
+        if not isinstance(self._resume, AsyncStreamResume):
+            return None
+        await self.aclose()
+        try:
+            hop_response: Final = await self._resume.open_hop(hop_request(self._resume.request_body, token))
+        except HOP_FAILURES as e:
+            log_failed_hop(e)
+            return self._truncated_stream_end(token)
+        self._start_hop(hop_response, token)
+        self.streaming_response = hop_response.aiter_lines()
+        self.async_response_iterator = self.streaming_response
+        return None
+
+    def _open_next_hop_sync(self, token: str) -> Optional["ModelResponseStream"]:
+        if not isinstance(self._resume, SyncStreamResume):
+            return None
+        self.close()
+        try:
+            hop_response: Final = self._resume.open_hop(hop_request(self._resume.request_body, token))
+        except HOP_FAILURES as e:
+            log_failed_hop(e)
+            return self._truncated_stream_end(token)
+        self._start_hop(hop_response, token)
+        self.streaming_response = hop_response.iter_lines()
+        self.response_iterator = self.streaming_response
+        return None
 
     # Sync iterator
     def __iter__(self):
@@ -3498,58 +3868,92 @@ class ModelResponseIterator:
         except Exception:
             raise
 
-    def __next__(self):
+    def __next__(self) -> Optional["ModelResponseStream"]:
         try:
-            chunk: Final = self.response_iterator.__next__()
-        except StopIteration:
-            if self.chunk_type == "accumulated_json" and self._json_buffer:
-                result: Final = self.handle_accumulated_json_chunk(chunk="", is_final=True)
-                if result is not None:
-                    return result
-            raise StopIteration
-        except ValueError as e:
-            raise RuntimeError(f"Error receiving chunk from stream: {e}")
+            return self._next_chunk()
+        except HOP_FAILURES as e:
+            if (unanswered_end := self._end_of_unanswered_hop(e)) is None:
+                raise
+            self.close()
+            return unanswered_end
 
-        try:
-            return self._common_chunk_parsing_logic(chunk=chunk)
-        except StopIteration:
-            raise StopIteration
-        except ValueError as e:
-            raise RuntimeError(f"Error parsing chunk: {e},\nReceived chunk: {chunk}")
+    def _next_chunk(self) -> Optional["ModelResponseStream"]:
+        while True:
+            try:
+                chunk = self.response_iterator.__next__()  # pyright: ignore[reportAttributeAccessIssue]  # sync stream
+            except StopIteration:
+                if self.chunk_type == "accumulated_json" and self._json_buffer:
+                    result = self.handle_accumulated_json_chunk(chunk="", is_final=True)
+                    if result is not None:
+                        return result
+                if (unanswered_end := self._end_of_unanswered_hop()) is not None:
+                    return unanswered_end
+                if (token := self._pending_hop_token) is None:
+                    raise StopIteration
+                self._pending_hop_token = None
+                if (truncated_end := self._open_next_hop_sync(token)) is not None:
+                    return truncated_end
+                continue
+            except ValueError as e:
+                raise RuntimeError(f"Error receiving chunk from stream: {e}")
+
+            try:
+                return self._common_chunk_parsing_logic(chunk=chunk)
+            except StopIteration:
+                raise StopIteration
+            except ValueError as e:
+                raise RuntimeError(f"Error parsing chunk: {e},\nReceived chunk: {chunk}")
 
     # Async iterator
     def __aiter__(self):
-        self.async_response_iterator = self.streaming_response.__aiter__()
+        self.async_response_iterator = self.streaming_response.__aiter__()  # pyright: ignore[reportAttributeAccessIssue]  # async stream
         return self
 
-    async def __anext__(self):
+    async def __anext__(self) -> Optional["ModelResponseStream"]:
         try:
-            chunk: Final = await self.async_response_iterator.__anext__()
-        except StopAsyncIteration:
-            if self.chunk_type == "accumulated_json" and self._json_buffer:
-                result: Final = self.handle_accumulated_json_chunk(chunk="", is_final=True)
-                if result is not None:
-                    return result
-            raise StopAsyncIteration
-        except ValueError as e:
-            raise RuntimeError(f"Error receiving chunk from stream: {e}")
+            return await self._anext_chunk()
+        except HOP_FAILURES as e:
+            if (unanswered_end := self._end_of_unanswered_hop(e)) is None:
+                raise
+            await self.aclose()
+            return unanswered_end
 
-        try:
-            return self._common_chunk_parsing_logic(chunk=chunk)
-        except StopAsyncIteration:
-            raise StopAsyncIteration
-        except ValueError as e:
-            raise RuntimeError(f"Error parsing chunk: {e},\nReceived chunk: {chunk}")
+    async def _anext_chunk(self) -> Optional["ModelResponseStream"]:
+        while True:
+            try:
+                chunk = await self.async_response_iterator.__anext__()
+            except StopAsyncIteration:
+                if self.chunk_type == "accumulated_json" and self._json_buffer:
+                    result = self.handle_accumulated_json_chunk(chunk="", is_final=True)
+                    if result is not None:
+                        return result
+                if (unanswered_end := self._end_of_unanswered_hop()) is not None:
+                    return unanswered_end
+                if (token := self._pending_hop_token) is None:
+                    raise StopAsyncIteration
+                self._pending_hop_token = None
+                if (truncated_end := await self._open_next_hop_async(token)) is not None:
+                    return truncated_end
+                continue
+            except ValueError as e:
+                raise RuntimeError(f"Error receiving chunk from stream: {e}")
+
+            try:
+                return self._common_chunk_parsing_logic(chunk=chunk)
+            except StopAsyncIteration:
+                raise StopAsyncIteration
+            except ValueError as e:
+                raise RuntimeError(f"Error parsing chunk: {e},\nReceived chunk: {chunk}")
 
     async def aclose(self) -> None:
-        iterator: Final = getattr(
+        iterator: Final = getattr(  # pyright: ignore[reportUnknownVariableType]  # sync or async line iterator
             self,
             "async_response_iterator",
             self.streaming_response,
         )
         if iterator is not None and hasattr(iterator, "aclose"):
             try:
-                await iterator.aclose()
+                await iterator.aclose()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]  # hasattr guard
             except Exception as e:  # noqa: BLE001
                 verbose_logger.debug("ModelResponseIterator.aclose: error closing iterator: %s", e)
         if self.response is not None:
@@ -3559,10 +3963,10 @@ class ModelResponseIterator:
                 verbose_logger.debug("ModelResponseIterator.aclose: error closing response: %s", e)
 
     def close(self) -> None:
-        iterator: Final = getattr(self, "response_iterator", self.streaming_response)
+        iterator: Final = getattr(self, "response_iterator", self.streaming_response)  # pyright: ignore[reportUnknownVariableType]  # sync or async line iterator
         if iterator is not None and hasattr(iterator, "close"):
             try:
-                iterator.close()
+                iterator.close()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]  # hasattr guard
             except Exception as e:  # noqa: BLE001
                 verbose_logger.debug("ModelResponseIterator.close: error closing iterator: %s", e)
         if self.response is not None:

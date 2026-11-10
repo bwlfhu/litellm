@@ -5,24 +5,69 @@ import struct
 import sys
 import types
 from binascii import crc32
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
+from types import MappingProxyType
 from typing import Final
 from unittest.mock import patch
 
+import httpx
 import pytest
 
+import litellm
+from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.litellm_logging import Logging
 from litellm.llms.base_llm.passthrough.transformation import PassthroughStreamCollector
+from litellm.llms.bedrock.common_utils import BedrockError
 from litellm.llms.bedrock.passthrough.transformation import (
     BedrockPassthroughConfig,
     is_bedrock_streaming_endpoint,
 )
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.types.utils import ModelResponse
 
 CONVERSE_MODEL = "anthropic.claude-sonnet-4-5-20250929-v1:0"
 CONVERSE_STREAM_ENDPOINT = f"/model/{CONVERSE_MODEL}/converse-stream"
 INVOKE_STREAM_ENDPOINT = f"/model/{CONVERSE_MODEL}/invoke-with-response-stream"
+
+
+@pytest.mark.asyncio
+async def test_bedrock_passthrough_router_replaces_alias_in_endpoint() -> None:
+    deployment_model: Final = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    requests: Final[list[httpx.Request]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"generation": "ok", "stop_reason": "stop"}, request=request)
+
+    router: Final = litellm.Router(
+        model_list=[
+            {
+                "model_name": "special-bedrock-model",
+                "litellm_params": {
+                    "model": f"bedrock/{deployment_model}",
+                    "aws_access_key_id": "AKIAROUTERKEY",
+                    "aws_secret_access_key": "router-secret",
+                    "aws_region_name": "us-west-2",
+                },
+            }
+        ]
+    )
+    response: Final = await router.allm_passthrough_route(
+        model="special-bedrock-model",
+        method="POST",
+        endpoint="/model/special-bedrock-model/invoke",
+        data={"prompt": "Hey"},
+        client=AsyncHTTPHandler(transport=httpx.MockTransport(respond)),
+    )
+    request: Final = requests[0]
+
+    assert response.status_code == 200
+    assert request.url.host == "bedrock-runtime.us-west-2.amazonaws.com"
+    assert request.url.raw_path == f"/model/{deployment_model}/invoke".encode()
+    request_body: Final = json.loads(request.content)
+
+    assert request_body == {"prompt": "Hey"}
 
 
 @pytest.mark.parametrize(
@@ -552,16 +597,18 @@ def _invoke_chunk(payload: dict) -> bytes:
     return _event_frame("chunk", {"bytes": base64.b64encode(json.dumps(payload).encode()).decode()})
 
 
-def _stream_logging_obj(endpoint: str) -> Logging:
+def _stream_logging_obj(endpoint: str, dynamic_async_success_callbacks: list[CustomLogger] | None = None) -> Logging:
     logging_obj = Logging(
-        model=CONVERSE_MODEL,
+        model=f"bedrock/{CONVERSE_MODEL}",
         messages=[],
         stream=True,
         call_type="pass_through_endpoint",
-        start_time=datetime.now(),
+        start_time=datetime(2025, 1, 1),
         litellm_call_id="call-1",
         function_id="fn-1",
+        dynamic_async_success_callbacks=dynamic_async_success_callbacks,
     )
+    logging_obj.update_environment_variables(litellm_params={}, optional_params={})
     logging_obj.model_call_details["custom_llm_provider"] = "bedrock"
     logging_obj.model_call_details["endpoint"] = endpoint
     return logging_obj
@@ -637,6 +684,134 @@ def test_converse_stream_collector_keeps_usage_without_retaining_the_stream():
     assert response.choices[0].message.content == "".join(texts)
     assert response.choices[0].finish_reason == "stop"
     assert (response.usage.prompt_tokens, response.usage.completion_tokens) == (25, _LARGE_TOKENS)
+    assert (
+        litellm.completion_cost(
+            model=f"bedrock/{CONVERSE_MODEL}",
+            completion_response=response,
+        )
+        > 0
+    )
+
+
+def test_converse_stream_cut_before_usage_estimates_prompt_tokens_from_the_request():
+    logging_obj: Final = _converse_stream_logging_obj()
+    logging_obj.model_call_details["input"] = {
+        "system": [{"text": "You are a terse assistant."}],
+        "messages": [
+            {"role": "user", "content": [{"text": "Write a story about a lighthouse keeper."}]},
+            {
+                "role": "assistant",
+                "content": [{"toolUse": {"toolUseId": "t1", "name": "lookup", "input": {"query": "harbor log"}}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "toolResult": {
+                            "toolUseId": "t1",
+                            "content": [{"text": "calm water"}, {"json": {"wind": "steady"}}],
+                        }
+                    }
+                ],
+            },
+        ],
+    }
+    cut: Final = _converse_stream_collector()
+    _feed(cut, _event_frame("messageStart", {"role": "assistant"}) + _text_block(0, ["Once ", "upon"]))
+    response: Final = cut.build_logged_response(logging_obj)
+    assert isinstance(response, ModelResponse)
+    expected_messages: Final = [
+        {"role": "system", "content": "You are a terse assistant."},
+        {"role": "user", "content": "Write a story about a lighthouse keeper."},
+        {"role": "user", "content": '{"query": "harbor log"}'},
+        {"role": "user", "content": 'calm water\n{"wind": "steady"}'},
+    ]
+    assert response.usage.prompt_tokens == litellm.token_counter(model=logging_obj.model, messages=expected_messages)
+    assert response.usage.prompt_tokens > 0
+
+    for request_without_turns in ("not a Converse request", {"prompt": "a model-native invoke body"}):
+        logging_obj.model_call_details["input"] = request_without_turns
+        unestimated = cut.build_logged_response(logging_obj)
+        assert isinstance(unestimated, ModelResponse)
+        assert (unestimated.usage.prompt_tokens, unestimated.usage.completion_tokens) == (
+            0,
+            response.usage.completion_tokens,
+        ), request_without_turns
+
+    full: Final = _converse_stream_collector()
+    _feed(full, _converse_text_stream(["Once ", "upon"]))
+    full_response: Final = full.build_logged_response(logging_obj)
+    assert isinstance(full_response, ModelResponse)
+    assert full_response.usage.prompt_tokens == 25
+
+
+class _CaptureAsyncSuccessCallback(CustomLogger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.kwargs: dict[str, object] | None = None
+
+    async def async_log_success_event(
+        self, kwargs: dict[str, object], response_obj: object, start_time: object, end_time: object
+    ) -> None:
+        self.kwargs = kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "stream_kind"),
+    [
+        (CONVERSE_STREAM_ENDPOINT, "converse"),
+        (INVOKE_STREAM_ENDPOINT, "invoke"),
+    ],
+)
+async def test_bedrock_stream_passthrough_logs_cost_and_standard_metadata(endpoint: str, stream_kind: str) -> None:
+    callback: Final = _CaptureAsyncSuccessCallback()
+    logging_obj: Final = _stream_logging_obj(endpoint, [callback])
+    collector: Final = _stream_collector(endpoint)
+    stream: Final = (
+        _converse_text_stream(["Converse response"])
+        if stream_kind == "converse"
+        else _invoke_text_stream(["Invoke response"])
+    )
+    _feed(collector, stream, chunk_size=7)
+
+    await logging_obj.async_flush_passthrough_collected_chunks(collector=collector)
+
+    callback_kwargs: Final = callback.kwargs
+    assert callback_kwargs is not None
+    assert isinstance(callback_kwargs["response_cost"], (int, float)), logging_obj.model_call_details.get(
+        "response_cost_failure_debug_information"
+    )
+    assert callback_kwargs["response_cost"] > 0
+    standard_logging_object: Final = callback_kwargs["standard_logging_object"]
+    assert isinstance(standard_logging_object, dict)
+    assert standard_logging_object["model"] == f"bedrock/{CONVERSE_MODEL}"
+
+
+@pytest.mark.asyncio
+async def test_bedrock_stream_flush_says_whether_it_logged_the_stream() -> None:
+    stream: Final = _converse_text_stream(["Converse response"])
+    part_of_the_first_frame: Final = _stream_collector(CONVERSE_STREAM_ENDPOINT)
+    _feed(part_of_the_first_frame, stream[:12])
+    whole_stream: Final = _stream_collector(CONVERSE_STREAM_ENDPOINT)
+    _feed(whole_stream, stream)
+    nothing_logged: Final = _CaptureAsyncSuccessCallback()
+    logged: Final = _CaptureAsyncSuccessCallback()
+
+    assert (
+        await _stream_logging_obj(CONVERSE_STREAM_ENDPOINT, [nothing_logged]).async_flush_passthrough_collected_chunks(
+            collector=part_of_the_first_frame
+        )
+        is False
+    )
+    assert nothing_logged.kwargs is None
+    assert (
+        await _stream_logging_obj(CONVERSE_STREAM_ENDPOINT, [logged]).async_flush_passthrough_collected_chunks(
+            collector=whole_stream
+        )
+        is True
+    )
+    assert logged.kwargs is not None
 
 
 def test_converse_stream_collector_keeps_tool_calls_between_text_runs():
@@ -709,6 +884,13 @@ def test_invoke_stream_collector_keeps_usage_without_retaining_the_stream():
     assert response.choices[0].message.content == "".join(texts)
     assert response.choices[0].finish_reason == "stop"
     assert (response.usage.prompt_tokens, response.usage.completion_tokens) == (25, _LARGE_TOKENS)
+    assert (
+        litellm.completion_cost(
+            model=f"bedrock/{CONVERSE_MODEL}",
+            completion_response=response,
+        )
+        > 0
+    )
 
 
 def test_stream_collector_logs_nothing_for_an_unrecognized_endpoint():
@@ -718,3 +900,197 @@ def test_stream_collector_logs_nothing_for_an_unrecognized_endpoint():
     collector.add(_event_frame("messageStart", {"role": "assistant"}))
 
     assert collector.build_logged_response(_converse_stream_logging_obj()) is None
+
+
+CONVERSE_BODY = {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
+INVOKE_BODY = {
+    "anthropic_version": "bedrock-2023-05-31",
+    "max_tokens": 8,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+DEPLOYMENT_GUARDRAIL: Final[Mapping[str, str]] = {
+    "guardrailIdentifier": "deployment-guardrail",
+    "guardrailVersion": "3",
+    "trace": "enabled",
+    "streamProcessingMode": "sync",
+}
+DEPLOYMENT_INVOKE_GUARDRAIL_HEADERS: Final[Mapping[str, str]] = {
+    "x-amzn-bedrock-guardrailidentifier": "deployment-guardrail",
+    "x-amzn-bedrock-guardrailversion": "3",
+    "x-amzn-bedrock-trace": "ENABLED",
+}
+CALLER_GUARDRAIL: Final[Mapping[str, str]] = {
+    "guardrailIdentifier": "caller-guardrail",
+    "guardrailVersion": "9",
+    "trace": "disabled",
+}
+CALLER_INVOKE_GUARDRAIL_HEADERS: Final[Mapping[str, str]] = {
+    "x-pass-X-Amzn-Bedrock-GuardrailIdentifier": "caller-guardrail",
+    "x-pass-X-Amzn-Bedrock-GuardrailVersion": "9",
+    "x-pass-X-Amzn-Bedrock-Trace": "DISABLED",
+}
+
+
+async def _sent_passthrough_request(
+    action: str,
+    body: dict[str, object],
+    deployment_params: Mapping[str, object] = MappingProxyType({}),
+    **kwargs: object,
+) -> httpx.Request:
+    requests: Final[list[httpx.Request]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    router: Final = litellm.Router(
+        model_list=[
+            {
+                "model_name": "bedrock-pt",
+                "litellm_params": {
+                    "model": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "aws_access_key_id": "AKIAROUTERKEY",
+                    "aws_secret_access_key": "router-secret",
+                    "aws_region_name": "us-west-2",
+                    **deployment_params,
+                },
+            }
+        ]
+    )
+    await router.allm_passthrough_route(
+        model="bedrock-pt",
+        method="POST",
+        endpoint=f"/model/bedrock-pt/{action}",
+        data=body,
+        client=AsyncHTTPHandler(transport=httpx.MockTransport(respond)),
+        **kwargs,
+    )
+    return requests[0]
+
+
+def _signed_header_names(request: httpx.Request) -> frozenset[str]:
+    return frozenset(request.headers["authorization"].split("SignedHeaders=")[1].split(",")[0].split(";"))
+
+
+def _invoke_guardrail_headers(request: httpx.Request) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in request.headers.items()
+        if name.lower().startswith("x-amzn-bedrock-guardrail") or name.lower() == "x-amzn-bedrock-trace"
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "sent_guardrail"),
+    [
+        ("converse", {"guardrailIdentifier": "deployment-guardrail", "guardrailVersion": "3", "trace": "enabled"}),
+        ("converse-stream", DEPLOYMENT_GUARDRAIL),
+        ("converse/", {"guardrailIdentifier": "deployment-guardrail", "guardrailVersion": "3", "trace": "enabled"}),
+    ],
+)
+async def test_converse_passthrough_sends_the_deployment_guardrail_in_the_body(
+    action: str, sent_guardrail: Mapping[str, str]
+) -> None:
+    request: Final = await _sent_passthrough_request(
+        action, CONVERSE_BODY, deployment_params={"guardrailConfig": DEPLOYMENT_GUARDRAIL}
+    )
+
+    assert json.loads(request.content) == {**CONVERSE_BODY, "guardrailConfig": sent_guardrail}
+    assert _invoke_guardrail_headers(request) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["invoke", "invoke-with-response-stream"])
+async def test_invoke_passthrough_sends_the_deployment_guardrail_as_signed_headers(action: str) -> None:
+    request: Final = await _sent_passthrough_request(
+        action, INVOKE_BODY, deployment_params={"guardrailConfig": DEPLOYMENT_GUARDRAIL}
+    )
+
+    assert _invoke_guardrail_headers(request) == DEPLOYMENT_INVOKE_GUARDRAIL_HEADERS
+    assert set(DEPLOYMENT_INVOKE_GUARDRAIL_HEADERS) <= _signed_header_names(request)
+    assert json.loads(request.content) == INVOKE_BODY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "caller_guardrail"),
+    [("converse", CALLER_GUARDRAIL), ("converse-stream", {**CALLER_GUARDRAIL, "streamProcessingMode": "async"})],
+)
+async def test_deployment_guardrail_replaces_the_caller_converse_guardrail(
+    action: str, caller_guardrail: Mapping[str, str]
+) -> None:
+    request: Final = await _sent_passthrough_request(
+        action,
+        {**CONVERSE_BODY, "guardrailConfig": caller_guardrail},
+        deployment_params={"guardrailConfig": {"guardrailIdentifier": "deployment-guardrail"}},
+    )
+
+    assert json.loads(request.content) == {
+        **CONVERSE_BODY,
+        "guardrailConfig": {"guardrailIdentifier": "deployment-guardrail"},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["invoke", "invoke-with-response-stream"])
+async def test_deployment_guardrail_replaces_every_invoke_guardrail_header_the_caller_sent(action: str) -> None:
+    request: Final = await _sent_passthrough_request(
+        action,
+        INVOKE_BODY,
+        deployment_params={"guardrailConfig": {"guardrailIdentifier": "deployment-guardrail"}},
+        request_headers=CALLER_INVOKE_GUARDRAIL_HEADERS,
+    )
+
+    assert _invoke_guardrail_headers(request) == {"x-amzn-bedrock-guardrailidentifier": "deployment-guardrail"}
+    assert json.loads(request.content) == INVOKE_BODY
+
+
+@pytest.mark.asyncio
+async def test_passthrough_without_a_deployment_guardrail_sends_the_caller_guardrail_as_is() -> None:
+    caller_body: Final = {**CONVERSE_BODY, "guardrailConfig": CALLER_GUARDRAIL}
+
+    converse: Final = await _sent_passthrough_request("converse", caller_body)
+    invoke: Final = await _sent_passthrough_request(
+        "invoke", INVOKE_BODY, request_headers=CALLER_INVOKE_GUARDRAIL_HEADERS
+    )
+
+    assert json.loads(converse.content) == caller_body
+    assert _invoke_guardrail_headers(invoke) == {
+        "x-amzn-bedrock-guardrailidentifier": "caller-guardrail",
+        "x-amzn-bedrock-guardrailversion": "9",
+        "x-amzn-bedrock-trace": "DISABLED",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["invoke", "invoke-with-response-stream"])
+@pytest.mark.parametrize("guardrail_config", ["deployment-guardrail", {"guardrailVersion": "3"}])
+async def test_invoke_passthrough_refuses_a_deployment_guardrail_it_cannot_send(
+    action: str, guardrail_config: object
+) -> None:
+    with pytest.raises(BedrockError, match="guardrailConfig") as rejected:
+        await _sent_passthrough_request(action, INVOKE_BODY, deployment_params={"guardrailConfig": guardrail_config})
+
+    assert rejected.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_converse_passthrough_forwards_a_non_object_deployment_guardrail_unchanged() -> None:
+    request: Final = await _sent_passthrough_request(
+        "converse", CONVERSE_BODY, deployment_params={"guardrailConfig": "deployment-guardrail"}
+    )
+
+    assert json.loads(request.content) == {**CONVERSE_BODY, "guardrailConfig": "deployment-guardrail"}
+
+
+@pytest.mark.asyncio
+async def test_passthrough_leaves_actions_without_a_guardrail_field_as_sent() -> None:
+    count_tokens_body: Final = {"input": {"converse": CONVERSE_BODY}}
+
+    request: Final = await _sent_passthrough_request(
+        "count-tokens", count_tokens_body, deployment_params={"guardrailConfig": DEPLOYMENT_GUARDRAIL}
+    )
+
+    assert json.loads(request.content) == count_tokens_body
+    assert _invoke_guardrail_headers(request) == {}

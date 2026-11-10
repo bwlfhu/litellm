@@ -244,7 +244,7 @@ class ConverseTokenUsageBlock(TypedDict, total=False):
 
 
 class ServiceTierBlock(TypedDict):
-    type: Literal["priority", "default", "flex"]
+    type: Literal["priority", "default", "flex", "reserved"]
 
 
 class ConverseResponseBlock(TypedDict, total=False):
@@ -381,7 +381,7 @@ class ContentBlockDeltaEvent(TypedDict, total=False):
 
 
 class PerformanceConfigBlock(TypedDict):
-    latency: Literal["optimized", "throughput"]
+    latency: Literal["standard", "optimized"]
 
 
 class JsonSchemaDefinition(TypedDict, total=False):
