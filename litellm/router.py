@@ -3293,9 +3293,6 @@ class Router:
                     _response_headers=getattr(model_response, "_response_headers", None),
                 )
                 self._async_generator = async_generator
-                inner_chunks: Final[object] = getattr(model_response, "chunks", None)
-                if isinstance(inner_chunks, list):
-                    self.chunks = inner_chunks
                 # Preserve hidden params (including litellm_overhead_time_ms) from original response
                 model_response_hidden_params: Final = get_hidden_params(model_response)
                 if model_response_hidden_params is not None:

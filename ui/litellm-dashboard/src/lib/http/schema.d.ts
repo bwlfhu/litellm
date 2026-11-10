@@ -38459,18 +38459,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** ModelResult */
-        ModelResult: {
-            /** Content */
-            content: string;
-            /**
-             * Context Exceeded
-             * @default false
-             */
-            context_exceeded: boolean;
-            /** Cost */
-            cost: number;
-        };
         /** ModelStatusItem */
         ModelStatusItem: {
             cooldown: components["schemas"]["CooldownStatus"] | null;
@@ -54010,7 +53998,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LiteLLM_BudgetTable"];
                 };
             };
             /** @description Validation Error */
@@ -54074,7 +54062,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LiteLLM_BudgetTable"];
                 };
             };
             /** @description Validation Error */

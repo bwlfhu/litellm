@@ -18,6 +18,7 @@ from types import MappingProxyType
 from typing import Final
 
 from fastapi import APIRouter, Depends, HTTPException
+from prisma.models import LiteLLM_BudgetTable as BudgetResponse
 
 from litellm._internal_context import service_target
 from litellm._logging import verbose_proxy_logger
@@ -37,6 +38,7 @@ router: Final = APIRouter()
 
 @router.post(
     "/budget/new",
+    responses={200: {"model": BudgetResponse}},
     tags=["budget management"],
     dependencies=[Depends(user_api_key_auth)],
 )
@@ -121,6 +123,7 @@ async def new_budget(
 
 @router.post(
     "/budget/update",
+    responses={200: {"model": BudgetResponse}},
     tags=["budget management"],
     dependencies=[Depends(user_api_key_auth)],
 )

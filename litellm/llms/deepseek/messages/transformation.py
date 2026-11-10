@@ -1341,7 +1341,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         self,
         headers: dict[str, str],
         model: str,
-        messages: Sequence[Mapping[str, object]],
+        messages: Sequence[object],
         optional_params: Mapping[str, object],
         litellm_params: Mapping[str, object],
         api_key: str | None = None,
@@ -1361,7 +1361,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             headers=headers,
             optional_params=dict(optional_params),
             custom_llm_provider=self.custom_llm_provider or "deepseek",
-            messages=[dict(message) for message in messages],
+            messages=TypeAdapter(list[dict[str, object]]).validate_python(messages),
         )
 
         return TypeAdapter(dict[str, str]).validate_python(updated_headers), api_base

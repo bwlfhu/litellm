@@ -42,6 +42,9 @@ RUN curl -fsSL -o pgbouncer.tar.gz "https://www.pgbouncer.org/downloads/files/${
 FROM --platform=$BUILDPLATFORM $UI_BUILD_IMAGE AS ui-builder
 
 ARG NPM_REGISTRY
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 
 ENV NEXT_TELEMETRY_DISABLED=1 \
     npm_config_fund=false \
@@ -52,7 +55,8 @@ WORKDIR /ui
 
 COPY ui/litellm-dashboard/package.json ui/litellm-dashboard/package-lock.json ./
 COPY ui/litellm-dashboard/vendor/ ./vendor/
-RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline
+RUN --mount=type=cache,target=/root/.npm \
+    HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" NO_PROXY="${NO_PROXY}" npm ci --prefer-offline
 
 COPY ui/litellm-dashboard/ ./
 RUN npm run build

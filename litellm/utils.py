@@ -7099,12 +7099,9 @@ def function_to_dict(input_function) -> dict:
         "parameters": {
             "type": "object",
             "properties": parameters,
+            **({"required": required_params} if required_params else {}),
         },
     }
-
-    # Add "required" key if there are required parameters
-    if required_params:
-        result["parameters"]["required"] = required_params
 
     return result
 
