@@ -348,20 +348,25 @@ async def _sanitize_deepseek_messages_stream(
             pending.clear()
             pending.append(remainder)
             for event in events:
-                framed: Final = event + b"\n\n"
-                normalized_events: Final = normalizer.event(framed) if normalizer is not None else (framed,)
-                for normalized_event in normalized_events:
-                    if (
-                        sanitized_event := _sanitize_deepseek_sse_event(normalized_event, thinking_disabled)
-                    ) is not None:
-                        yield sanitized_event
+                for sanitized_event in _normalized_deepseek_sse_events(event, thinking_disabled, normalizer):
+                    yield sanitized_event
         if pending and pending[0]:
-            trailing_events: Final = normalizer.event(pending[0]) if normalizer is not None else (pending[0],)
-            for trailing in trailing_events:
-                if (trailing_event := _sanitize_deepseek_sse_event(trailing, thinking_disabled)) is not None:
-                    yield trailing_event
+            for trailing_event in _normalized_deepseek_sse_events(pending[0], thinking_disabled, normalizer):
+                yield trailing_event
     finally:
         await aclose_if_supported(completion_stream)
+
+
+def _normalized_deepseek_sse_events(
+    event: bytes, thinking_disabled: bool, normalizer: InlineThinkingStream | None
+) -> tuple[bytes, ...]:
+    framed: Final = event + b"\n\n"
+    normalized_events: Final = normalizer.event(framed) if normalizer is not None else (framed,)
+    return tuple(
+        sanitized
+        for normalized_event in normalized_events
+        if (sanitized := _sanitize_deepseek_sse_event(normalized_event, thinking_disabled)) is not None
+    )
 
 
 def _without_reasoning_content_fields(message: Mapping[str, object]) -> Mapping[str, object]:
@@ -1513,15 +1518,14 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS and key != "provider_specific_fields"
         }
         content: Final = response.get("content")
-        normalized_content: Final = (
-            normalize_inline_thinking_blocks(content)
-            if self._inline_thinking_tags and isinstance(content, list)
-            else content
+        content_sequence: Final[Sequence[object]] = (
+            _DEEPSEEK_SEQUENCE_ADAPTER.validate_python(content) if isinstance(content, list) else ()
         )
-        content_blocks: Final = (
-            _sanitize_deepseek_response_content_blocks(normalized_content, thinking_disabled=thinking_disabled)
-            if isinstance(normalized_content, (list, tuple))
-            else ()
+        normalized_content: Final = (
+            normalize_inline_thinking_blocks(content_sequence) if self._inline_thinking_tags else content_sequence
+        )
+        content_blocks: Final = _sanitize_deepseek_response_content_blocks(
+            normalized_content, thinking_disabled=thinking_disabled
         )
         has_thinking: Final = any(_is_nonempty_deepseek_thinking_block(block) for block in content_blocks)
         if (
