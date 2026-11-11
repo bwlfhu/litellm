@@ -2,20 +2,22 @@
 
 2026-11-10 已完成生产升级至官方 LiteLLM `v1.108.4`，保留现有定制并验证数据库、Chat、Messages、Responses、工具调用和管理 UI
 
+2026-11-11 追加第三方 DeepSeek thinking 边界修复，代码已进入 mainline。当前镜像由原生产镜像逐层叠加，最新一层仅替换 `inline_thinking.py`，没有调整依赖、UI 或数据库 schema。下文数据库迁移及全量升级验证记录来自 2026-11-10；本次补丁证据见 [thinking 边界修复记录](docs/upgrades/v1.108.4/THINKING_BOUNDARY_FIX.zh-CN.md)
+
 | 项目 | 当前生产值 |
 | --- | --- |
 | 官方版本 | `v1.108.4`，`e6f080fb5633aa71ea81b652bd72069aff1f0228` |
-| `mainline` 源码 | `acc2805bd23713d0495380b55593e43ac872c875` |
-| 镜像 | `registry.allcam.org/litellm/litellm:v1.108.4-custom.acc2805bd2` |
-| 镜像 digest | `sha256:76d1cf35674f06a9bf1e2ab289446c7f8145232d04b2eca0961a6bac892267e8` |
+| `mainline` 运行时代码 | `7e6da86645ab69c2f06ed9e9d9258da7da240358` |
+| 镜像 | `registry.allcam.org/litellm/litellm:v1.108.4-thinking-boundary.7e6da86645` |
+| 镜像 digest | `sha256:8f0644a5a655fbaacdccd1e350655cc96b79b4b4abf24f18b1ce71d621b3ebc1` |
 | LiteLLM / proxy extras / enterprise | `1.108.4` / `0.4.110` / `0.1.79.post1` |
 | Python / MCP | `3.13.18` / `2.3.0` |
 | Kubernetes | `litellm/litellm`，4 个副本 Ready，零重启 |
 | 数据库 | PostgreSQL 16.14，220 项成功迁移，无失败迁移或无效索引 |
 | 应用启动迁移 | `DISABLE_SCHEMA_UPDATE=true`，迁移通过独立 Job 执行 |
-| 回退镜像 | `v1.106.6-custom.plaintext-collaboration-r2@sha256:4235475a270adc636e4cfab47c1beed6d312180e1cd6da3c97496dcb4e74a6d0` |
+| 本次补丁回退镜像 | `v1.108.4-inline-thinking.86a96a07f9@sha256:c19be47258da691a6ce551ab930a05b18e5b51f9d280a3892006c733c4f474f0` |
 
-镜像由根 Dockerfile 完整构建，含 Python 依赖、Rust 扩展、Prisma 离线引擎和重新构建的 UI。四个 Pod 使用同一镜像 digest。发布采用 `maxSurge=1`、`maxUnavailable=0`，readiness 始终报告数据库已连接，滚动期间公网健康检查正常
+基础镜像由根 Dockerfile 完整构建，含 Python 依赖、Rust 扩展、Prisma 离线引擎和重新构建的 UI。thinking 修复继承这些内容。四个 Pod 使用同一镜像 digest。发布采用 `maxSurge=1`、`maxUnavailable=0`
 
 迁移前创建了完整 PostgreSQL 备份，大小约 3.9 GB，`pg_restore --list` 和每个备份文件的 SHA-256 校验均通过。备份保存在部署主机的升级证据目录，未加入仓库
 
