@@ -20,6 +20,7 @@ from litellm.llms.anthropic.pass_through.messages.transformation import (
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+from litellm.llms.deepseek.messages.inline_thinking import normalize_inline_thinking_blocks
 from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
     _sanitize_deepseek_messages_stream,
@@ -4717,3 +4718,151 @@ def test_deepseek_anthropic_messages_rejects_non_object_legacy_function_call(fun
             headers={},
         )
     assert error.value.status_code == 400
+
+
+def _inline_thinking_fixture(text: str) -> bytes:
+    payloads: Final = (
+        {"type": "message_start", "message": {"id": "msg_inline", "content": []}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": " "}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        *tuple(
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": char}} for char in text
+        ),
+        {"type": "content_block_stop", "index": 1},
+        {
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {"type": "tool_use", "id": "call_inline", "name": "inspect", "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {"type": "input_json_delta", "partial_json": '{"value":"<thinking>literal</thinking>"}'},
+        },
+        {"type": "content_block_stop", "index": 2},
+        {"type": "content_block_start", "index": 3, "content_block": {"type": "text", "text": "tail"}},
+        {"type": "content_block_stop", "index": 3},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}},
+        {"type": "message_stop"},
+    )
+    return b"".join(
+        f"event: {item['type']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n".encode() for item in payloads
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunk_size", [1, 17, 99999])
+@pytest.mark.parametrize("tag", ["thinking", "think"])
+async def test_inline_thinking_is_retyped_across_sse_and_tag_boundaries(chunk_size: int, tag: str) -> None:
+    wire: Final = _inline_thinking_fixture(f"<{tag}>先检查数据</{tag}>答案")
+
+    async def source():
+        for index in range(0, len(wire), chunk_size):
+            yield wire[index : index + chunk_size]
+
+    chunks: Final = [
+        chunk async for chunk in _sanitize_deepseek_messages_stream(source(), False, inline_thinking_tags=True)
+    ]
+    payloads: Final = [json.loads(line[6:]) for line in b"".join(chunks).splitlines() if line.startswith(b"data: ")]
+    starts: Final = tuple(item for item in payloads if item["type"] == "content_block_start")
+    assert tuple(item["index"] for item in starts) == (0, 1, 2, 3, 4)
+    assert tuple(item["content_block"]["type"] for item in starts) == (
+        "thinking",
+        "thinking",
+        "text",
+        "tool_use",
+        "text",
+    )
+    assert tuple(item["index"] for item in payloads if item["type"] == "content_block_stop") == (0, 1, 2, 3, 4)
+    assert "".join(item.get("delta", {}).get("thinking", "") for item in payloads) == " 先检查数据"
+    assert "".join(item.get("delta", {}).get("text", "") for item in payloads) == "答案tail"
+    assert tuple(item["delta"] for item in payloads if item.get("delta", {}).get("type") == "input_json_delta") == (
+        {"type": "input_json_delta", "partial_json": '{"value":"<thinking>literal</thinking>"}'},
+    )
+    assert payloads[-2:] == [
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}},
+        {"type": "message_stop"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thinking_disabled", [False, True])
+async def test_unclosed_inline_thinking_never_becomes_answer_text(thinking_disabled: bool) -> None:
+    async def source():
+        yield _inline_thinking_fixture("<thinking>unfinished private analysis")
+
+    output: Final = b"".join(
+        [chunk async for chunk in _sanitize_deepseek_messages_stream(source(), thinking_disabled, True)]
+    )
+    payloads: Final = [json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: ")]
+    assert "".join(item.get("delta", {}).get("text", "") for item in payloads) == "tail"
+    assert "".join(item.get("delta", {}).get("thinking", "") for item in payloads) == (
+        "" if thinking_disabled else " unfinished private analysis"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Example: <thinking>literal</thinking>", "```xml\n<thinking>literal</thinking>\n```", "<thi", ""],
+)
+def test_inline_normalization_preserves_body_examples_and_incomplete_openers(text: str) -> None:
+    content: Final = [{"type": "text", "text": text}]
+    assert normalize_inline_thinking_blocks(content) == tuple(content)
+
+
+@pytest.mark.asyncio
+async def test_inline_thinking_compat_is_opt_in() -> None:
+    async def source():
+        yield _inline_thinking_fixture("<thinking>visible without compatibility</thinking>Answer")
+
+    output: Final = b"".join([chunk async for chunk in _sanitize_deepseek_messages_stream(source(), False)])
+    payloads: Final = [json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: ")]
+    assert "".join(item.get("delta", {}).get("text", "") for item in payloads) == (
+        "<thinking>visible without compatibility</thinking>Answer"
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("thinking_disabled", [False, True])
+def test_inline_thinking_nonstream_response_matches_deployment_compat(enabled: bool, thinking_disabled: bool) -> None:
+    context: Final = build_deployment_protocol_context(
+        {"deepseek_anthropic_inline_thinking_tags": enabled, "reasoning_protocol": "deepseek_anthropic"}
+    )
+    assert context is not None
+    logger: Final = Logging(
+        model="deepseek-test",
+        messages=[{"role": "user", "content": "Hello"}],
+        stream=False,
+        call_type="anthropic_messages",
+        start_time=0,
+        litellm_call_id="inline-test",
+        function_id="inline-test",
+    )
+    logger.model_call_details["thinking"] = {"type": "disabled" if thinking_disabled else "enabled"}
+    response: Final = DeepSeekAnthropicMessagesConfig(
+        inline_thinking_tags=context.inline_thinking_tags,
+    ).transform_anthropic_messages_response(
+        model="deepseek-test",
+        raw_response=httpx.Response(
+            200,
+            json={
+                "id": "msg_inline",
+                "type": "message",
+                "role": "assistant",
+                "model": "deepseek-test",
+                "content": [{"type": "text", "text": "<thinking>Inspect data</thinking>Answer"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ),
+        logging_obj=logger,
+    )
+    assert response["content"] == (
+        [{"type": "text", "text": "<thinking>Inspect data</thinking>Answer"}]
+        if not enabled
+        else [{"type": "text", "text": "Answer"}]
+        if thinking_disabled
+        else [{"type": "thinking", "thinking": "Inspect data"}, {"type": "text", "text": "Answer"}]
+    )

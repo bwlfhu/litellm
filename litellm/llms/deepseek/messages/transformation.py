@@ -31,6 +31,7 @@ from litellm.llms.anthropic.pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
 from litellm.llms.deepseek.common_utils import deepseek_mapping, deepseek_sequence, warn_missing_reasoning_placeholders
+from litellm.llms.deepseek.messages.inline_thinking import InlineThinkingStream, normalize_inline_thinking_blocks
 from litellm.router_protocol import DeepSeekMissingReasoning
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
@@ -337,20 +338,35 @@ def _split_deepseek_sse_events(pending: Sequence[bytes], chunk: bytes) -> tuple[
 async def _sanitize_deepseek_messages_stream(
     completion_stream: AsyncIterator[bytes],
     thinking_disabled: bool,
+    inline_thinking_tags: bool = False,
 ) -> AsyncIterator[bytes]:
     pending: Final[list[bytes]] = []  # mutable-ok: incremental SSE parsing needs a retained byte buffer
+    normalizer: Final = InlineThinkingStream() if inline_thinking_tags else None
     try:
         async for chunk in completion_stream:
             remainder, events = _split_deepseek_sse_events(pending, chunk)
             pending.clear()
             pending.append(remainder)
             for event in events:
-                if (sanitized_event := _sanitize_deepseek_sse_event(event + b"\n\n", thinking_disabled)) is not None:
+                for sanitized_event in _normalized_deepseek_sse_events(event, thinking_disabled, normalizer):
                     yield sanitized_event
-        if pending and pending[0] and (trailing_event := _sanitize_deepseek_sse_event(pending[0], thinking_disabled)):
-            yield trailing_event
+        if pending and pending[0]:
+            for trailing_event in _normalized_deepseek_sse_events(pending[0], thinking_disabled, normalizer):
+                yield trailing_event
     finally:
         await aclose_if_supported(completion_stream)
+
+
+def _normalized_deepseek_sse_events(
+    event: bytes, thinking_disabled: bool, normalizer: InlineThinkingStream | None
+) -> tuple[bytes, ...]:
+    framed: Final = event + b"\n\n"
+    normalized_events: Final = normalizer.event(framed) if normalizer is not None else (framed,)
+    return tuple(
+        sanitized
+        for normalized_event in normalized_events
+        if (sanitized := _sanitize_deepseek_sse_event(normalized_event, thinking_disabled)) is not None
+    )
 
 
 def _without_reasoning_content_fields(message: Mapping[str, object]) -> Mapping[str, object]:
@@ -1306,10 +1322,12 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         messages_path: Literal["anthropic/v1/messages", "v1/messages"] | None = None,
         tool_thinking: Literal["disabled"] | None = None,
         missing_reasoning: DeepSeekMissingReasoning | None = None,
+        inline_thinking_tags: bool = False,
     ) -> None:
         self._messages_path = messages_path
         self._tool_thinking = tool_thinking
         self._missing_reasoning: DeepSeekMissingReasoning | None = missing_reasoning
+        self._inline_thinking_tags = inline_thinking_tags
 
     @property
     def custom_llm_provider(self) -> str | None:
@@ -1461,7 +1479,11 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         )
         thinking: Final = deepseek_mapping(request_body.get("thinking"))
         thinking_disabled: Final = thinking is not None and thinking.get("type") == "disabled"
-        return _sanitize_deepseek_messages_stream(completion_stream, thinking_disabled=thinking_disabled)
+        return _sanitize_deepseek_messages_stream(
+            completion_stream,
+            thinking_disabled=thinking_disabled,
+            inline_thinking_tags=self._inline_thinking_tags,
+        )
 
     def transform_anthropic_messages_response(
         self,
@@ -1496,10 +1518,14 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             if key not in _DEEPSEEK_INTERNAL_REASONING_FIELDS and key != "provider_specific_fields"
         }
         content: Final = response.get("content")
-        content_blocks: Final = (
-            _sanitize_deepseek_response_content_blocks(content, thinking_disabled=thinking_disabled)
-            if isinstance(content, list)
-            else ()
+        content_sequence: Final[Sequence[object]] = (
+            _DEEPSEEK_SEQUENCE_ADAPTER.validate_python(content) if isinstance(content, list) else ()
+        )
+        normalized_content: Final = (
+            normalize_inline_thinking_blocks(content_sequence) if self._inline_thinking_tags else content_sequence
+        )
+        content_blocks: Final = _sanitize_deepseek_response_content_blocks(
+            normalized_content, thinking_disabled=thinking_disabled
         )
         has_thinking: Final = any(_is_nonempty_deepseek_thinking_block(block) for block in content_blocks)
         if (

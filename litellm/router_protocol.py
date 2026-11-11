@@ -17,6 +17,7 @@ class _RouterDeploymentProtocolContext:
     owner: object
     tool_thinking: _DeepSeekAnthropicToolThinking | None = None
     missing_reasoning: DeepSeekMissingReasoning | None = None
+    inline_thinking_tags: bool = False
 
 
 def build_deployment_protocol_context(model_info: object) -> _RouterDeploymentProtocolContext | None:
@@ -32,6 +33,7 @@ def build_deployment_protocol_context(model_info: object) -> _RouterDeploymentPr
         else None
     )
     tool_thinking: Final = "disabled" if fields.get("deepseek_anthropic_tool_thinking") == "disabled" else None
+    inline_thinking_tags: Final = fields.get("deepseek_anthropic_inline_thinking_tags") is True
     requested_missing_reasoning: Final[object] = fields.get("deepseek_anthropic_missing_reasoning")
     missing_reasoning: Final[DeepSeekMissingReasoning | None] = (
         "placeholder"
@@ -47,6 +49,7 @@ def build_deployment_protocol_context(model_info: object) -> _RouterDeploymentPr
         and normalized_messages_path is None
         and tool_thinking is None
         and missing_reasoning is None
+        and not inline_thinking_tags
     ):
         return None
     return _RouterDeploymentProtocolContext(
@@ -55,6 +58,7 @@ def build_deployment_protocol_context(model_info: object) -> _RouterDeploymentPr
         owner=_PROTOCOL_CONTEXT_OWNER,
         tool_thinking=tool_thinking,
         missing_reasoning=missing_reasoning,
+        inline_thinking_tags=inline_thinking_tags,
     )
 
 
