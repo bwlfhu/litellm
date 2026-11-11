@@ -4788,6 +4788,51 @@ async def test_inline_thinking_is_retyped_across_sse_and_tag_boundaries(chunk_si
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("chunk_size", [1, 17, 99999])
+@pytest.mark.parametrize("tag", ["thinking", "think"])
+async def test_missing_opening_angle_is_retyped_only_after_matching_close(chunk_size: int, tag: str) -> None:
+    analysis: Final = "Good. 先检查数据。" * 40
+    wire: Final = _inline_thinking_fixture(f"<{tag}{analysis}</{tag}>Answer")
+
+    async def source():
+        for index in range(0, len(wire), chunk_size):
+            yield wire[index : index + chunk_size]
+
+    output: Final = b"".join(
+        [chunk async for chunk in _sanitize_deepseek_messages_stream(source(), False, inline_thinking_tags=True)]
+    )
+    payloads: Final = [json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: ")]
+    assert "".join(item.get("delta", {}).get("thinking", "") for item in payloads) == " " + analysis
+    assert "".join(item.get("delta", {}).get("text", "") for item in payloads) == "Answertail"
+    assert tuple(item["index"] for item in payloads if item["type"] == "content_block_start") == (0, 1, 2, 3, 4)
+    assert tuple(item["index"] for item in payloads if item["type"] == "content_block_stop") == (0, 1, 2, 3, 4)
+    assert tuple(item["delta"] for item in payloads if item.get("delta", {}).get("type") == "input_json_delta") == (
+        {"type": "input_json_delta", "partial_json": '{"value":"<thinking>literal</thinking>"}'},
+    )
+    assert normalize_inline_thinking_blocks([{"type": "text", "text": f"<{tag}{analysis}</{tag}>Answer"}]) == (
+        {"type": "thinking", "thinking": analysis},
+        {"type": "text", "text": "Answer"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text", ["<thinkingExample>literal</thinkingExample>", "<thinkpad>device</thinkpad>", "<thinkingGood"]
+)
+async def test_unmatched_malformed_prefix_preserves_literal_text(text: str) -> None:
+    async def source():
+        yield _inline_thinking_fixture(text)
+
+    output: Final = b"".join(
+        [chunk async for chunk in _sanitize_deepseek_messages_stream(source(), False, inline_thinking_tags=True)]
+    )
+    payloads: Final = [json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: ")]
+    assert "".join(item.get("delta", {}).get("text", "") for item in payloads) == text + "tail"
+    assert "".join(item.get("delta", {}).get("thinking", "") for item in payloads) == " "
+    assert normalize_inline_thinking_blocks([{"type": "text", "text": text}]) == ({"type": "text", "text": text},)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("thinking_disabled", [False, True])
 async def test_unclosed_inline_thinking_never_becomes_answer_text(thinking_disabled: bool) -> None:
     async def source():

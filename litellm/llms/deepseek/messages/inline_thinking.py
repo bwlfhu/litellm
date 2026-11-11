@@ -1,5 +1,6 @@
 import json
 from collections.abc import Mapping, Sequence
+from io import StringIO
 from itertools import chain
 from typing import Final, Literal
 
@@ -11,7 +12,29 @@ _TAGS: Final = (("<thinking>", "</thinking>"), ("<think>", "</think>"))
 
 def _opening_tag(text: str) -> tuple[str, str] | None:
     stripped: Final = text.lstrip().lower()
-    return next((pair for pair in _TAGS if stripped.startswith(pair[0])), None)
+    complete: Final = next((pair for pair in _TAGS if stripped.startswith(pair[0])), None)
+    if complete is not None:
+        return complete
+    return next(
+        (
+            (opening[:-1], closing)
+            for opening, closing in _TAGS
+            if stripped.startswith(opening[:-1]) and closing in stripped
+        ),
+        None,
+    )
+
+
+def _pending_opening_tag(text: str) -> bool:
+    stripped: Final = text.lstrip().lower()
+    return any(opening.startswith(stripped) for opening, _ in _TAGS)
+
+
+def _malformed_opening_tag(text: str) -> tuple[str, str] | None:
+    stripped: Final = text.lstrip().lower()
+    if _pending_opening_tag(text):
+        return None
+    return next((pair for pair in _TAGS if stripped.startswith(pair[0][:-1])), None)
 
 
 def normalize_inline_thinking_blocks(content: Sequence[object]) -> tuple[object, ...]:
@@ -44,11 +67,13 @@ class InlineThinkingStream:
         self._input_index: int | None = None
         self._output_index = 0
         self._template: Mapping[str, object] = {}
-        self._mode: Literal["prefix", "thinking", "text"] = "prefix"
+        self._mode: Literal["prefix", "candidate", "thinking", "text"] = "prefix"
         self._pending = ""
         self._closing = ""
         self._open = False
         self._emitted = 0
+        self._candidate = StringIO()
+        self._candidate_prefix = ""
 
     def event(self, event: bytes) -> tuple[bytes, ...]:
         lines: Final = event.splitlines()
@@ -89,6 +114,7 @@ class InlineThinkingStream:
             self._pending = ""
             self._open = False
             self._emitted = 0
+            self._candidate = StringIO()
             initial: Final = block.get("text")
             return self._feed(initial if isinstance(initial, str) else "")
         if index == self._input_index and self._input_index is not None:
@@ -146,15 +172,18 @@ class InlineThinkingStream:
         self._pending += text
         if self._mode == "prefix":
             opening: Final = _opening_tag(self._pending)
+            malformed: Final = _malformed_opening_tag(self._pending)
             if opening is not None:
                 self._mode = "thinking"
                 self._closing = opening[1]
                 self._pending = self._pending.lstrip()[len(opening[0]) :]
-            elif (
-                not final
-                and len(self._pending) < 64
-                and any(tag.startswith(self._pending.lstrip().lower()) for tag, _ in _TAGS)
-            ):
+            elif malformed is not None:
+                self._mode = "candidate"
+                self._closing = malformed[1]
+                prefix_size: Final = len(self._pending) - len(self._pending.lstrip()) + len(malformed[0]) - 1
+                self._candidate_prefix = self._pending[:prefix_size]
+                self._pending = self._pending[prefix_size:]
+            elif not final and _pending_opening_tag(self._pending):
                 return ()
             else:
                 self._mode = "text"
@@ -164,7 +193,8 @@ class InlineThinkingStream:
             return self._delta(pending_text, "text")
         closing: Final = self._pending.lower().find(self._closing)
         if closing >= 0:
-            reasoning: Final = self._delta(self._pending[:closing], "thinking")
+            candidate_text: Final = self._candidate.getvalue() if self._mode == "candidate" else ""
+            reasoning: Final = self._delta(candidate_text + self._pending[:closing], "thinking")
             stop: Final = self._close()
             self._pending = self._pending[closing + len(self._closing) :]
             self._mode = "text"
@@ -172,4 +202,10 @@ class InlineThinkingStream:
         retained: Final = 0 if final else len(self._closing) - 1
         emitted: Final = self._pending if retained == 0 else self._pending[:-retained]
         self._pending = "" if retained == 0 else self._pending[-retained:]
+        if self._mode == "candidate":
+            self._candidate.write(emitted)
+            if not final:
+                return ()
+            self._mode = "text"
+            return self._delta(self._candidate_prefix + self._candidate.getvalue(), "text")
         return self._delta(emitted, "thinking")
