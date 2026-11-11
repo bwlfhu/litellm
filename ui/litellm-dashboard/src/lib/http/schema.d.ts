@@ -27314,7 +27314,7 @@ export interface components {
         /** BlockUsersResponse */
         BlockUsersResponse: {
             /** Blocked Users */
-            blocked_users: components["schemas"]["LiteLLM_EndUserTable"][];
+            blocked_users: components["schemas"]["litellm__models__end_user__LiteLLM_EndUserTable"][];
         };
         /**
          * BlockedWord
@@ -31254,7 +31254,7 @@ export interface components {
             litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTableFull"] | null;
             /** Models */
             models?: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /**
@@ -34063,40 +34063,93 @@ export interface components {
          */
         LiteLLMKeyType: "llm_api" | "management" | "read_only" | "default";
         /**
-         * LiteLLM_BudgetTable
-         * @description Represents user-controllable params for a LiteLLM_BudgetTable record.
-         *
-         *     Budget-write paths use `model_fields.keys()` on this class as an allowlist
-         *     for user input. Keep server-managed fields (e.g. `budget_reset_at`) on
-         *     `LiteLLM_BudgetTableFull` so they aren't user-settable.
+         * LiteLLM_AgentIdentity
+         * @description Represents a LiteLLM_AgentIdentity record
          */
-        LiteLLM_BudgetTable: {
-            /** Allowed Models */
-            allowed_models?: string[] | null;
-            /** Budget Duration */
-            budget_duration?: string | null;
-            /** Budget Id */
-            budget_id?: string | null;
-            /** Max Budget */
-            max_budget?: number | null;
-            /** Max Parallel Requests */
-            max_parallel_requests?: number | null;
-            /** Model Max Budget */
-            model_max_budget?: {
-                [key: string]: unknown;
-            } | null;
+        LiteLLM_AgentIdentity: {
+            /** Active */
+            active: boolean;
+            agent?: components["schemas"]["LiteLLM_AgentsTable"] | null;
+            /** Agent Id */
+            agent_id: string;
+            /** Client Id */
+            client_id: string;
+            /** Issuer */
+            issuer: string;
+            /** Last Authenticated At */
+            last_authenticated_at?: string | null;
+            /** Provider */
+            provider: string;
+            /** Required Roles */
+            required_roles: string[];
+            /** Required Scopes */
+            required_scopes: string[];
+            /** Revision */
+            revision: string;
+            /** Service Principal Id */
+            service_principal_id?: string | null;
+            /** Tenant Id */
+            tenant_id: string;
+        };
+        /**
+         * LiteLLM_AgentsTable
+         * @description Represents a LiteLLM_AgentsTable record
+         */
+        LiteLLM_AgentsTable: {
+            /** Access Group Ids */
+            access_group_ids: string[];
+            /** Agent Access Groups */
+            agent_access_groups: string[];
+            /** Agent Card Params */
+            agent_card_params: unknown;
+            /** Agent Id */
+            agent_id: string;
+            /** Agent Name */
+            agent_name: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Execution Mode */
+            execution_mode: string;
+            /** Extra Headers */
+            extra_headers: string[];
+            identity?: components["schemas"]["LiteLLM_AgentIdentity"] | null;
+            /** Identity Managed */
+            identity_managed: boolean;
+            /** Kill Switch */
+            kill_switch?: unknown | null;
+            /** Litellm Params */
+            litellm_params?: unknown | null;
+            object_permission?: components["schemas"]["prisma__models__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Retired Identities */
+            retired_identities?: components["schemas"]["LiteLLM_RetiredAgentIdentity"][] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
-            /** Soft Budget */
-            soft_budget?: number | null;
-            /** Temp Budget Expiry */
-            temp_budget_expiry?: string | null;
-            /** Temp Budget Increase */
-            temp_budget_increase?: number | null;
-            /** Tpd Limit */
-            tpd_limit?: number | null;
+            /** Session Rpm Limit */
+            session_rpm_limit?: number | null;
+            /** Session Tpm Limit */
+            session_tpm_limit?: number | null;
+            /** Spend */
+            spend: number;
+            /** Static Headers */
+            static_headers?: unknown | null;
             /** Tpm Limit */
             tpm_limit?: number | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
         };
         /**
          * LiteLLM_BudgetTableFull
@@ -34179,7 +34232,7 @@ export interface components {
             id?: string | null;
             /** Litellm Changed By */
             litellm_changed_by?: string | null;
-            litellm_model_table?: components["schemas"]["LiteLLM_ModelTable"] | null;
+            litellm_model_table?: components["schemas"]["litellm__models__team__LiteLLM_ModelTable"] | null;
             /** Max Budget */
             max_budget?: number | null;
             /** Max Parallel Requests */
@@ -34219,7 +34272,7 @@ export interface components {
              * @default []
              */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Organization Id */
@@ -34368,7 +34421,7 @@ export interface components {
              * @default []
              */
             models: unknown[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Org Id */
@@ -34429,31 +34482,76 @@ export interface components {
             /** User Id */
             user_id?: string | null;
         };
-        /** LiteLLM_EndUserTable */
-        LiteLLM_EndUserTable: {
-            /** Alias */
-            alias?: string | null;
-            /** Allowed Model Region */
-            allowed_model_region?: ("eu" | "us") | null;
-            /** Blocked */
-            blocked: boolean;
-            /** Budget Id */
-            budget_id?: string | null;
-            /** Default Model */
-            default_model?: string | null;
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTable"] | null;
-            /** Models */
-            models?: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
-            /** Object Permission Id */
-            object_permission_id?: string | null;
+        /**
+         * LiteLLM_InvitationLink
+         * @description Represents a LiteLLM_InvitationLink record
+         */
+        LiteLLM_InvitationLink: {
+            /** Accepted At */
+            accepted_at?: string | null;
             /**
-             * Spend
-             * @default 0
+             * Created At
+             * Format: date-time
              */
-            spend: number;
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Id */
+            id: string;
+            /** Is Accepted */
+            is_accepted: boolean;
+            liteLLM_user_table_created?: components["schemas"]["prisma__models__LiteLLM_UserTable"] | null;
+            liteLLM_user_table_updated?: components["schemas"]["prisma__models__LiteLLM_UserTable"] | null;
+            liteLLM_user_table_user?: components["schemas"]["prisma__models__LiteLLM_UserTable"] | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
             /** User Id */
             user_id: string;
+        };
+        /**
+         * LiteLLM_JWTKeyMapping
+         * @description Represents a LiteLLM_JWTKeyMapping record
+         */
+        LiteLLM_JWTKeyMapping: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Id */
+            id: string;
+            /** Is Active */
+            is_active: boolean;
+            /** Jwt Claim Name */
+            jwt_claim_name: string;
+            /** Jwt Claim Value */
+            jwt_claim_value: string;
+            /** Jwt Issuer */
+            jwt_issuer: string;
+            litellm_verification_token?: components["schemas"]["prisma__models__LiteLLM_VerificationToken"] | null;
+            /** Token */
+            token: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by?: string | null;
         };
         /**
          * LiteLLM_MCPServerTable
@@ -34760,19 +34858,32 @@ export interface components {
             /** Value */
             value: string;
         };
-        /** LiteLLM_ModelTable */
-        LiteLLM_ModelTable: {
+        /**
+         * LiteLLM_ModelAccessGroupBudgetTable
+         * @description Represents a LiteLLM_ModelAccessGroupBudgetTable record
+         */
+        LiteLLM_ModelAccessGroupBudgetTable: {
+            /** Access Group Name */
+            access_group_name: string;
+            /** Budget Id */
+            budget_id?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
             /** Created By */
-            created_by: string;
-            /** Id */
-            id?: number | null;
-            /** Model Aliases */
-            model_aliases?: string | {
-                [key: string]: unknown;
-            } | null;
-            team?: components["schemas"]["LiteLLM_TeamTable"] | null;
+            created_by?: string | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            /** Spend */
+            spend: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
             /** Updated By */
-            updated_by: string;
+            updated_by?: string | null;
         };
         /** LiteLLM_ObjectPermissionBase */
         LiteLLM_ObjectPermissionBase: {
@@ -34804,62 +34915,27 @@ export interface components {
             vector_stores?: string[] | null;
         };
         /**
-         * LiteLLM_ObjectPermissionTable
-         * @description Represents a LiteLLM_ObjectPermissionTable record
+         * LiteLLM_OrganizationMembership
+         * @description Represents a LiteLLM_OrganizationMembership record
          */
-        LiteLLM_ObjectPermissionTable: {
-            /**
-             * Agent Access Groups
-             * @default []
-             */
-            agent_access_groups: string[] | null;
-            /**
-             * Agents
-             * @default []
-             */
-            agents: string[] | null;
-            /**
-             * Blocked Tools
-             * @default []
-             */
-            blocked_tools: string[] | null;
-            /**
-             * Mcp Access Groups
-             * @default []
-             */
-            mcp_access_groups: string[] | null;
-            /**
-             * Mcp Servers
-             * @default []
-             */
-            mcp_servers: string[] | null;
-            /** Mcp Tool Permissions */
-            mcp_tool_permissions?: {
-                [key: string]: string[];
-            } | null;
-            /** Mcp Tool Search Enabled */
-            mcp_tool_search_enabled?: boolean | null;
-            /** Mcp Toolsets */
-            mcp_toolsets?: string[] | null;
-            /**
-             * Models
-             * @default []
-             */
-            models: string[] | null;
-            /** Object Permission Id */
-            object_permission_id: string;
-            /**
-             * Search Tools
-             * @default []
-             */
-            search_tools: string[] | null;
-            /** Skills */
-            skills?: string[] | null;
-            /**
-             * Vector Stores
-             * @default []
-             */
-            vector_stores: string[] | null;
+        LiteLLM_OrganizationMembership: {
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            organization?: components["schemas"]["LiteLLM_OrganizationTable"] | null;
+            /** Organization Id */
+            organization_id: string;
+            /** Spend */
+            spend?: number | null;
+            /** Updated At */
+            updated_at?: string | null;
+            user?: components["schemas"]["prisma__models__LiteLLM_UserTable"] | null;
+            /** User Id */
+            user_id: string;
+            /** User Role */
+            user_role?: string | null;
         };
         /**
          * LiteLLM_OrganizationMembershipTable
@@ -34873,7 +34949,7 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTable"] | null;
+            litellm_budget_table?: components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
             /** Organization Id */
             organization_id: string;
             /**
@@ -34896,6 +34972,52 @@ export interface components {
             user_role?: string | null;
         };
         /**
+         * LiteLLM_OrganizationTable
+         * @description Represents a LiteLLM_OrganizationTable record
+         */
+        LiteLLM_OrganizationTable: {
+            /** Budget Id */
+            budget_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Keys */
+            keys?: components["schemas"]["prisma__models__LiteLLM_VerificationToken"][] | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            /** Members */
+            members?: components["schemas"]["LiteLLM_OrganizationMembership"][] | null;
+            /** Metadata */
+            metadata: unknown;
+            /** Model Spend */
+            model_spend: unknown;
+            /** Models */
+            models: string[];
+            object_permission?: components["schemas"]["prisma__models__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Organization Alias */
+            organization_alias: string;
+            /** Organization Id */
+            organization_id: string;
+            /** Spend */
+            spend: number;
+            /** Teams */
+            teams?: components["schemas"]["prisma__models__LiteLLM_TeamTable"][] | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
+            /** Users */
+            users?: components["schemas"]["prisma__models__LiteLLM_UserTable"][] | null;
+        };
+        /**
          * LiteLLM_OrganizationTableWithMembers
          * @description Returned by the /organization/info endpoint and /organization/list endpoint
          */
@@ -34909,7 +35031,7 @@ export interface components {
             created_at: string;
             /** Created By */
             created_by: string;
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTable"] | null;
+            litellm_budget_table?: components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
             /**
              * Members
              * @default []
@@ -34931,7 +35053,7 @@ export interface components {
              * @default []
              */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Organization Alias */
@@ -34947,7 +35069,7 @@ export interface components {
              * Teams
              * @default []
              */
-            teams: components["schemas"]["LiteLLM_TeamTable"][];
+            teams: components["schemas"]["litellm__models__team__LiteLLM_TeamTable"][];
             /**
              * Updated At
              * Format: date-time
@@ -34956,7 +35078,7 @@ export interface components {
             /** Updated By */
             updated_by: string;
             /** Users */
-            users?: components["schemas"]["LiteLLM_UserTable"][] | null;
+            users?: components["schemas"]["litellm__models__user__LiteLLM_UserTable"][] | null;
         };
         /**
          * LiteLLM_Params
@@ -35537,65 +35659,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * LiteLLM_ProjectTable
-         * @description Database model representation for project
-         */
-        LiteLLM_ProjectTable: {
-            /**
-             * Blocked
-             * @default false
-             */
-            blocked: boolean;
-            /** Budget Id */
-            budget_id?: string | null;
-            /** Created At */
-            created_at?: string | null;
-            /** Created By */
-            created_by?: string | null;
-            /** Description */
-            description?: string | null;
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTable"] | null;
-            /** Metadata */
-            metadata?: {
-                [key: string]: unknown;
-            } | null;
-            /** Model Rpm Limit */
-            model_rpm_limit?: {
-                [key: string]: unknown;
-            } | null;
-            /** Model Spend */
-            model_spend?: {
-                [key: string]: unknown;
-            } | null;
-            /** Model Tpm Limit */
-            model_tpm_limit?: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Models
-             * @default []
-             */
-            models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
-            /** Object Permission Id */
-            object_permission_id?: string | null;
-            /** Project Alias */
-            project_alias?: string | null;
-            /** Project Id */
-            project_id: string;
-            /**
-             * Spend
-             * @default 0
-             */
-            spend: number;
-            /** Team Id */
-            team_id?: string | null;
-            /** Updated At */
-            updated_at?: string | null;
-            /** Updated By */
-            updated_by?: string | null;
-        };
         /** LiteLLM_ProxyModelTable */
         LiteLLM_ProxyModelTable: {
             /**
@@ -35623,6 +35686,25 @@ export interface components {
             updated_at?: string | null;
             /** Updated By */
             updated_by?: string | null;
+        };
+        /**
+         * LiteLLM_RetiredAgentIdentity
+         * @description Represents a LiteLLM_RetiredAgentIdentity record
+         */
+        LiteLLM_RetiredAgentIdentity: {
+            agent?: components["schemas"]["LiteLLM_AgentsTable"] | null;
+            /** Agent Id */
+            agent_id?: string | null;
+            /** Binding Id */
+            binding_id: string;
+            /** Client Id */
+            client_id: string;
+            /** Issuer */
+            issuer: string;
+            /** Provider */
+            provider: string;
+            /** Tenant Id */
+            tenant_id: string;
         };
         /** LiteLLM_SpendLogs */
         LiteLLM_SpendLogs: {
@@ -35700,125 +35782,36 @@ export interface components {
              */
             user: string | null;
         };
-        /** LiteLLM_TeamMembership */
-        LiteLLM_TeamMembership: {
+        /**
+         * LiteLLM_TagTable
+         * @description Represents a LiteLLM_TagTable record
+         */
+        LiteLLM_TagTable: {
             /** Budget Id */
             budget_id?: string | null;
-            /** Litellm Budget Table */
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTableFull"] | components["schemas"]["LiteLLM_BudgetTable"] | null;
             /**
-             * Spend
-             * @default 0
+             * Created At
+             * Format: date-time
              */
-            spend: number | null;
-            /** Team Id */
-            team_id: string;
-            /**
-             * Total Spend
-             * @default 0
-             */
-            total_spend: number | null;
-            /** User Id */
-            user_id: string;
-        };
-        /** LiteLLM_TeamTable */
-        LiteLLM_TeamTable: {
-            /** Access Group Ids */
-            access_group_ids?: string[] | null;
-            /**
-             * Admins
-             * @default []
-             */
-            admins: string[];
-            /**
-             * Allow Team Guardrail Config
-             * @default false
-             */
-            allow_team_guardrail_config: boolean | null;
-            /**
-             * Blocked
-             * @default false
-             */
-            blocked: boolean;
-            /** Budget Duration */
-            budget_duration?: string | null;
-            /** Budget Limits */
-            budget_limits?: components["schemas"]["BudgetLimitEntry"][] | null;
-            /** Budget Reset At */
-            budget_reset_at?: string | null;
-            /** Created At */
-            created_at?: string | null;
-            /** Default Team Member Models */
-            default_team_member_models?: string[] | null;
-            litellm_model_table?: components["schemas"]["LiteLLM_ModelTable"] | null;
-            /** Max Budget */
-            max_budget?: number | null;
-            /** Max Parallel Requests */
-            max_parallel_requests?: number | null;
-            /**
-             * Members
-             * @default []
-             */
-            members: string[];
-            /**
-             * Members With Roles
-             * @default []
-             */
-            members_with_roles: components["schemas"]["Member"][];
-            /** Metadata */
-            metadata?: {
-                [key: string]: unknown;
-            } | null;
-            /** Model Id */
-            model_id?: number | null;
-            /**
-             * Model Max Budget
-             * @default {}
-             */
-            model_max_budget: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Model Spend
-             * @default {}
-             */
-            model_spend: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Models
-             * @default []
-             */
+            created_at: string;
+            /** Created By */
+            created_by?: string | null;
+            /** Description */
+            description?: string | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            /** Model Info */
+            model_info?: unknown | null;
+            /** Models */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
-            /** Object Permission Id */
-            object_permission_id?: string | null;
-            /** Organization Id */
-            organization_id?: string | null;
-            /** Policies */
-            policies?: string[] | null;
-            /** Router Settings */
-            router_settings?: {
-                [key: string]: unknown;
-            } | null;
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /** Soft Budget */
-            soft_budget?: number | null;
             /** Spend */
-            spend?: number | null;
-            /** Team Alias */
-            team_alias?: string | null;
-            /** Team Id */
-            team_id: string;
-            /** Team Member Permissions */
-            team_member_permissions?: string[] | null;
-            /** Tpd Limit */
-            tpd_limit?: number | null;
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Updated At */
-            updated_at?: string | null;
+            spend: number;
+            /** Tag Name */
+            tag_name: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** LiteLLM_ToolTableRow */
         LiteLLM_ToolTableRow: {
@@ -35868,91 +35861,6 @@ export interface components {
             user?: components["schemas"]["ToolDiscoveryUser"] | null;
             /** User Agent */
             user_agent?: string | null;
-        };
-        /** LiteLLM_UserTable */
-        LiteLLM_UserTable: {
-            /**
-             * Allowed Cache Controls
-             * @default []
-             */
-            allowed_cache_controls: string[];
-            /** Budget Duration */
-            budget_duration?: string | null;
-            /** Budget Reset At */
-            budget_reset_at?: string | null;
-            /** Created At */
-            created_at?: string | null;
-            /** Last Breach Check At */
-            last_breach_check_at?: string | null;
-            /** Max Budget */
-            max_budget?: number | null;
-            /** Max Parallel Requests */
-            max_parallel_requests?: number | null;
-            /** Metadata */
-            metadata?: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Model Max Budget
-             * @default {}
-             */
-            model_max_budget: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Model Spend
-             * @default {}
-             */
-            model_spend: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Models
-             * @default []
-             */
-            models: unknown[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
-            /** Object Permission Id */
-            object_permission_id?: string | null;
-            /** Organization Id */
-            organization_id?: string | null;
-            /** Organization Memberships */
-            organization_memberships?: components["schemas"]["LiteLLM_OrganizationMembershipTable"][] | null;
-            /** Password Reset Required */
-            password_reset_required?: boolean | null;
-            /**
-             * Policies
-             * @default []
-             */
-            policies: string[];
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /**
-             * Spend
-             * @default 0
-             */
-            spend: number;
-            /** Sso User Id */
-            sso_user_id?: string | null;
-            /** Team Id */
-            team_id?: string | null;
-            /**
-             * Teams
-             * @default []
-             */
-            teams: string[];
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Updated At */
-            updated_at?: string | null;
-            /** User Alias */
-            user_alias?: string | null;
-            /** User Email */
-            user_email?: string | null;
-            /** User Id */
-            user_id: string;
-            /** User Role */
-            user_role?: string | null;
         };
         /** LiteLLM_UserTableFiltered */
         LiteLLM_UserTableFiltered: {
@@ -36008,7 +35916,7 @@ export interface components {
              * @default []
              */
             models: unknown[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Organization Id */
@@ -36051,170 +35959,31 @@ export interface components {
             /** User Role */
             user_role?: string | null;
         };
-        /** LiteLLM_VerificationToken */
-        LiteLLM_VerificationToken: {
-            /** Access Group Ids */
-            access_group_ids?: string[] | null;
-            /** Agent Id */
-            agent_id?: string | null;
-            /**
-             * Aliases
-             * @default {}
-             */
-            aliases: {
-                [key: string]: unknown;
-            };
-            /**
-             * Allowed Cache Controls
-             * @default []
-             */
-            allowed_cache_controls: unknown[] | null;
-            /**
-             * Allowed Routes
-             * @default []
-             */
-            allowed_routes: unknown[] | null;
-            /**
-             * Auto Rotate
-             * @default false
-             */
-            auto_rotate: boolean | null;
-            /** Blocked */
-            blocked?: boolean | null;
-            /** Budget Duration */
-            budget_duration?: string | null;
-            /**
-             * Budget Fallbacks
-             * @default {}
-             */
-            budget_fallbacks: {
-                [key: string]: string[];
-            };
-            /** Budget Id */
-            budget_id?: string | null;
-            /** Budget Limits */
-            budget_limits?: {
-                [key: string]: unknown;
-            }[] | null;
-            /** Budget Reset At */
-            budget_reset_at?: string | null;
-            /**
-             * Config
-             * @default {}
-             */
-            config: {
-                [key: string]: unknown;
-            };
-            /** Created At */
-            created_at?: string | null;
-            /** Created By */
-            created_by?: string | null;
-            /** Expires */
-            expires?: string | null;
-            /** Key Alias */
-            key_alias?: string | null;
-            /** Key Name */
-            key_name?: string | null;
-            /** Key Rotation At */
-            key_rotation_at?: string | null;
-            /** Key Type */
-            key_type?: string | null;
-            /** Last Active */
-            last_active?: string | null;
-            /** Last Rotation At */
-            last_rotation_at?: string | null;
-            /** Litellm Budget Table */
-            litellm_budget_table?: {
-                [key: string]: unknown;
-            } | null;
-            /** Max Budget */
-            max_budget?: number | null;
-            /** Max Parallel Requests */
-            max_parallel_requests?: number | null;
-            /**
-             * Metadata
-             * @default {}
-             */
-            metadata: {
-                [key: string]: unknown;
-            };
-            /**
-             * Model Max Budget
-             * @default {}
-             */
-            model_max_budget: {
-                [key: string]: unknown;
-            };
-            /**
-             * Model Spend
-             * @default {}
-             */
-            model_spend: {
-                [key: string]: unknown;
-            };
-            /**
-             * Models
-             * @default []
-             */
-            models: unknown[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
-            /** Object Permission Id */
-            object_permission_id?: string | null;
-            /** Org Id */
-            org_id?: string | null;
-            /**
-             * Permissions
-             * @default {}
-             */
-            permissions: {
-                [key: string]: unknown;
-            };
-            /** Project Id */
-            project_id?: string | null;
-            /**
-             * Rotation Count
-             * @default 0
-             */
-            rotation_count: number | null;
-            /** Rotation Interval */
-            rotation_interval?: string | null;
-            /** Router Settings */
-            router_settings?: {
-                [key: string]: unknown;
-            } | null;
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /** Settings Updated At */
-            settings_updated_at?: string | null;
-            /**
-             * Soft Budget Cooldown
-             * @default false
-             */
-            soft_budget_cooldown: boolean;
-            /**
-             * Spend
-             * @default 0
-             */
-            spend: number;
-            /** Team Id */
-            team_id?: string | null;
-            /** Token */
-            token?: string | null;
-            /**
-             * Total Spend
-             * @default 0
-             */
-            total_spend: number;
-            /** Tpd Limit */
-            tpd_limit?: number | null;
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Updated At */
-            updated_at?: string | null;
-            /** Updated By */
-            updated_by?: string | null;
+        /**
+         * LiteLLM_VerifiedSubject
+         * @description Represents a LiteLLM_VerifiedSubject record
+         */
+        LiteLLM_VerifiedSubject: {
+            /** Issuer */
+            issuer: string;
+            /** Kind */
+            kind: string;
+            /** Oid */
+            oid: string;
+            /** Subject Id */
+            subject_id: string;
+            /** Tenant Id */
+            tenant_id: string;
+            user?: components["schemas"]["prisma__models__LiteLLM_UserTable"] | null;
             /** User Id */
             user_id?: string | null;
+            /**
+             * Verified At
+             * Format: date-time
+             */
+            verified_at: string;
+            /** Verified Via */
+            verified_via: string;
         };
         /** LitellmParams */
         LitellmParams: {
@@ -38893,7 +38662,7 @@ export interface components {
             created_at: string;
             /** Created By */
             created_by: string;
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTable"] | null;
+            litellm_budget_table?: components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
             /** Metadata */
             metadata?: {
                 [key: string]: unknown;
@@ -38910,7 +38679,7 @@ export interface components {
              * @default []
              */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Organization Alias */
@@ -38930,7 +38699,7 @@ export interface components {
             /** Updated By */
             updated_by: string;
             /** Users */
-            users?: components["schemas"]["LiteLLM_UserTable"][] | null;
+            users?: components["schemas"]["litellm__models__user__LiteLLM_UserTable"][] | null;
         };
         /**
          * NewProjectRequest
@@ -39030,7 +38799,7 @@ export interface components {
             created_by?: string | null;
             /** Description */
             description?: string | null;
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTable"] | null;
+            litellm_budget_table?: components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
             /** Metadata */
             metadata?: {
                 [key: string]: unknown;
@@ -39052,7 +38821,7 @@ export interface components {
              * @default []
              */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Project Alias */
@@ -39856,7 +39625,7 @@ export interface components {
             /** Updated Organization Memberships */
             updated_organization_memberships: components["schemas"]["LiteLLM_OrganizationMembershipTable"][];
             /** Updated Users */
-            updated_users: components["schemas"]["LiteLLM_UserTable"][];
+            updated_users: components["schemas"]["litellm__models__user__LiteLLM_UserTable"][];
         };
         /** OrganizationMemberAddRequest */
         OrganizationMemberAddRequest: {
@@ -46119,7 +45888,7 @@ export interface components {
             created_at?: string | null;
             /** Default Team Member Models */
             default_team_member_models?: string[] | null;
-            litellm_model_table?: components["schemas"]["LiteLLM_ModelTable"] | null;
+            litellm_model_table?: components["schemas"]["litellm__models__team__LiteLLM_ModelTable"] | null;
             /** Max Budget */
             max_budget?: number | null;
             /** Max Parallel Requests */
@@ -46159,7 +45928,7 @@ export interface components {
              * @default []
              */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Organization Id */
@@ -46189,9 +45958,9 @@ export interface components {
             /** Updated At */
             updated_at?: string | null;
             /** Updated Team Memberships */
-            updated_team_memberships: components["schemas"]["LiteLLM_TeamMembership"][];
+            updated_team_memberships: components["schemas"]["litellm__models__team_membership__LiteLLM_TeamMembership"][];
             /** Updated Users */
-            updated_users: components["schemas"]["LiteLLM_UserTable"][];
+            updated_users: components["schemas"]["litellm__models__user__LiteLLM_UserTable"][];
         };
         /** TeamCallbackDeleteResponse */
         TeamCallbackDeleteResponse: {
@@ -46258,7 +46027,7 @@ export interface components {
              * @default 0
              */
             keys_count: number;
-            litellm_model_table?: components["schemas"]["LiteLLM_ModelTable"] | null;
+            litellm_model_table?: components["schemas"]["litellm__models__team__LiteLLM_ModelTable"] | null;
             /** Max Budget */
             max_budget?: number | null;
             /** Max Parallel Requests */
@@ -46303,7 +46072,7 @@ export interface components {
              * @default []
              */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Organization Id */
@@ -46343,7 +46112,7 @@ export interface components {
             /** Page Size */
             page_size: number;
             /** Teams */
-            teams: (components["schemas"]["TeamListItem"] | components["schemas"]["LiteLLM_TeamTable"] | components["schemas"]["LiteLLM_DeletedTeamTable"])[];
+            teams: (components["schemas"]["TeamListItem"] | components["schemas"]["litellm__models__team__LiteLLM_TeamTable"] | components["schemas"]["LiteLLM_DeletedTeamTable"])[];
             /** Total */
             total: number;
             /** Total Pages */
@@ -46510,7 +46279,7 @@ export interface components {
             /** Budget Id */
             budget_id?: string | null;
             /** Litellm Budget Table */
-            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTableFull"] | components["schemas"]["LiteLLM_BudgetTable"] | null;
+            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTableFull"] | components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
             /** Role */
             role?: string | null;
             /**
@@ -49190,7 +48959,7 @@ export interface components {
             end_user_model_max_budget?: {
                 [key: string]: unknown;
             } | null;
-            end_user_object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            end_user_object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** End User Rpm Limit */
             end_user_rpm_limit?: number | null;
             /** End User Tpd Limit */
@@ -49256,7 +49025,7 @@ export interface components {
              * @default []
              */
             models: unknown[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Object Permission Id */
             object_permission_id?: string | null;
             /** Org Id */
@@ -49358,7 +49127,7 @@ export interface components {
              * @default []
              */
             team_models: unknown[];
-            team_object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            team_object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Team Object Permission Id */
             team_object_permission_id?: string | null;
             /** Team Rpm Limit */
@@ -49638,7 +49407,7 @@ export interface components {
              * @default []
              */
             models: string[];
-            object_permission?: components["schemas"]["LiteLLM_ObjectPermissionTable"] | null;
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /**
@@ -50089,6 +49858,569 @@ export interface components {
             /** Status */
             status?: ("pending" | "running" | "paused" | "completed" | "failed") | null;
         };
+        /**
+         * LiteLLM_BudgetTable
+         * @description Represents user-controllable params for a LiteLLM_BudgetTable record.
+         *
+         *     Budget-write paths use `model_fields.keys()` on this class as an allowlist
+         *     for user input. Keep server-managed fields (e.g. `budget_reset_at`) on
+         *     `LiteLLM_BudgetTableFull` so they aren't user-settable.
+         */
+        litellm__models__budget__LiteLLM_BudgetTable: {
+            /** Allowed Models */
+            allowed_models?: string[] | null;
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /** Model Max Budget */
+            model_max_budget?: {
+                [key: string]: unknown;
+            } | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Soft Budget */
+            soft_budget?: number | null;
+            /** Temp Budget Expiry */
+            temp_budget_expiry?: string | null;
+            /** Temp Budget Increase */
+            temp_budget_increase?: number | null;
+            /** Tpd Limit */
+            tpd_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+        };
+        /** LiteLLM_EndUserTable */
+        litellm__models__end_user__LiteLLM_EndUserTable: {
+            /** Alias */
+            alias?: string | null;
+            /** Allowed Model Region */
+            allowed_model_region?: ("eu" | "us") | null;
+            /** Blocked */
+            blocked: boolean;
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Default Model */
+            default_model?: string | null;
+            litellm_budget_table?: components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
+            /** Models */
+            models?: string[];
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /**
+             * Spend
+             * @default 0
+             */
+            spend: number;
+            /** User Id */
+            user_id: string;
+        };
+        /**
+         * LiteLLM_ObjectPermissionTable
+         * @description Represents a LiteLLM_ObjectPermissionTable record
+         */
+        litellm__models__object_permission__LiteLLM_ObjectPermissionTable: {
+            /**
+             * Agent Access Groups
+             * @default []
+             */
+            agent_access_groups: string[] | null;
+            /**
+             * Agents
+             * @default []
+             */
+            agents: string[] | null;
+            /**
+             * Blocked Tools
+             * @default []
+             */
+            blocked_tools: string[] | null;
+            /**
+             * Mcp Access Groups
+             * @default []
+             */
+            mcp_access_groups: string[] | null;
+            /**
+             * Mcp Servers
+             * @default []
+             */
+            mcp_servers: string[] | null;
+            /** Mcp Tool Permissions */
+            mcp_tool_permissions?: {
+                [key: string]: string[];
+            } | null;
+            /** Mcp Tool Search Enabled */
+            mcp_tool_search_enabled?: boolean | null;
+            /** Mcp Toolsets */
+            mcp_toolsets?: string[] | null;
+            /**
+             * Models
+             * @default []
+             */
+            models: string[] | null;
+            /** Object Permission Id */
+            object_permission_id: string;
+            /**
+             * Search Tools
+             * @default []
+             */
+            search_tools: string[] | null;
+            /** Skills */
+            skills?: string[] | null;
+            /**
+             * Vector Stores
+             * @default []
+             */
+            vector_stores: string[] | null;
+        };
+        /**
+         * LiteLLM_ProjectTable
+         * @description Database model representation for project
+         */
+        litellm__models__project__LiteLLM_ProjectTable: {
+            /**
+             * Blocked
+             * @default false
+             */
+            blocked: boolean;
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /** Description */
+            description?: string | null;
+            litellm_budget_table?: components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /** Model Rpm Limit */
+            model_rpm_limit?: {
+                [key: string]: unknown;
+            } | null;
+            /** Model Spend */
+            model_spend?: {
+                [key: string]: unknown;
+            } | null;
+            /** Model Tpm Limit */
+            model_tpm_limit?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Models
+             * @default []
+             */
+            models: string[];
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Project Alias */
+            project_alias?: string | null;
+            /** Project Id */
+            project_id: string;
+            /**
+             * Spend
+             * @default 0
+             */
+            spend: number;
+            /** Team Id */
+            team_id?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Updated By */
+            updated_by?: string | null;
+        };
+        /** LiteLLM_ModelTable */
+        litellm__models__team__LiteLLM_ModelTable: {
+            /** Created By */
+            created_by: string;
+            /** Id */
+            id?: number | null;
+            /** Model Aliases */
+            model_aliases?: string | {
+                [key: string]: unknown;
+            } | null;
+            team?: components["schemas"]["litellm__models__team__LiteLLM_TeamTable"] | null;
+            /** Updated By */
+            updated_by: string;
+        };
+        /** LiteLLM_TeamTable */
+        litellm__models__team__LiteLLM_TeamTable: {
+            /** Access Group Ids */
+            access_group_ids?: string[] | null;
+            /**
+             * Admins
+             * @default []
+             */
+            admins: string[];
+            /**
+             * Allow Team Guardrail Config
+             * @default false
+             */
+            allow_team_guardrail_config: boolean | null;
+            /**
+             * Blocked
+             * @default false
+             */
+            blocked: boolean;
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /** Budget Limits */
+            budget_limits?: components["schemas"]["BudgetLimitEntry"][] | null;
+            /** Budget Reset At */
+            budget_reset_at?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Default Team Member Models */
+            default_team_member_models?: string[] | null;
+            litellm_model_table?: components["schemas"]["litellm__models__team__LiteLLM_ModelTable"] | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /**
+             * Members
+             * @default []
+             */
+            members: string[];
+            /**
+             * Members With Roles
+             * @default []
+             */
+            members_with_roles: components["schemas"]["Member"][];
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /** Model Id */
+            model_id?: number | null;
+            /**
+             * Model Max Budget
+             * @default {}
+             */
+            model_max_budget: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Model Spend
+             * @default {}
+             */
+            model_spend: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Models
+             * @default []
+             */
+            models: string[];
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Organization Id */
+            organization_id?: string | null;
+            /** Policies */
+            policies?: string[] | null;
+            /** Router Settings */
+            router_settings?: {
+                [key: string]: unknown;
+            } | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Soft Budget */
+            soft_budget?: number | null;
+            /** Spend */
+            spend?: number | null;
+            /** Team Alias */
+            team_alias?: string | null;
+            /** Team Id */
+            team_id: string;
+            /** Team Member Permissions */
+            team_member_permissions?: string[] | null;
+            /** Tpd Limit */
+            tpd_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Updated At */
+            updated_at?: string | null;
+        };
+        /** LiteLLM_TeamMembership */
+        litellm__models__team_membership__LiteLLM_TeamMembership: {
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Litellm Budget Table */
+            litellm_budget_table?: components["schemas"]["LiteLLM_BudgetTableFull"] | components["schemas"]["litellm__models__budget__LiteLLM_BudgetTable"] | null;
+            /**
+             * Spend
+             * @default 0
+             */
+            spend: number | null;
+            /** Team Id */
+            team_id: string;
+            /**
+             * Total Spend
+             * @default 0
+             */
+            total_spend: number | null;
+            /** User Id */
+            user_id: string;
+        };
+        /** LiteLLM_UserTable */
+        litellm__models__user__LiteLLM_UserTable: {
+            /**
+             * Allowed Cache Controls
+             * @default []
+             */
+            allowed_cache_controls: string[];
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /** Budget Reset At */
+            budget_reset_at?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Last Breach Check At */
+            last_breach_check_at?: string | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Model Max Budget
+             * @default {}
+             */
+            model_max_budget: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Model Spend
+             * @default {}
+             */
+            model_spend: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Models
+             * @default []
+             */
+            models: unknown[];
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Organization Id */
+            organization_id?: string | null;
+            /** Organization Memberships */
+            organization_memberships?: components["schemas"]["LiteLLM_OrganizationMembershipTable"][] | null;
+            /** Password Reset Required */
+            password_reset_required?: boolean | null;
+            /**
+             * Policies
+             * @default []
+             */
+            policies: string[];
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /**
+             * Spend
+             * @default 0
+             */
+            spend: number;
+            /** Sso User Id */
+            sso_user_id?: string | null;
+            /** Team Id */
+            team_id?: string | null;
+            /**
+             * Teams
+             * @default []
+             */
+            teams: string[];
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** User Alias */
+            user_alias?: string | null;
+            /** User Email */
+            user_email?: string | null;
+            /** User Id */
+            user_id: string;
+            /** User Role */
+            user_role?: string | null;
+        };
+        /** LiteLLM_VerificationToken */
+        litellm__models__verification_token__LiteLLM_VerificationToken: {
+            /** Access Group Ids */
+            access_group_ids?: string[] | null;
+            /** Agent Id */
+            agent_id?: string | null;
+            /**
+             * Aliases
+             * @default {}
+             */
+            aliases: {
+                [key: string]: unknown;
+            };
+            /**
+             * Allowed Cache Controls
+             * @default []
+             */
+            allowed_cache_controls: unknown[] | null;
+            /**
+             * Allowed Routes
+             * @default []
+             */
+            allowed_routes: unknown[] | null;
+            /**
+             * Auto Rotate
+             * @default false
+             */
+            auto_rotate: boolean | null;
+            /** Blocked */
+            blocked?: boolean | null;
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /**
+             * Budget Fallbacks
+             * @default {}
+             */
+            budget_fallbacks: {
+                [key: string]: string[];
+            };
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Budget Limits */
+            budget_limits?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Budget Reset At */
+            budget_reset_at?: string | null;
+            /**
+             * Config
+             * @default {}
+             */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Created At */
+            created_at?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /** Expires */
+            expires?: string | null;
+            /** Key Alias */
+            key_alias?: string | null;
+            /** Key Name */
+            key_name?: string | null;
+            /** Key Rotation At */
+            key_rotation_at?: string | null;
+            /** Key Type */
+            key_type?: string | null;
+            /** Last Active */
+            last_active?: string | null;
+            /** Last Rotation At */
+            last_rotation_at?: string | null;
+            /** Litellm Budget Table */
+            litellm_budget_table?: {
+                [key: string]: unknown;
+            } | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /**
+             * Metadata
+             * @default {}
+             */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /**
+             * Model Max Budget
+             * @default {}
+             */
+            model_max_budget: {
+                [key: string]: unknown;
+            };
+            /**
+             * Model Spend
+             * @default {}
+             */
+            model_spend: {
+                [key: string]: unknown;
+            };
+            /**
+             * Models
+             * @default []
+             */
+            models: unknown[];
+            object_permission?: components["schemas"]["litellm__models__object_permission__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Org Id */
+            org_id?: string | null;
+            /**
+             * Permissions
+             * @default {}
+             */
+            permissions: {
+                [key: string]: unknown;
+            };
+            /** Project Id */
+            project_id?: string | null;
+            /**
+             * Rotation Count
+             * @default 0
+             */
+            rotation_count: number | null;
+            /** Rotation Interval */
+            rotation_interval?: string | null;
+            /** Router Settings */
+            router_settings?: {
+                [key: string]: unknown;
+            } | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Settings Updated At */
+            settings_updated_at?: string | null;
+            /**
+             * Soft Budget Cooldown
+             * @default false
+             */
+            soft_budget_cooldown: boolean;
+            /**
+             * Spend
+             * @default 0
+             */
+            spend: number;
+            /** Team Id */
+            team_id?: string | null;
+            /** Token */
+            token?: string | null;
+            /**
+             * Total Spend
+             * @default 0
+             */
+            total_spend: number;
+            /** Tpd Limit */
+            tpd_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Updated By */
+            updated_by?: string | null;
+            /** User Id */
+            user_id?: string | null;
+        };
         /** ModelInfo */
         litellm__proxy___types__ModelInfo: {
             /** Base Model */
@@ -50290,6 +50622,492 @@ export interface components {
              * @constant
              */
             type?: "approximate";
+        };
+        /**
+         * LiteLLM_BudgetTable
+         * @description Represents a LiteLLM_BudgetTable record
+         */
+        prisma__models__LiteLLM_BudgetTable: {
+            /** Allowed Models */
+            allowed_models: string[];
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /** Budget Id */
+            budget_id: string;
+            /** Budget Reset At */
+            budget_reset_at?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /** End Users */
+            end_users?: components["schemas"]["prisma__models__LiteLLM_EndUserTable"][] | null;
+            /** Keys */
+            keys?: components["schemas"]["prisma__models__LiteLLM_VerificationToken"][] | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /** Model Access Groups */
+            model_access_groups?: components["schemas"]["LiteLLM_ModelAccessGroupBudgetTable"][] | null;
+            /** Model Max Budget */
+            model_max_budget?: unknown | null;
+            /** Organization */
+            organization?: components["schemas"]["LiteLLM_OrganizationTable"][] | null;
+            /** Organization Membership */
+            organization_membership?: components["schemas"]["LiteLLM_OrganizationMembership"][] | null;
+            /** Projects */
+            projects?: components["schemas"]["prisma__models__LiteLLM_ProjectTable"][] | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Soft Budget */
+            soft_budget?: number | null;
+            /** Tags */
+            tags?: components["schemas"]["LiteLLM_TagTable"][] | null;
+            /** Team Membership */
+            team_membership?: components["schemas"]["prisma__models__LiteLLM_TeamMembership"][] | null;
+            /** Temp Budget Expiry */
+            temp_budget_expiry?: string | null;
+            /** Temp Budget Increase */
+            temp_budget_increase?: number | null;
+            /** Tpd Limit */
+            tpd_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
+        };
+        /**
+         * LiteLLM_EndUserTable
+         * @description Represents a LiteLLM_EndUserTable record
+         */
+        prisma__models__LiteLLM_EndUserTable: {
+            /** Alias */
+            alias?: string | null;
+            /** Allowed Model Region */
+            allowed_model_region?: string | null;
+            /** Blocked */
+            blocked: boolean;
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Default Model */
+            default_model?: string | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            /** Models */
+            models: string[];
+            object_permission?: components["schemas"]["prisma__models__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Spend */
+            spend: number;
+            /** User Id */
+            user_id: string;
+        };
+        /**
+         * LiteLLM_ModelTable
+         * @description Represents a LiteLLM_ModelTable record
+         */
+        prisma__models__LiteLLM_ModelTable: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Id */
+            id: number;
+            /** Model Aliases */
+            model_aliases?: unknown | null;
+            team?: components["schemas"]["prisma__models__LiteLLM_TeamTable"] | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
+        };
+        /**
+         * LiteLLM_ObjectPermissionTable
+         * @description Represents a LiteLLM_ObjectPermissionTable record
+         */
+        prisma__models__LiteLLM_ObjectPermissionTable: {
+            /** Agent Access Groups */
+            agent_access_groups: string[];
+            /** Agents */
+            agents: string[];
+            /** Agents Table */
+            agents_table?: components["schemas"]["LiteLLM_AgentsTable"][] | null;
+            /** Blocked Tools */
+            blocked_tools: string[];
+            /** End Users */
+            end_users?: components["schemas"]["prisma__models__LiteLLM_EndUserTable"][] | null;
+            /** Mcp Access Groups */
+            mcp_access_groups: string[];
+            /** Mcp Servers */
+            mcp_servers: string[];
+            /** Mcp Tool Permissions */
+            mcp_tool_permissions?: unknown | null;
+            /** Mcp Tool Search Enabled */
+            mcp_tool_search_enabled?: boolean | null;
+            /** Mcp Toolsets */
+            mcp_toolsets: string[];
+            /** Models */
+            models: string[];
+            /** Object Permission Id */
+            object_permission_id: string;
+            /** Organizations */
+            organizations?: components["schemas"]["LiteLLM_OrganizationTable"][] | null;
+            /** Projects */
+            projects?: components["schemas"]["prisma__models__LiteLLM_ProjectTable"][] | null;
+            /** Search Tools */
+            search_tools: string[];
+            /** Skills */
+            skills: string[];
+            /** Teams */
+            teams?: components["schemas"]["prisma__models__LiteLLM_TeamTable"][] | null;
+            /** Users */
+            users?: components["schemas"]["prisma__models__LiteLLM_UserTable"][] | null;
+            /** Vector Stores */
+            vector_stores: string[];
+            /** Verification Tokens */
+            verification_tokens?: components["schemas"]["prisma__models__LiteLLM_VerificationToken"][] | null;
+        };
+        /**
+         * LiteLLM_ProjectTable
+         * @description Represents a LiteLLM_ProjectTable record
+         */
+        prisma__models__LiteLLM_ProjectTable: {
+            /** Blocked */
+            blocked: boolean;
+            /** Budget Id */
+            budget_id?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Description */
+            description?: string | null;
+            /** Keys */
+            keys?: components["schemas"]["prisma__models__LiteLLM_VerificationToken"][] | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            litellm_team_table?: components["schemas"]["prisma__models__LiteLLM_TeamTable"] | null;
+            /** Metadata */
+            metadata: unknown;
+            /** Model Rpm Limit */
+            model_rpm_limit: unknown;
+            /** Model Spend */
+            model_spend: unknown;
+            /** Model Tpm Limit */
+            model_tpm_limit: unknown;
+            /** Models */
+            models: string[];
+            object_permission?: components["schemas"]["prisma__models__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Project Alias */
+            project_alias?: string | null;
+            /** Project Id */
+            project_id: string;
+            /** Spend */
+            spend: number;
+            /** Team Id */
+            team_id?: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
+        };
+        /**
+         * LiteLLM_TeamMembership
+         * @description Represents a LiteLLM_TeamMembership record
+         */
+        prisma__models__LiteLLM_TeamMembership: {
+            /** Budget Id */
+            budget_id?: string | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            /** Spend */
+            spend: number;
+            /** Team Id */
+            team_id: string;
+            /** Total Spend */
+            total_spend: number;
+            /** User Id */
+            user_id: string;
+        };
+        /**
+         * LiteLLM_TeamTable
+         * @description Represents a LiteLLM_TeamTable record
+         */
+        prisma__models__LiteLLM_TeamTable: {
+            /** Access Group Ids */
+            access_group_ids: string[];
+            /** Admins */
+            admins: string[];
+            /** Allow Team Guardrail Config */
+            allow_team_guardrail_config: boolean;
+            /** Blocked */
+            blocked: boolean;
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /** Budget Limits */
+            budget_limits?: unknown | null;
+            /** Budget Reset At */
+            budget_reset_at?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Default Team Member Models */
+            default_team_member_models: string[];
+            litellm_model_table?: components["schemas"]["prisma__models__LiteLLM_ModelTable"] | null;
+            litellm_organization_table?: components["schemas"]["LiteLLM_OrganizationTable"] | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /** Members */
+            members: string[];
+            /** Members With Roles */
+            members_with_roles: unknown;
+            /** Metadata */
+            metadata: unknown;
+            /** Model Id */
+            model_id?: number | null;
+            /** Model Max Budget */
+            model_max_budget: unknown;
+            /** Model Spend */
+            model_spend: unknown;
+            /** Models */
+            models: string[];
+            object_permission?: components["schemas"]["prisma__models__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Organization Id */
+            organization_id?: string | null;
+            /** Policies */
+            policies: string[];
+            /** Projects */
+            projects?: components["schemas"]["prisma__models__LiteLLM_ProjectTable"][] | null;
+            /** Router Settings */
+            router_settings?: unknown | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Soft Budget */
+            soft_budget?: number | null;
+            /** Spend */
+            spend: number;
+            /** Team Alias */
+            team_alias?: string | null;
+            /** Team Id */
+            team_id: string;
+            /** Team Member Permissions */
+            team_member_permissions: string[];
+            /** Tpd Limit */
+            tpd_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * LiteLLM_UserTable
+         * @description Represents a LiteLLM_UserTable record
+         */
+        prisma__models__LiteLLM_UserTable: {
+            /** Allowed Cache Controls */
+            allowed_cache_controls: string[];
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /** Budget Reset At */
+            budget_reset_at?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Invitations Created */
+            invitations_created?: components["schemas"]["LiteLLM_InvitationLink"][] | null;
+            /** Invitations Updated */
+            invitations_updated?: components["schemas"]["LiteLLM_InvitationLink"][] | null;
+            /** Invitations User */
+            invitations_user?: components["schemas"]["LiteLLM_InvitationLink"][] | null;
+            /** Last Breach Check At */
+            last_breach_check_at?: string | null;
+            litellm_organization_table?: components["schemas"]["LiteLLM_OrganizationTable"] | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /** Metadata */
+            metadata: unknown;
+            /** Model Max Budget */
+            model_max_budget: unknown;
+            /** Model Spend */
+            model_spend: unknown;
+            /** Models */
+            models: string[];
+            object_permission?: components["schemas"]["prisma__models__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Organization Id */
+            organization_id?: string | null;
+            /** Organization Memberships */
+            organization_memberships?: components["schemas"]["LiteLLM_OrganizationMembership"][] | null;
+            /** Password */
+            password?: string | null;
+            /** Password Reset Required */
+            password_reset_required?: boolean | null;
+            /** Policies */
+            policies: string[];
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Spend */
+            spend: number;
+            /** Sso User Id */
+            sso_user_id?: string | null;
+            /** Team Id */
+            team_id?: string | null;
+            /** Teams */
+            teams: string[];
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** User Alias */
+            user_alias?: string | null;
+            /** User Email */
+            user_email?: string | null;
+            /** User Id */
+            user_id: string;
+            /** User Role */
+            user_role?: string | null;
+            /** Verified Subjects */
+            verified_subjects?: components["schemas"]["LiteLLM_VerifiedSubject"][] | null;
+        };
+        /**
+         * LiteLLM_VerificationToken
+         * @description Represents a LiteLLM_VerificationToken record
+         */
+        prisma__models__LiteLLM_VerificationToken: {
+            /** Access Group Ids */
+            access_group_ids: string[];
+            /** Agent Id */
+            agent_id?: string | null;
+            /** Aliases */
+            aliases: unknown;
+            /** Allowed Cache Controls */
+            allowed_cache_controls: string[];
+            /** Allowed Routes */
+            allowed_routes: string[];
+            /** Auto Rotate */
+            auto_rotate?: boolean | null;
+            /** Blocked */
+            blocked?: boolean | null;
+            /** Budget Duration */
+            budget_duration?: string | null;
+            /** Budget Fallbacks */
+            budget_fallbacks: unknown;
+            /** Budget Id */
+            budget_id?: string | null;
+            /** Budget Limits */
+            budget_limits?: unknown | null;
+            /** Budget Reset At */
+            budget_reset_at?: string | null;
+            /** Config */
+            config: unknown;
+            /** Created At */
+            created_at?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /** Expires */
+            expires?: string | null;
+            /** Jwt Key Mappings */
+            jwt_key_mappings?: components["schemas"]["LiteLLM_JWTKeyMapping"][] | null;
+            /** Key Alias */
+            key_alias?: string | null;
+            /** Key Name */
+            key_name?: string | null;
+            /** Key Rotation At */
+            key_rotation_at?: string | null;
+            /** Key Type */
+            key_type?: string | null;
+            /** Last Active */
+            last_active?: string | null;
+            /** Last Rotation At */
+            last_rotation_at?: string | null;
+            litellm_budget_table?: components["schemas"]["prisma__models__LiteLLM_BudgetTable"] | null;
+            litellm_organization_table?: components["schemas"]["LiteLLM_OrganizationTable"] | null;
+            litellm_project_table?: components["schemas"]["prisma__models__LiteLLM_ProjectTable"] | null;
+            /** Max Budget */
+            max_budget?: number | null;
+            /** Max Parallel Requests */
+            max_parallel_requests?: number | null;
+            /** Metadata */
+            metadata: unknown;
+            /** Model Max Budget */
+            model_max_budget: unknown;
+            /** Model Spend */
+            model_spend: unknown;
+            /** Models */
+            models: string[];
+            object_permission?: components["schemas"]["prisma__models__LiteLLM_ObjectPermissionTable"] | null;
+            /** Object Permission Id */
+            object_permission_id?: string | null;
+            /** Organization Id */
+            organization_id?: string | null;
+            /** Permissions */
+            permissions: unknown;
+            /** Policies */
+            policies: string[];
+            /** Project Id */
+            project_id?: string | null;
+            /** Rotation Count */
+            rotation_count?: number | null;
+            /** Rotation Interval */
+            rotation_interval?: string | null;
+            /** Router Settings */
+            router_settings?: unknown | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Settings Updated At */
+            settings_updated_at?: string | null;
+            /** Soft Budget Cooldown */
+            soft_budget_cooldown: boolean;
+            /** Spend */
+            spend: number;
+            /** Team Id */
+            team_id?: string | null;
+            /** Token */
+            token: string;
+            /** Total Spend */
+            total_spend: number;
+            /** Tpd Limit */
+            tpd_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Updated By */
+            updated_by?: string | null;
+            /** User Id */
+            user_id?: string | null;
         };
         /** updateDeployment */
         updateDeployment: {
@@ -53998,7 +54816,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_BudgetTable"];
+                    "application/json": components["schemas"]["prisma__models__LiteLLM_BudgetTable"];
                 };
             };
             /** @description Validation Error */
@@ -54062,7 +54880,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_BudgetTable"];
+                    "application/json": components["schemas"]["prisma__models__LiteLLM_BudgetTable"];
                 };
             };
             /** @description Validation Error */
@@ -62550,7 +63368,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_VerificationToken"] | null;
+                    "application/json": components["schemas"]["litellm__models__verification_token__LiteLLM_VerificationToken"] | null;
                 };
             };
             /** @description Validation Error */
@@ -68893,7 +69711,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_ProjectTable"][];
+                    "application/json": components["schemas"]["litellm__models__project__LiteLLM_ProjectTable"][];
                 };
             };
             /** @description Validation Error */
@@ -68924,7 +69742,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_ProjectTable"];
+                    "application/json": components["schemas"]["litellm__models__project__LiteLLM_ProjectTable"];
                 };
             };
             /** @description Validation Error */
@@ -68953,7 +69771,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_ProjectTable"][];
+                    "application/json": components["schemas"]["litellm__models__project__LiteLLM_ProjectTable"][];
                 };
             };
         };
@@ -69010,7 +69828,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_ProjectTable"];
+                    "application/json": components["schemas"]["litellm__models__project__LiteLLM_ProjectTable"];
                 };
             };
             /** @description Validation Error */
@@ -73412,7 +74230,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_TeamTable"][];
+                    "application/json": components["schemas"]["litellm__models__team__LiteLLM_TeamTable"][];
                 };
             };
             /** @description Validation Error */
@@ -73736,7 +74554,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_TeamTable"];
+                    "application/json": components["schemas"]["litellm__models__team__LiteLLM_TeamTable"];
                 };
             };
             /** @description Validation Error */
@@ -73834,7 +74652,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_TeamTable"];
+                    "application/json": components["schemas"]["litellm__models__team__LiteLLM_TeamTable"];
                 };
             };
             /** @description Validation Error */
@@ -74012,7 +74830,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiteLLM_TeamTable"];
+                    "application/json": components["schemas"]["litellm__models__team__LiteLLM_TeamTable"];
                 };
             };
             /** @description Validation Error */
