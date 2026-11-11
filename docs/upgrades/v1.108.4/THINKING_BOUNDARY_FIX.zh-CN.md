@@ -1,5 +1,7 @@
 # DeepSeek thinking 边界修复记录
 
+本记录保留上一轮修复的历史证据。后续审查发现的截断、Unicode、连续标签、性能和 Dashboard 类型问题已另行修复，当前行为与生产值见 [thinking 审查修复记录](THINKING_REVIEW_FIX.zh-CN.md)
+
 2026-11-11，LiteLLM v1.108.4 定制版。
 
 第三方原生 Anthropic Messages 路由偶尔把思考放在 text 中。首次兼容修复支持规范的 `<thinking>…</thinking>` 和 `<think>…</think>`。后续线上会话出现 `<thinkingGood.…</thinking>`，开标签缺少 `>`，严格开标签匹配未命中，思考继续作为正文转发。
