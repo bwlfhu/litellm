@@ -665,6 +665,7 @@ def anthropic_messages_handler(
             messages_path=protocol_context.messages_path,
             tool_thinking=protocol_context.tool_thinking,
             missing_reasoning=protocol_context.missing_reasoning,
+            inline_thinking_tags=protocol_context.inline_thinking_tags,
         )
         if protocol_context is not None
         else _native_messages_config(model, custom_llm_provider, kwargs.get("model_info"))
