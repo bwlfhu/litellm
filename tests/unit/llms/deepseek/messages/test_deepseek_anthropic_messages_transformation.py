@@ -4816,9 +4816,7 @@ async def test_missing_opening_angle_is_retyped_only_after_matching_close(chunk_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "text", ["<thinkingExample>literal</thinkingExample>", "<thinkpad>device</thinkpad>", "<thinkingGood"]
-)
+@pytest.mark.parametrize("text", ["<thinkingExample>literal</thinkingExample>", "<thinkpad>device</thinkpad>"])
 async def test_unmatched_malformed_prefix_preserves_literal_text(text: str) -> None:
     async def source():
         yield _inline_thinking_fixture(text)
@@ -4911,3 +4909,117 @@ def test_inline_thinking_nonstream_response_matches_deployment_compat(enabled: b
         if thinking_disabled
         else [{"type": "thinking", "thinking": "Inspect data"}, {"type": "text", "text": "Answer"}]
     )
+
+
+async def _inline_partition_payloads(text: str, delta_size: int, disabled: bool = False, stop_reason: str = "tool_use"):
+    original: Final = tuple(
+        json.loads(line[6:]) for line in _inline_thinking_fixture(text).splitlines() if line.startswith(b"data: ")
+    )
+
+    async def source():
+        for payload in original:
+            if payload.get("index") == 1 and payload["type"] == "content_block_delta":
+                continue
+            current: Final = (
+                {**payload, "delta": {**payload["delta"], "stop_reason": stop_reason}}
+                if payload["type"] == "message_delta"
+                else payload
+            )
+            yield f"event: {current['type']}\ndata: {json.dumps(current)}\n\n".encode()
+            if payload["type"] == "content_block_start" and payload.get("index") == 1:
+                for index in range(0, len(text), delta_size):
+                    yield (
+                        b"event: content_block_delta\ndata: "
+                        + json.dumps(
+                            {
+                                "type": "content_block_delta",
+                                "index": 1,
+                                "delta": {"type": "text_delta", "text": text[index : index + delta_size]},
+                            }
+                        ).encode()
+                        + b"\n\n"
+                    )
+
+    output: Final = b"".join([part async for part in _sanitize_deepseek_messages_stream(source(), disabled, True)])
+    return tuple(json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: "))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text,reasoning,answer",
+    [
+        ("<thinkingGood. unfinished", "Good. unfinished", ""),
+        ("<thinking>İİİ</thinking>Answer", "İİİ", "Answer"),
+        ("<thinkingGood İ.</thinking>Answer", "Good İ.", "Answer"),
+        ("<thinking>one</thinking><think>two</think>Answer", "onetwo", "Answer"),
+        ("<thinking>one<think>two</think>three</thinking>Answer", "onetwothree", "Answer"),
+        ("<thinkingX</think>Answer", "X", "Answer"),
+        ("<thinkingExample>literal</thinkingExample>", "", "<thinkingExample>literal</thinkingExample>"),
+        ("Example: <thinking>literal</thinking>", "", "Example: <thinking>literal</thinking>"),
+    ],
+)
+async def test_inline_review_regressions_are_independent_of_delta_partition(text, reasoning, answer):
+    for size in range(1, len(text) + 1):
+        payloads: Final = await _inline_partition_payloads(text, size)
+        assert "".join(p.get("delta", {}).get("thinking", "") for p in payloads) == " " + reasoning
+        assert "".join(p.get("delta", {}).get("text", "") for p in payloads) == answer + "tail"
+        assert tuple(p["index"] for p in payloads if p["type"] == "content_block_start") == tuple(
+            p["index"] for p in payloads if p["type"] == "content_block_stop"
+        )
+        blocks: Final = normalize_inline_thinking_blocks([{"type": "text", "text": text}])
+        assert "".join(b.get("thinking", "") for b in blocks) == reasoning
+        assert "".join(b.get("text", "") for b in blocks) == answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("stop_reason", ["max_tokens", "end_turn"])
+async def test_truncated_malformed_thinking_is_never_released_as_text(disabled, stop_reason):
+    payloads: Final = await _inline_partition_payloads("<thinkingGood. private analysis", 1, disabled, stop_reason)
+    assert "".join(p.get("delta", {}).get("text", "") for p in payloads) == "tail"
+    assert "".join(p.get("delta", {}).get("thinking", "") for p in payloads) == (
+        "" if disabled else " Good. private analysis"
+    )
+    assert next(p["delta"]["stop_reason"] for p in payloads if p["type"] == "message_delta") == stop_reason
+
+
+@pytest.mark.asyncio
+async def test_leading_whitespace_is_forwarded_before_the_upstream_block_ends():
+    async def source():
+        yield b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+        yield b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"    "}}\n\n'
+        pytest.fail("whitespace was buffered until the next upstream event")
+
+    stream: Final = _sanitize_deepseek_messages_stream(source(), False, True)
+    try:
+        first: Final = await anext(stream)
+        assert b'"type":"content_block_start"' in first
+        remainder: Final = first if b'"text":"    "' in first else await anext(stream)
+        assert b'"text":"    "' in remainder
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_citation_before_text_keeps_a_valid_content_block_lifecycle():
+    events: Final = (
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "citations_delta",
+                "citation": {"type": "web_search_result_location", "url": "https://example.com"},
+            },
+        },
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Answer"}},
+        {"type": "content_block_stop", "index": 0},
+    )
+
+    async def source():
+        for event in events:
+            yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+
+    output: Final = b"".join([part async for part in _sanitize_deepseek_messages_stream(source(), False, True)])
+    payloads: Final = tuple(json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: "))
+    assert payloads == events

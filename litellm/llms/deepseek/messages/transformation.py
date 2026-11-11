@@ -305,7 +305,9 @@ def _sanitize_deepseek_stream_payload(raw_payload: object, thinking_disabled: bo
     }
 
 
-def _sanitize_deepseek_sse_event(event: bytes, thinking_disabled: bool) -> bytes | None:
+def _sanitize_deepseek_sse_event(
+    event: bytes, thinking_disabled: bool, normalizer: InlineThinkingStream | None = None
+) -> bytes | None:
     lines: Final = event.splitlines()
     data_lines: Final = tuple(line[5:].lstrip() for line in lines if line.startswith(b"data:"))
     if not data_lines:
@@ -314,15 +316,29 @@ def _sanitize_deepseek_sse_event(event: bytes, thinking_disabled: bool) -> bytes
         payload: Final[object] = json.loads(b"\n".join(data_lines))
     except (TypeError, ValueError):
         return event
-    sanitized_payload: Final = _sanitize_deepseek_stream_payload(
-        payload,
-        thinking_disabled=thinking_disabled,
-    )
-    if sanitized_payload is None:
-        return None
     non_data_lines: Final = tuple(
         line for line in lines if line and not line.startswith(b"data:") and not line.startswith(b"event:")
     )
+    payloads: Final = (
+        normalizer.transform(_DEEPSEEK_MAPPING_ADAPTER.validate_python(payload))
+        if normalizer is not None and isinstance(payload, Mapping)
+        else (payload,)
+    )
+    events: Final = tuple(
+        encoded
+        for index, item in enumerate(payloads)
+        if (encoded := _encode_deepseek_sse_payload(item, thinking_disabled, non_data_lines if index == 0 else ()))
+        is not None
+    )
+    return b"".join(events) if events else None
+
+
+def _encode_deepseek_sse_payload(
+    payload: object, thinking_disabled: bool, non_data_lines: Sequence[bytes]
+) -> bytes | None:
+    sanitized_payload: Final = _sanitize_deepseek_stream_payload(payload, thinking_disabled=thinking_disabled)
+    if sanitized_payload is None:
+        return None
     payload_object: Final = _as_deepseek_mapping(sanitized_payload)
     event_type: Final = payload_object.get("type", "message") if payload_object is not None else "message"
     preserved_lines: Final = (f"event: {event_type}".encode(), *non_data_lines)
@@ -348,25 +364,18 @@ async def _sanitize_deepseek_messages_stream(
             pending.clear()
             pending.append(remainder)
             for event in events:
-                for sanitized_event in _normalized_deepseek_sse_events(event, thinking_disabled, normalizer):
+                if (
+                    sanitized_event := _sanitize_deepseek_sse_event(event + b"\n\n", thinking_disabled, normalizer)
+                ) is not None:
                     yield sanitized_event
-        if pending and pending[0]:
-            for trailing_event in _normalized_deepseek_sse_events(pending[0], thinking_disabled, normalizer):
-                yield trailing_event
+        if (
+            pending
+            and pending[0]
+            and (trailing_event := _sanitize_deepseek_sse_event(pending[0], thinking_disabled, normalizer)) is not None
+        ):
+            yield trailing_event
     finally:
         await aclose_if_supported(completion_stream)
-
-
-def _normalized_deepseek_sse_events(
-    event: bytes, thinking_disabled: bool, normalizer: InlineThinkingStream | None
-) -> tuple[bytes, ...]:
-    framed: Final = event + b"\n\n"
-    normalized_events: Final = normalizer.event(framed) if normalizer is not None else (framed,)
-    return tuple(
-        sanitized
-        for normalized_event in normalized_events
-        if (sanitized := _sanitize_deepseek_sse_event(normalized_event, thinking_disabled)) is not None
-    )
 
 
 def _without_reasoning_content_fields(message: Mapping[str, object]) -> Mapping[str, object]:

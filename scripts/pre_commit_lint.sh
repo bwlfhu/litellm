@@ -283,6 +283,10 @@ genapi_checks() {
             echo "✗ Dashboard API types are stale; regenerated src/lib/http/schema.d.ts. Stage it and commit; re-run make check only if other checks failed too." >&2
             status=1
         fi
+        ( cd ui/litellm-dashboard && npm run typecheck -- --incremental false ) || {
+            echo "✗ Dashboard production type check failed." >&2
+            status=1
+        }
     else
         echo "✗ Could not regenerate API types (npm run gen:api failed)." >&2
         status=1
