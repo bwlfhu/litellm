@@ -2,20 +2,20 @@
 
 2026-11-10 已完成生产升级至官方 LiteLLM `v1.108.4`，保留现有定制并验证数据库、Chat、Messages、Responses、工具调用和管理 UI
 
-2026-11-11 完成第三方 DeepSeek thinking 审查修复，代码已进入 mainline。最新镜像在原生产镜像上仅替换 `inline_thinking.py` 和 `transformation.py`，保留现有依赖、静态 UI 和数据库 schema。下文数据库迁移及全量升级验证来自 2026-11-10，本次补丁、复审及发布证据见 [thinking 审查修复记录](docs/upgrades/v1.108.4/THINKING_REVIEW_FIX.zh-CN.md)
+2026-11-13 完成 DeepSeek Messages 交错块索引修复，代码已进入 mainline。最新镜像在原生产镜像上仅替换 `inline_thinking.py`，保留现有依赖、静态 UI 和数据库 schema。本次修复、复审与发布证据见 [交错块修复记录](docs/upgrades/v1.108.4/OPEN_BLOCK_FIX.zh-CN.md)。上轮 thinking 修复见 [审查修复记录](docs/upgrades/v1.108.4/THINKING_REVIEW_FIX.zh-CN.md)，下文全量升级与数据库迁移验证来自 2026-11-10
 
 | 项目 | 当前生产值 |
 | --- | --- |
 | 官方版本 | `v1.108.4`，`e6f080fb5633aa71ea81b652bd72069aff1f0228` |
-| `mainline` 运行时代码 | `0e42eb7bc20fb2f811bb3089382b3d07d231cd7b` |
-| 镜像 | `registry.allcam.org/litellm/litellm:v1.108.4-thinking-reviewed.0e42eb7bc2` |
-| 镜像 digest | `sha256:3dcb78d10130df42fb79ee94deea0a6752b8f8b540945e1460095dbd37fd2e8a` |
+| `mainline` 运行时代码 | `0a53dbe8f8c16532b0ea62972b9ee35c593924b9` |
+| 镜像 | `registry.allcam.org/litellm/litellm:v1.108.4-open-block.0a53dbe8f8` |
+| 镜像 digest | `sha256:7e93fe8c7f563e53fbe29ecfe498b4c2b6b36e38275faeebf656785e4ccde624` |
 | LiteLLM / proxy extras / enterprise | `1.108.4` / `0.4.110` / `0.1.79.post1` |
 | Python / MCP | `3.13.18` / `2.3.0` |
 | Kubernetes | `litellm/litellm`，4 个副本 Ready，零重启 |
 | 数据库 | PostgreSQL 16.14，220 项成功迁移，无失败迁移或无效索引 |
 | 应用启动迁移 | `DISABLE_SCHEMA_UPDATE=true`，迁移通过独立 Job 执行 |
-| 本次补丁回退镜像 | `v1.108.4-thinking-boundary.7e6da86645@sha256:8f0644a5a655fbaacdccd1e350655cc96b79b4b4abf24f18b1ce71d621b3ebc1` |
+| 本次补丁回退镜像 | `v1.108.4-thinking-reviewed.0e42eb7bc2@sha256:3dcb78d10130df42fb79ee94deea0a6752b8f8b540945e1460095dbd37fd2e8a` |
 
 基础镜像由根 Dockerfile 完整构建，含 Python 依赖、Rust 扩展、Prisma 离线引擎和重新构建的 UI。thinking 修复继承这些内容。四个 Pod 使用同一镜像 digest。发布采用 `maxSurge=1`、`maxUnavailable=0`
 
