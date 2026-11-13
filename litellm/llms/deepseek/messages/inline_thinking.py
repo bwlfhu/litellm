@@ -1,7 +1,7 @@
 import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
-from itertools import chain, groupby
+from itertools import chain, count, groupby
 from typing import Final, Literal, TypeAlias
 
 from pydantic import TypeAdapter
@@ -121,86 +121,54 @@ def _parsed_block(block: Mapping[str, object], kind: _Kind, parts: Iterator[tupl
     return {"type": "thinking", "thinking": text} if kind == "thinking" else {**block, "text": text}
 
 
-class InlineThinkingStream:
-    def __init__(self) -> None:
-        self._offset = 0
-        self._input_index: int | None = None
-        self._output_index = 0
-        self._template: Mapping[str, object] = {}
+class _InlineTextBlock:
+    def __init__(self, template: Mapping[str, object], indices: Iterator[int]) -> None:
+        self._template = template
+        self._indices = indices
         self._parser = _ThinkingText()
+        self._output_index: int | None = None
         self._kind: _Kind | None = None
         self._open = False
-        self._emitted = 0
+        self._closed = False
 
-    def event(self, event: bytes) -> tuple[bytes, ...]:
-        lines: Final = event.splitlines()
-        data: Final = tuple(line[5:].lstrip() for line in lines if line.startswith(b"data:"))
-        if not data:
-            return (event,)
-        try:
-            payload: Final = _MAPPING.validate_json(b"\n".join(data))
-        except ValueError:
-            return (event,)
-        headers: Final = tuple(line for line in lines if line and not line.startswith((b"data:", b"event:")))
-        return tuple(self._encode(item, headers if i == 0 else ()) for i, item in enumerate(self.transform(payload)))
+    @property
+    def started(self) -> bool:
+        return self._output_index is not None
 
-    @staticmethod
-    def _encode(payload: Mapping[str, object], headers: Sequence[bytes]) -> bytes:
-        return (
-            b"\n".join(
-                (
-                    *headers,
-                    f"event: {payload.get('type', 'message')}".encode(),
-                    b"data: " + json.dumps(payload).encode(),
-                )
-            )
-            + b"\n\n"
-        )
+    def ensure_started(self) -> tuple[Mapping[str, object], ...]:
+        return self._start("text") if not self.started else ()
 
     def transform(self, payload: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
         event_type: Final = payload.get("type")
-        index: Final = payload.get("index")
-        raw_block: Final = payload.get("content_block")
-        block: Final = _MAPPING.validate_python(raw_block) if isinstance(raw_block, Mapping) else None
-        if event_type == "content_block_start" and block is not None and block.get("type") == "text":
-            if not isinstance(index, int):
-                return (payload,)
-            self._input_index = index
-            self._template = payload
-            self._parser = _ThinkingText()
-            self._kind = None
-            self._open = False
-            self._emitted = 0
-            initial: Final = block.get("text")
-            return self._feed(initial if isinstance(initial, str) else "")
-        if index == self._input_index and self._input_index is not None:
-            if event_type == "content_block_delta":
-                raw_delta: Final = payload.get("delta")
-                delta: Final = _MAPPING.validate_python(raw_delta) if isinstance(raw_delta, Mapping) else None
-                if delta is not None and delta.get("type") == "text_delta":
-                    text: Final = delta.get("text")
-                    return self._feed(text if isinstance(text, str) else "")
-                prefix: Final = self._feed("", final=True)
-                start: Final = self._start(
-                    "text" if delta is not None and delta.get("type") == "citations_delta" else self._kind or "text"
-                )
-                return (*prefix, *start, {**payload, "index": self._output_index})
-            if event_type == "content_block_stop":
-                final: Final = self._feed("", final=True)
-                empty: Final = self._start("text") if not self._emitted else ()
-                stop: Final = self._close()
-                self._input_index = None
-                return (*final, *empty, *stop)
-        return ({**payload, "index": index + self._offset},) if isinstance(index, int) else (payload,)
+        if self._closed:
+            return (self.remap(payload),)
+        if event_type == "content_block_delta":
+            raw_delta: Final = payload.get("delta")
+            delta: Final = _MAPPING.validate_python(raw_delta) if isinstance(raw_delta, Mapping) else None
+            if delta is not None and delta.get("type") == "text_delta":
+                text: Final = delta.get("text")
+                return self.feed(text if isinstance(text, str) else "")
+            prefix: Final = self.feed("", final=True)
+            start: Final = self._start(
+                "text" if delta is not None and delta.get("type") == "citations_delta" else self._kind or "text"
+            )
+            return (*prefix, *start, self.remap(payload))
+        if event_type == "content_block_stop":
+            final: Final = self.feed("", final=True)
+            empty: Final = self.ensure_started()
+            stop: Final = self._close()
+            self._closed = True
+            return (*final, *empty, *stop)
+        return (self.remap(payload),)
+
+    def remap(self, payload: Mapping[str, object]) -> Mapping[str, object]:
+        return {**payload, "index": self._output_index} if self._output_index is not None else payload
 
     def _start(self, kind: _Kind) -> tuple[Mapping[str, object], ...]:
         if self._open and self._kind == kind:
             return ()
         stop: Final = self._close()
-        if self._emitted:
-            self._offset += 1
-        self._output_index = (self._input_index or 0) + self._offset
-        self._emitted += 1
+        self._output_index = next(self._indices)
         self._open = True
         self._kind = kind
         original: Final = self._template.get("content_block")
@@ -229,5 +197,65 @@ class InlineThinkingStream:
         self._open = False
         return ({"type": "content_block_stop", "index": self._output_index},)
 
-    def _feed(self, text: str, final: bool = False) -> tuple[Mapping[str, object], ...]:
+    def feed(self, text: str, final: bool = False) -> tuple[Mapping[str, object], ...]:
         return tuple(chain.from_iterable(self._delta(part, kind) for kind, part in self._parser.feed(text, final)))
+
+
+class InlineThinkingStream:
+    def __init__(self) -> None:
+        self._indices: Iterator[int] = count()
+        self._blocks: dict[int, int | _InlineTextBlock] = {}  # mutable-ok: stream block registration must remain O(1)
+        self._pending: _InlineTextBlock | None = None
+
+    def event(self, event: bytes) -> tuple[bytes, ...]:
+        lines: Final = event.splitlines()
+        data: Final = tuple(line[5:].lstrip() for line in lines if line.startswith(b"data:"))
+        if not data:
+            return (event,)
+        try:
+            payload: Final = _MAPPING.validate_json(b"\n".join(data))
+        except ValueError:
+            return (event,)
+        headers: Final = tuple(line for line in lines if line and not line.startswith((b"data:", b"event:")))
+        return tuple(self._encode(item, headers if i == 0 else ()) for i, item in enumerate(self.transform(payload)))
+
+    @staticmethod
+    def _encode(payload: Mapping[str, object], headers: Sequence[bytes]) -> bytes:
+        return (
+            b"\n".join(
+                (
+                    *headers,
+                    f"event: {payload.get('type', 'message')}".encode(),
+                    b"data: " + json.dumps(payload).encode(),
+                )
+            )
+            + b"\n\n"
+        )
+
+    def transform(self, payload: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+        index: Final = payload.get("index")
+        if not isinstance(index, int):
+            return (payload,)
+        current: Final = self._blocks.get(index)
+        pending: Final = self._pending
+        prefix: Final = pending.ensure_started() if pending is not None and pending is not current else ()
+        self._pending = None
+        event_type: Final = payload.get("type")
+        raw_block: Final = payload.get("content_block")
+        block: Final = _MAPPING.validate_python(raw_block) if isinstance(raw_block, Mapping) else None
+        if event_type == "content_block_start" and block is not None and current is None:
+            if block.get("type") == "text":
+                text_block: Final = _InlineTextBlock(payload, self._indices)
+                self._blocks[index] = text_block
+                initial: Final = block.get("text")
+                events: Final = text_block.feed(initial if isinstance(initial, str) else "")
+                self._pending = text_block if not text_block.started else None
+                return (*prefix, *events)
+            output_index: Final = next(self._indices)
+            self._blocks[index] = output_index
+            return (*prefix, {**payload, "index": output_index})
+        if isinstance(current, _InlineTextBlock):
+            transformed: Final = current.transform(payload)
+            self._pending = current if not current.started else None
+            return (*prefix, *transformed)
+        return (*prefix, {**payload, "index": current}) if isinstance(current, int) else (*prefix, payload)

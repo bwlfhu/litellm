@@ -5023,3 +5023,129 @@ async def test_citation_before_text_keeps_a_valid_content_block_lifecycle():
     output: Final = b"".join([part async for part in _sanitize_deepseek_messages_stream(source(), False, True)])
     payloads: Final = tuple(json.loads(line[6:]) for line in output.splitlines() if line.startswith(b"data: "))
     assert payloads == events
+
+
+async def _interleaved_stream_payloads(events, disabled: bool, chunk_size: int):
+    wire: Final = b"".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode() for event in events)
+
+    async def source():
+        for index in range(0, len(wire), chunk_size):
+            yield wire[index : index + chunk_size]
+
+    output: Final = b"".join([part async for part in _sanitize_deepseek_messages_stream(source(), disabled, True)])
+    return tuple(json.loads(line[5:]) for line in output.splitlines() if line.startswith(b"data:"))
+
+
+def _assert_open_block_lifecycle(payloads):
+    states = {}
+    for payload in payloads:
+        kind: Final = payload["type"]
+        index: Final = payload.get("index")
+        if kind == "content_block_start":
+            assert index == len(states), payload
+            assert index not in states, payload
+            states[index] = True
+        elif kind in ("content_block_delta", "content_block_stop"):
+            assert states.get(index) is True, payload
+            if kind == "content_block_stop":
+                states[index] = False
+    assert all(not value for value in states.values()), states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 17, 100000])
+async def test_interleaved_tool_deltas_keep_their_original_block_after_text_splits(disabled, chunk_size):
+    events: Final = (
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "tool_a", "name": "lookup", "input": {}},
+        },
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "<thinking>reason</thinking>Answer"},
+        },
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"x":1}'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_stop", "index": 1},
+    )
+    payloads: Final = await _interleaved_stream_payloads(events, disabled, chunk_size)
+    _assert_open_block_lifecycle(payloads)
+    assert next(p["index"] for p in payloads if p.get("delta", {}).get("type") == "input_json_delta") == 0
+    assert "".join(p.get("delta", {}).get("text", "") for p in payloads) == "Answer"
+    assert "".join(p.get("delta", {}).get("thinking", "") for p in payloads) == ("" if disabled else "reason")
+    assert (
+        next(p["delta"]["partial_json"] for p in payloads if p.get("delta", {}).get("type") == "input_json_delta")
+        == '{"x":1}'
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("delta_order", [(0, 1), (1, 0)])
+@pytest.mark.parametrize("chunk_size", [1, 17, 100000])
+async def test_interleaved_text_blocks_keep_independent_prefixes_and_lifecycles(disabled, delta_order, chunk_size):
+    starts: Final = tuple(
+        {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}
+        for index in (0, 1)
+    )
+    deltas: Final = tuple(
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "text_delta", "text": f"<thinking>reason{index}</thinking>Answer{index}"},
+        }
+        for index in delta_order
+    )
+    stops: Final = tuple({"type": "content_block_stop", "index": index} for index in (0, 1))
+    payloads: Final = await _interleaved_stream_payloads((*starts, *deltas, *stops), disabled, chunk_size)
+    _assert_open_block_lifecycle(payloads)
+    assert sorted(p["delta"]["text"] for p in payloads if p.get("delta", {}).get("type") == "text_delta") == [
+        "Answer0",
+        "Answer1",
+    ]
+    assert sorted(p["delta"]["thinking"] for p in payloads if p.get("delta", {}).get("type") == "thinking_delta") == (
+        [] if disabled else ["reason0", "reason1"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_interleaved_character_deltas_do_not_share_thinking_prefix_buffers():
+    texts: Final = ("<thinking>reason0</thinking>Answer0", "<think>reason1</think>Answer1")
+    starts: Final = tuple(
+        {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}
+        for index in (0, 1)
+    )
+
+    def deltas():
+        for offset in range(max(map(len, texts))):
+            for index, text in enumerate(texts):
+                if offset < len(text):
+                    yield {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "text_delta", "text": text[offset]},
+                    }
+
+    stops: Final = tuple({"type": "content_block_stop", "index": index} for index in (1, 0))
+    payloads: Final = await _interleaved_stream_payloads((*starts, *deltas(), *stops), False, 1)
+    _assert_open_block_lifecycle(payloads)
+    blocks = {}
+    for payload in payloads:
+        if payload["type"] == "content_block_start":
+            blocks[payload["index"]] = {**payload["content_block"]}
+        elif payload["type"] == "content_block_delta":
+            delta: Final = payload["delta"]
+            key: Final = "text" if delta["type"] == "text_delta" else "thinking"
+            blocks[payload["index"]][key] += delta[key]
+    assert sorted(block["text"] for block in blocks.values() if block["type"] == "text" and block["text"]) == [
+        "Answer0",
+        "Answer1",
+    ]
+    assert sorted(block["thinking"] for block in blocks.values() if block["type"] == "thinking") == [
+        "reason0",
+        "reason1",
+    ]
