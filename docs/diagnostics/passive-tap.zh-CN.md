@@ -121,3 +121,53 @@ sudo cat /sys/fs/cgroup/system.slice/litellm-passive-tap.service/memory.events
 `pcap_dropped` 或 `tcp_gap` 增长表示采集覆盖不完整。`midstream_synchronizations` 表示在既有连接上同步的次数。`pending_budget_exhausted` 表示待处理正文预算不足，会影响请求完整性。`sse_event_oversize`、`http_parse_error`、`unsupported_response_encoding` 和响应提前结束计数也应作为样本完整性限制处理。计数跨 arm 累积，判断新窗口时应比较前后增量。判断磁盘 IO 时看进程 `read_bytes`/`write_bytes` 或 cgroup `io.stat`，`/proc/PID/io` 中的 `rchar`/`wchar` 也会统计 socket 通信。
 
 部署、升级和隔离网络测试脚本位于运维目录 `diagnostics/passive-tap`。升级时先运行 `off`，再安装版本并重启诊断服务。离线解析测试命令为 `python3 -B -m unittest -v test_core.py`；libpcap 隔离测试命令为 `sudo python3 -B integration_test.py`。隔离测试不访问真实模型。
+
+## 上游 TLS 参数观察
+
+供应商平台记录的单次失败，需要在 LiteLLM 发往上游的位置观察。宿主机提供独立命令 `litellm-upstream-tap`，通过 BCC/eBPF 在指定 LiteLLM 进程的 OpenSSL `SSL_write_ex`、`SSL_read_ex` 和 `SSL_free` 上挂载只读 uprobe。不改应用代码、环境变量、路由、证书或 TLS 校验，不重启 LiteLLM，也不引入代理。
+
+这类探针仍有函数探测和内存复制的 CPU 开销，不能理解为零开销。开启必须指定时长，停止或到期后卸载探针。接收端独立限流和限内存，诊断失败不参与业务请求的转发决策。
+
+```bash
+# 指定上游 hostname，开启参数观察一小时
+sudo litellm-upstream-tap arm --host provider.example --seconds 3600
+
+# 查看状态、参数摘要、错误类别、request ID 和事件丢失计数
+sudo litellm-upstream-tap status
+
+# 在至多两分钟内完整解析不超过 2 MiB 的 TLS 写入
+# 用于核实被长消息或工具定义隔开的顶层参数
+sudo litellm-upstream-tap arm --host provider.example --seconds 120 --full-request
+
+# 可用 --pod 指定一个当前 Pod，缩小采集范围
+sudo litellm-upstream-tap arm --host provider.example --seconds 120 --full-request --pod POD_NAME
+
+# 立即卸载探针
+sudo litellm-upstream-tap off
+
+# 关闭后清理保留的参数摘要
+sudo litellm-upstream-tap clear
+```
+
+普通模式每次成功 TLS 写入最多复制首尾各 8 KiB，按 PID 和 SSL 连接配对请求与响应。响应只观察成功写入后的前 8 KiB，用于识别初始 HTTP 400–599 以及 thinking budget、上下文长度等错误。它不监控完整 SSE 流，HTTP 200 摘要也不证明后续流完整成功。后续 SSE 错误继续使用客户端侧的 `litellm-tap` 调查。
+
+大请求仅从可验证的顶层 JSON 前缀和后缀提取参数，不通过正则匹配正文里的参数名。`sources` 表示解析覆盖范围。片段里没有某字段，不能据此认定上游请求没有该字段。
+
+`--full-request` 把不超过 2 MiB 的单次 TLS 写入分段送入 16 MiB 内存环形缓冲，接收端在内存中完整解析 JSON。参数解析完成后释放完整正文，不把正文写入状态文件。单次写入超限时仍使用首尾模式；暂存完整正文达到 64 MiB 时释放正文副本并记录计数。完整模式的命令行窗口限制为 120 秒。
+
+失败记录只输出 model、输出 token 上限、thinking 的 type 和 budget、reasoning effort、output effort、stream、字节数、状态码、完整性和 request ID。最多保留 100 条失败摘要和最近 10 条 DeepSeek 的 HTTP 成功响应头参数摘要。`full_body_captured=true` 和 `sources=["complete_json"]` 表示完整请求曾在内存中解析，不代表保存了原始正文。
+
+状态文件位于 root 专用的 `/run/litellm-upstream-observer/status.json`，目录权限 0700，文件权限 0600。`/run` 必须为 tmpfs。失败摘要保留一小时，同 hostname 重新开启时可接续尚未过期的摘要。窗口结束后一小时会清理不再更新的状态文件。源代码、安装操作和 systemd 生命周期本身仍会有少量系统磁盘活动，业务正文不落盘。
+
+观察进程通过 systemd 临时服务运行，MemoryHigh 512 MiB、MemoryMax 768 MiB、禁用 swap、CPUQuota 50%。可用以下命令核对实际资源。
+
+```bash
+sudo systemctl show litellm-upstream-observer \
+  -p ActiveState -p MemoryCurrent -p CPUUsageNSec -p IOReadBytes -p IOWriteBytes
+```
+
+`active=true` 要求服务存活且状态文件持续更新。启动期间仅创建状态文件不表示探针已经就绪。`pids_alive` 用于检查目标进程是否仍存在；目标 PID 在每次 arm 时发现，本窗口内不自动跟随 Pod 替换，发布或重启后应重新 arm。
+
+该模式依赖宿主机 BCC、内核 uprobe 权限和运行中 Python 所用的 OpenSSL 符号，仅支持这些进程经 OpenSSL 发送的 HTTP/1 请求及 Content-Length 请求正文。HTTP/2、其他 TLS 库、其他进程、请求分块编码、事件丢失或响应超过前缀上限都会降低覆盖率。`lost_events` 增长时会清除待配对请求，避免错误关联；不能把未捕获解释为业务没有失败。
+
+相关源码为运维目录的 `upstream.py`、`upstream_cli.py`。解析测试为 `python3 -B -m unittest -v test_upstream.py`，TLS 隔离测试为 `sudo python3 -B integration_upstream.py`。隔离测试只访问本机临时 TLS 服务，验证大请求参数、响应配对和正文不导出，不调用模型供应商。
