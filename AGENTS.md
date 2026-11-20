@@ -108,6 +108,8 @@ Follow these coding conventions for new/updated code (a three-line fix in a lega
 
 Follow conventional commits for commit names and PR titles
 
+For the host-side passive API diagnostics tool, read [docs/diagnostics/passive-tap.zh-CN.md](docs/diagnostics/passive-tap.zh-CN.md) before changing its capture rules or operating it
+
 ## Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs**
